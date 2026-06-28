@@ -36,6 +36,15 @@ jobs:
         id: ver
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
+      - name: Install client dependencies
+        # CI forces pnpm into --frozen-lockfile, which fails with
+        # ERR_PNPM_LOCKFILE_CONFIG_MISMATCH because the committed lockfile lacks
+        # the pnpmfileChecksum for the configDependencies in package.json.
+        # Reconcile the lockfile explicitly; the later frozen install in
+        # `make client-deps` then finds a matching lockfile. pnpm ignores the
+        # npm_config_frozen_lockfile env var, so an explicit flag is required.
+        run: pnpm install --no-frozen-lockfile
+
       - name: Build client and server
         env:
           SKIP_GO_GET: "true"
@@ -44,10 +53,6 @@ jobs:
           # Pin the embedded commit to the full SHA so it matches the image
           # GIT_COMMIT build-arg and does not depend on the shallow checkout.
           GIT_COMMIT_HASH: ${{ github.sha }}
-          # CI defaults pnpm to --frozen-lockfile, which fails because the
-          # committed lockfile is out of sync with package.json configDependencies
-          # (no pnpmfileChecksum recorded). Allow pnpm to reconcile the lockfile.
-          npm_config_frozen_lockfile: "false"
         # ENV=production selects webpack/webpack.production.js (minified bundle),
         # matching the official CE image; the Makefile default is development.
         run: make build-all ENV=production
