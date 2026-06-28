@@ -44,6 +44,10 @@ jobs:
           # Pin the embedded commit to the full SHA so it matches the image
           # GIT_COMMIT build-arg and does not depend on the shallow checkout.
           GIT_COMMIT_HASH: ${{ github.sha }}
+          # CI defaults pnpm to --frozen-lockfile, which fails because the
+          # committed lockfile is out of sync with package.json configDependencies
+          # (no pnpmfileChecksum recorded). Allow pnpm to reconcile the lockfile.
+          npm_config_frozen_lockfile: "false"
         # ENV=production selects webpack/webpack.production.js (minified bundle),
         # matching the official CE image; the Makefile default is development.
         run: make build-all ENV=production
