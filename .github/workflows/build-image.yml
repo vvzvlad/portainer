@@ -1,0 +1,77 @@
+name: Build image
+
+on:
+  push:
+    branches: [develop]
+    tags: ['v*']
+  workflow_dispatch: {}
+
+env:
+  IMAGE: ghcr.io/vvzvlad/portainer-ce
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build client and server
+        env:
+          SKIP_GO_GET: "true"
+          CONTAINER_IMAGE_TAG: ${{ steps.ver.outputs.version }}
+          BUILDNUMBER: ${{ github.run_number }}
+          # Pin the embedded commit to the full SHA so it matches the image
+          # GIT_COMMIT build-arg and does not depend on the shallow checkout.
+          GIT_COMMIT_HASH: ${{ github.sha }}
+        # ENV=production selects webpack/webpack.production.js (minified bundle),
+        # matching the official CE image; the Makefile default is development.
+        run: make build-all ENV=production
+
+      - name: Ensure storybook directory exists
+        # make build-all does not produce dist/storybook, but alpine.Dockerfile
+        # has `COPY dist/storybook* /storybook/`; without a match the docker build fails.
+        run: mkdir -p dist/storybook
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image (linux/amd64, alpine base)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/linux/alpine.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE }}:latest
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
