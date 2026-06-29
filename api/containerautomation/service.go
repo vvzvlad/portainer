@@ -47,7 +47,6 @@ type Service struct {
 	digestClient     *images.DigestClient
 	containerService *docker.ContainerService
 	stackDeployer    deployments.StackDeployer
-	gitService       portainer.GitService
 
 	// notifier receives automation events (update/rollback/failure/heal). The
 	// default is logNotifier; the field is the seam external senders plug into.
@@ -64,14 +63,22 @@ type Service struct {
 
 	retryMu sync.Mutex
 	retries map[string]retryState
+
+	// rolledBackMu guards rolledBack.
+	rolledBackMu sync.Mutex
+	// rolledBack records standalone containers whose update was rolled back, keyed
+	// by endpoint+name, so the auto-update job does not immediately re-pull the
+	// same failed image and roll back again on the next tick (the update->rollback
+	// loop guard, mirroring the auto-heal retries map).
+	rolledBack map[string]rolledBackTarget
 }
 
 // NewService creates a new container automation service. Call Start to schedule
 // the jobs according to the persisted settings. baseCtx is the application
 // shutdown context: it bounds the job operation contexts so a shutdown cancels
-// any in-flight heal/update. The stackDeployer, gitService and containerService
-// are used by the auto-update job; they may be nil only in tests that do not
-// exercise auto-update.
+// any in-flight heal/update. The stackDeployer and containerService are used by
+// the auto-update job; they may be nil only in tests that do not exercise
+// auto-update.
 func NewService(
 	baseCtx context.Context,
 	scheduler *scheduler.Scheduler,
@@ -79,7 +86,6 @@ func NewService(
 	clientFactory *dockerclient.ClientFactory,
 	containerService *docker.ContainerService,
 	stackDeployer deployments.StackDeployer,
-	gitService portainer.GitService,
 ) *Service {
 	if baseCtx == nil {
 		baseCtx = context.Background()
@@ -93,9 +99,9 @@ func NewService(
 		digestClient:     images.NewClientWithRegistry(images.NewRegistryClient(dataStore), clientFactory),
 		containerService: containerService,
 		stackDeployer:    stackDeployer,
-		gitService:       gitService,
 		notifier:         logNotifier{},
 		retries:          make(map[string]retryState),
+		rolledBack:       make(map[string]rolledBackTarget),
 	}
 }
 
@@ -232,6 +238,46 @@ func (s *Service) setRetry(containerID string, state retryState) {
 	defer s.retryMu.Unlock()
 
 	s.retries[containerID] = state
+}
+
+// getRolledBack returns the rolled-back target for a key and whether it exists.
+func (s *Service) getRolledBack(key string) (rolledBackTarget, bool) {
+	s.rolledBackMu.Lock()
+	defer s.rolledBackMu.Unlock()
+
+	rec, ok := s.rolledBack[key]
+
+	return rec, ok
+}
+
+// setRolledBack records a rolled-back target for a key.
+func (s *Service) setRolledBack(key string, rec rolledBackTarget) {
+	s.rolledBackMu.Lock()
+	defer s.rolledBackMu.Unlock()
+
+	s.rolledBack[key] = rec
+}
+
+// clearRolledBack drops the rolled-back record for a key (cooldown elapsed or a
+// new upstream image lifted the skip).
+func (s *Service) clearRolledBack(key string) {
+	s.rolledBackMu.Lock()
+	defer s.rolledBackMu.Unlock()
+
+	delete(s.rolledBack, key)
+}
+
+// pruneRolledBack drops rolled-back records whose cooldown has fully elapsed, so
+// the map cannot grow unbounded. It mirrors pruneRetries.
+func (s *Service) pruneRolledBack(now time.Time) {
+	s.rolledBackMu.Lock()
+	defer s.rolledBackMu.Unlock()
+
+	for key, rec := range s.rolledBack {
+		if now.Sub(rec.at) >= updateRollbackCooldown {
+			delete(s.rolledBack, key)
+		}
+	}
 }
 
 // pruneRetries drops retry state for containers whose retry window has fully

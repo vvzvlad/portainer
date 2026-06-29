@@ -36,7 +36,50 @@ const (
 	// Docker API blip must not trigger a false rollback, so the gate keeps polling
 	// and only gives up once the failures are clearly not transient.
 	maxConsecutiveInspectErrors = 3
+	// updateRollbackCooldown is how long a standalone container whose update was
+	// rolled back is skipped from updating to the SAME failed image again. It
+	// breaks the update->rollback loop: without it a persistently-unhealthy new
+	// image would be re-pulled and rolled back on every poll tick. A genuinely new
+	// upstream image (a changed remote digest) is not blocked; the cooldown only
+	// suppresses the exact target that just failed. It is generous because a broken
+	// upstream image is normally fixed by a new push, which lifts the skip at once.
+	updateRollbackCooldown = 24 * time.Hour
 )
+
+// rolledBackTarget records that a standalone container's update to a specific
+// remote image was rolled back, so the same target is skipped until the cooldown
+// elapses or the upstream digest changes.
+type rolledBackTarget struct {
+	// ref is the container's original image reference (the re-tag target), used to
+	// re-resolve the current remote digest on later ticks.
+	ref string
+	// digest is the remote image digest that failed the health gate. A later tick
+	// resolving a DIFFERENT digest (a new upstream push) is allowed through; the
+	// same digest is skipped until the cooldown elapses. Empty when it could not be
+	// resolved at rollback time, in which case the guard skips conservatively.
+	digest string
+	// at is when the rollback happened; the cooldown is measured from it.
+	at time.Time
+}
+
+// decideUpdateSkip is the pure core of the update->rollback loop guard: given a
+// recorded rolled-back target and the freshly-resolved current remote digest, it
+// reports whether the standalone update must be skipped this tick. The skip holds
+// only while the cooldown is open AND the remote still points at the same failed
+// image; once the cooldown elapses the skip is lifted. An unknown recorded digest
+// is skipped conservatively (we cannot prove the target changed). Mirrors the
+// decideRestart pattern so it is unit-testable without Docker.
+func decideUpdateSkip(rec rolledBackTarget, currentDigest string, now time.Time, cooldown time.Duration) bool {
+	if now.Sub(rec.at) >= cooldown {
+		return false
+	}
+
+	if rec.digest == "" {
+		return true
+	}
+
+	return currentDigest == rec.digest
+}
 
 // rollbackOutcome is the decision produced from a single health sample.
 type rollbackOutcome int
@@ -296,7 +339,7 @@ func (s *Service) gateDeadlineResult() gateResult {
 // If any step fails the previous image cannot be safely restored, so the
 // (unhealthy) new container is left running rather than destroyed, and a loud
 // failure notification is emitted.
-func (s *Service) rollback(cli *dockerclient.Client, endpoint *portainer.Endpoint, newContainerID, oldImageID, originalRef string) {
+func (s *Service) rollback(cli *dockerclient.Client, endpoint *portainer.Endpoint, newContainerID, oldImageID, originalRef, containerName string) {
 	endpointID := int(endpoint.ID)
 
 	log.Warn().Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
@@ -336,4 +379,9 @@ func (s *Service) rollback(cli *dockerclient.Client, endpoint *portainer.Endpoin
 		Kind: EventRollback, EndpointID: endpointID, ContainerID: newContainerID,
 		Image: originalRef, Message: "rolled back to previous image after failed health check",
 	})
+
+	// Record the failed target so the next poll does not immediately re-pull the
+	// same broken image and roll back again (the update->rollback loop). Recorded
+	// only after a SUCCESSFUL rollback; a changed remote digest later lifts the skip.
+	s.recordRolledBack(endpoint, containerName, originalRef)
 }

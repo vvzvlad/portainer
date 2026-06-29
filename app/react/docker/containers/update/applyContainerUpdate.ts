@@ -43,9 +43,12 @@ async function redeployStackWithPull(stack: Stack, pullImage: boolean) {
 
 /**
  * Shared "apply an image update" primitive. Decides standalone-vs-stack-vs-external
- * and runs the matching mutation. This is the single code path behind the
- * "Update now" button, the bulk "Update selected" action and (future M4) the
- * auto-update job, guaranteeing manual and automatic updates behave identically.
+ * and runs the matching mutation. This is the single frontend code path behind the
+ * "Update now" button and the bulk "Update selected" action, guaranteeing both
+ * manual flows behave identically. The backend auto-update daemon does NOT call
+ * this primitive: it is a separate Go implementation
+ * (resolveContainerUpdateRouting / groupContainersForUpdate in
+ * api/containerautomation) that mirrors the same routing on the server.
  *
  * A stack-managed container is ALWAYS routed through stack redeploy so it stays
  * part of its stack; an externally-managed compose container is refused rather

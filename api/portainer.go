@@ -1156,6 +1156,33 @@ type (
 		AsyncMode bool `json:"AsyncMode,omitempty" example:"false"`
 	}
 
+	// ContainerAutoHealSettings holds the native auto-heal settings.
+	ContainerAutoHealSettings struct {
+		Enabled       bool   `json:"Enabled"`
+		CheckInterval string `json:"CheckInterval" example:"30s"`
+		Scope         string `json:"Scope" example:"labeled"` // "labeled" | "all"
+	}
+
+	// ContainerAutoUpdateSettings holds the native auto-update settings.
+	ContainerAutoUpdateSettings struct {
+		Enabled      bool   `json:"Enabled"`
+		PollInterval string `json:"PollInterval" example:"6h"`
+		Scope        string `json:"Scope" example:"labeled"` // "labeled" | "all"
+		Cleanup      bool   `json:"Cleanup"`                 // remove dangling old images after a standalone update
+		// RollbackOnFailure health-gates a standalone update: if the new
+		// container does not become healthy within RollbackTimeout, it is
+		// recreated back on the previous image. Standalone-only (M5).
+		RollbackOnFailure bool   `json:"RollbackOnFailure"`
+		RollbackTimeout   string `json:"RollbackTimeout" example:"120s"`
+	}
+
+	// ContainerAutomationSettings holds native container automation settings
+	// (auto-heal and auto-update).
+	ContainerAutomationSettings struct {
+		AutoHeal   ContainerAutoHealSettings   `json:"AutoHeal"`
+		AutoUpdate ContainerAutoUpdateSettings `json:"AutoUpdate"`
+	}
+
 	// Settings represents the application settings
 	Settings struct {
 		// URL to a logo that will be displayed on the login page as well as on top of the sidebar. Will use default Portainer logo when value is empty string
@@ -1218,24 +1245,7 @@ type (
 		ForceSecureCookies bool `json:"ForceSecureCookies" example:"false"`
 
 		// ContainerAutomation holds native container automation settings.
-		ContainerAutomation struct {
-			AutoHeal struct {
-				Enabled       bool   `json:"Enabled"`
-				CheckInterval string `json:"CheckInterval" example:"30s"`
-				Scope         string `json:"Scope" example:"labeled"` // "labeled" | "all"
-			} `json:"AutoHeal"`
-			AutoUpdate struct {
-				Enabled      bool   `json:"Enabled"`
-				PollInterval string `json:"PollInterval" example:"6h"`
-				Scope        string `json:"Scope" example:"labeled"` // "labeled" | "all"
-				Cleanup      bool   `json:"Cleanup"`                 // remove dangling old images after a standalone update
-				// RollbackOnFailure health-gates a standalone update: if the new
-				// container does not become healthy within RollbackTimeout, it is
-				// recreated back on the previous image. Standalone-only (M5).
-				RollbackOnFailure bool   `json:"RollbackOnFailure"`
-				RollbackTimeout   string `json:"RollbackTimeout" example:"120s"`
-			} `json:"AutoUpdate"`
-		} `json:"ContainerAutomation"`
+		ContainerAutomation ContainerAutomationSettings `json:"ContainerAutomation"`
 	}
 
 	// SnapshotJob represents a scheduled job that can create environment(endpoint) snapshots

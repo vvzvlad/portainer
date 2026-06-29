@@ -68,7 +68,7 @@ type settingsUpdatePayload struct {
 	EdgePortainerURL *string `json:"EdgePortainerURL"`
 	// ForceSecureCookies forces the Secure attribute on auth cookies regardless of the detected scheme
 	ForceSecureCookies *bool `example:"false"`
-	// Native container automation settings (auto-heal)
+	// Native container automation settings (auto-heal / auto-update)
 	ContainerAutomation *containerAutomationSettingsPayload
 }
 
@@ -204,8 +204,9 @@ func (handler *Handler) settingsUpdate(w http.ResponseWriter, r *http.Request) *
 		return response.TxErrorResponse(err)
 	}
 
-	// Re-apply container automation settings so the auto-heal job is rescheduled
-	// (or stopped) with the new interval/scope after a successful save.
+	// Re-apply container automation settings so the auto-heal and auto-update jobs
+	// are rescheduled (or stopped) with the new interval/scope after a successful
+	// save.
 	if handler.ContainerAutomationService != nil {
 		if err := handler.ContainerAutomationService.Reload(); err != nil {
 			log.Warn().Err(err).Msg("unable to reload container automation settings")

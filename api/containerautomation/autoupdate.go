@@ -2,6 +2,8 @@ package containerautomation
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
@@ -81,6 +83,10 @@ func (s *Service) update() error {
 
 		s.updateEndpoint(endpoint, scope, opts)
 	}
+
+	// Drop rolled-back records whose cooldown has fully elapsed (mirrors auto-heal's
+	// pruneRetries), so the loop-guard map cannot grow unbounded.
+	s.pruneRolledBack(time.Now())
 
 	return nil
 }
@@ -171,7 +177,7 @@ func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, opt
 			continue
 		}
 
-		candidates = append(candidates, UpdateCandidate{ID: c.ID, ImageID: c.ImageID, Labels: c.Labels})
+		candidates = append(candidates, UpdateCandidate{ID: c.ID, Name: containerName(c.Names), ImageID: c.ImageID, Labels: c.Labels})
 	}
 
 	// Route and de-duplicate: one redeploy per stack per tick.
@@ -230,6 +236,17 @@ func (s *Service) stackLookupForEndpoint(endpointID portainer.EndpointID) func(p
 // (never cleanup).
 func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer.Endpoint, c UpdateCandidate, opts updateOptions) {
 	endpointID := int(endpoint.ID)
+
+	// Update->rollback loop guard: if this container's update was rolled back
+	// recently and the remote still points at the SAME failed image, skip it until
+	// the cooldown elapses. A genuinely new upstream image (a changed remote digest)
+	// is not blocked.
+	rollbackMapKey := rollbackKey(endpoint.ID, c.Name)
+	if rec, ok := s.getRolledBack(rollbackMapKey); ok && s.shouldSkipRolledBack(rollbackMapKey, rec) {
+		log.Info().Str("container_id", c.ID).Str("container", c.Name).Str("image", rec.ref).Int("endpoint_id", endpointID).
+			Msg("auto-update: skipping update, a recent rollback failed on this image and the remote is unchanged (cooldown)")
+		return
+	}
 
 	// Capture the pre-update image identity for a possible rollback. The container
 	// list gives us the old image id; an inspect adds the original reference (re-tag
@@ -307,7 +324,7 @@ func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer
 			// back and do not emit an event (we never observed a real failure).
 			return
 		case gateRollback:
-			s.rollback(cli, endpoint, newContainer.ID, oldImageID, originalRef)
+			s.rollback(cli, endpoint, newContainer.ID, oldImageID, originalRef, c.Name)
 			return
 		case gateHealthy:
 			// Confirmed healthy: fall through to emit "updated" and clean up.
@@ -324,6 +341,104 @@ func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer
 	if opts.cleanup && newContainer != nil && newContainer.Image != oldImageID {
 		s.cleanupOldImage(cli, endpoint, oldImageID)
 	}
+}
+
+// containerName returns a container's primary name without the leading slash, or
+// "" when none is reported. The name is stable across a recreate (Recreate
+// assigns a new container ID but preserves the name), so it keys the rolled-back
+// loop-guard map.
+func containerName(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+
+	return strings.TrimPrefix(names[0], "/")
+}
+
+// rollbackKey identifies a standalone container in the rolled-back map by its
+// endpoint and (recreate-stable) name. A recreate assigns a new container ID, so
+// the ID cannot key state across an update; the name is preserved.
+func rollbackKey(endpointID portainer.EndpointID, name string) string {
+	return fmt.Sprintf("%d/%s", int(endpointID), name)
+}
+
+// resolveRemoteDigest fetches the current remote image digest for a reference. It
+// tells whether a rolled-back container's upstream target is still the same
+// failed image (skip) or a new push (retry).
+func (s *Service) resolveRemoteDigest(ctx context.Context, ref string) (string, error) {
+	img, err := images.ParseImage(images.ParseImageOptions{Name: ref})
+	if err != nil {
+		return "", err
+	}
+
+	dig, err := s.digestClient.RemoteDigest(ctx, img)
+	if err != nil {
+		return "", err
+	}
+
+	return dig.String(), nil
+}
+
+// recordRolledBack stores the failed target after a successful rollback so the
+// next poll skips re-pulling the same broken image. The failed remote digest is
+// resolved now (the registry is reachable, the image was just pulled); if it
+// cannot be resolved the record is still stored with an empty digest and the
+// guard skips conservatively until the cooldown elapses.
+func (s *Service) recordRolledBack(endpoint *portainer.Endpoint, name, ref string) {
+	if name == "" {
+		// Without a stable key we cannot reliably match the container next tick.
+		log.Debug().Str("image", ref).Int("endpoint_id", int(endpoint.ID)).
+			Msg("auto-update: rolled-back container has no name, loop guard not recorded")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(s.baseCtx, statusCheckTimeout)
+	digest, err := s.resolveRemoteDigest(ctx, ref)
+	cancel()
+	if err != nil {
+		log.Debug().Err(err).Str("image", ref).Int("endpoint_id", int(endpoint.ID)).
+			Msg("auto-update: could not resolve failed remote digest, loop guard will skip conservatively until cooldown")
+	}
+
+	s.setRolledBack(rollbackKey(endpoint.ID, name), rolledBackTarget{ref: ref, digest: digest, at: time.Now()})
+}
+
+// shouldSkipRolledBack reports whether a standalone container must be skipped this
+// tick to avoid the update->rollback loop, clearing the record once the skip no
+// longer applies (cooldown elapsed or a new upstream image). It resolves the
+// current remote digest so a genuinely new image is never blocked.
+func (s *Service) shouldSkipRolledBack(key string, rec rolledBackTarget) bool {
+	now := time.Now()
+
+	// Fast paths that avoid a registry call: cooldown elapsed -> clear & proceed;
+	// no recorded digest -> skip conservatively while the cooldown is open.
+	if now.Sub(rec.at) >= updateRollbackCooldown {
+		s.clearRolledBack(key)
+		return false
+	}
+	if rec.digest == "" {
+		return true
+	}
+
+	ctx, cancel := context.WithTimeout(s.baseCtx, statusCheckTimeout)
+	currentDigest, err := s.resolveRemoteDigest(ctx, rec.ref)
+	cancel()
+	if err != nil {
+		// Cannot confirm the upstream target changed: stay conservative and skip to
+		// avoid re-entering the loop, until the cooldown elapses.
+		log.Debug().Err(err).Str("image", rec.ref).
+			Msg("auto-update: cannot resolve remote digest for a rolled-back container, skipping until cooldown")
+		return true
+	}
+
+	if decideUpdateSkip(rec, currentDigest, now, updateRollbackCooldown) {
+		return true
+	}
+
+	// New upstream image (changed digest): the failed target is gone, clear the
+	// record and let the update proceed.
+	s.clearRolledBack(key)
+	return false
 }
 
 // cleanupOldImage attempts a conservative removal of the previous image after a

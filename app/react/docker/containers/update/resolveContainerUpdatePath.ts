@@ -7,7 +7,8 @@ import { ContainerUpdatePath } from './types';
 /**
  * Decide how a container's image update must be applied, given the list of
  * Portainer-managed stacks. Pure and side-effect free so it can be unit-tested
- * and reused by the details button, the bulk action and the M4 auto-update job.
+ * and reused by the details button and the bulk action. (The backend auto-update
+ * daemon mirrors the same routing separately in Go.)
  *
  * - No compose project label -> `standalone` (recreate-with-pull).
  * - Compose project that matches a Portainer Docker Compose `Stack` (same name +

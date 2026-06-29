@@ -226,3 +226,54 @@ func TestParseRollbackTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestDecideUpdateSkip(t *testing.T) {
+	now := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	cooldown := 24 * time.Hour
+
+	tests := []struct {
+		name          string
+		rec           rolledBackTarget
+		currentDigest string
+		want          bool
+	}{
+		{
+			name:          "same digest within cooldown is skipped",
+			rec:           rolledBackTarget{digest: "sha256:aaa", at: now.Add(-1 * time.Hour)},
+			currentDigest: "sha256:aaa",
+			want:          true,
+		},
+		{
+			name:          "new digest within cooldown is not skipped",
+			rec:           rolledBackTarget{digest: "sha256:aaa", at: now.Add(-1 * time.Hour)},
+			currentDigest: "sha256:bbb",
+			want:          false,
+		},
+		{
+			name:          "same digest after cooldown is not skipped",
+			rec:           rolledBackTarget{digest: "sha256:aaa", at: now.Add(-25 * time.Hour)},
+			currentDigest: "sha256:aaa",
+			want:          false,
+		},
+		{
+			name:          "unknown recorded digest is skipped conservatively within cooldown",
+			rec:           rolledBackTarget{digest: "", at: now.Add(-1 * time.Hour)},
+			currentDigest: "sha256:aaa",
+			want:          true,
+		},
+		{
+			name:          "unknown recorded digest after cooldown is not skipped",
+			rec:           rolledBackTarget{digest: "", at: now.Add(-25 * time.Hour)},
+			currentDigest: "sha256:aaa",
+			want:          false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := decideUpdateSkip(tt.rec, tt.currentDigest, now, cooldown); got != tt.want {
+				t.Errorf("decideUpdateSkip() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

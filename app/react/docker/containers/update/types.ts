@@ -5,8 +5,8 @@ import { ContainerId } from '../types';
 
 /**
  * Minimal context needed to apply an image update to a single container,
- * independent of whether it comes from the details view, the bulk action or
- * (future M4) the auto-update job.
+ * independent of whether it comes from the details view or the bulk action.
+ * (The backend auto-update daemon mirrors the same routing separately in Go.)
  */
 export interface ContainerUpdateContext {
   id: ContainerId;

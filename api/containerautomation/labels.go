@@ -28,27 +28,6 @@ const (
 	defaultRetries     = 3
 )
 
-// parseEnable resolves the enable label (primary first, alias second).
-// It returns the parsed boolean value and whether the label was present at all.
-// Invalid values are treated as false but still count as "present".
-func parseEnable(labels map[string]string) (enabled bool, present bool) {
-	raw, ok := labels[labelEnable]
-	if !ok {
-		raw, ok = labels[labelEnableAlias]
-	}
-
-	if !ok {
-		return false, false
-	}
-
-	value, err := strconv.ParseBool(raw)
-	if err != nil {
-		return false, true
-	}
-
-	return value, true
-}
-
 // InScope reports whether a container is subject to auto-heal given the global
 // scope and the container's labels.
 //
@@ -56,7 +35,7 @@ func parseEnable(labels map[string]string) (enabled bool, present bool) {
 //     enable label set to false.
 //   - "labeled" (default): only containers with the enable label set to true.
 func InScope(scope string, labels map[string]string) bool {
-	enabled, present := parseEnable(labels)
+	enabled, present := boolLabel(labels, labelEnable, labelEnableAlias)
 
 	switch scope {
 	case ScopeAll:
@@ -179,7 +158,10 @@ func resolveContainerUpdateRouting(labels map[string]string, stackLookup func(pr
 
 // UpdateCandidate is an outdated, in-scope container considered for auto-update.
 type UpdateCandidate struct {
-	ID      string
+	ID string
+	// Name is the container's primary name (no leading slash). It is stable across
+	// a recreate and keys the update->rollback loop guard.
+	Name    string
 	ImageID string
 	Labels  map[string]string
 }
