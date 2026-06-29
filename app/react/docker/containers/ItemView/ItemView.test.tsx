@@ -80,6 +80,47 @@ describe('ItemView', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('keeps the stack trail without a stack id for an external stack', async () => {
+    useCurrentStateAndParamsMock.mockReturnValue({
+      state: { name: 'docker.stacks.stack.container' },
+      params: {
+        id: 'container-id-123',
+        endpointId: '1',
+        nodeName: undefined,
+        name: 'ext-stack',
+        type: '2',
+        external: 'true',
+        // stackId/regular are present in the inherited route params but the
+        // external branch must NOT propagate them. They are set here to
+        // non-empty values so the `not.toContain` assertions below actually
+        // catch a fall-through-to-regular regression instead of passing vacuously.
+        stackId: '7',
+        regular: 'true',
+        tab: 'logs',
+      },
+    });
+
+    renderComponent();
+
+    // Stack trail is shown instead of the global Containers crumb.
+    const stacksCrumb = await screen.findByRole('link', { name: 'Stacks' });
+    expect(stacksCrumb).toBeVisible();
+
+    const stackCrumb = screen.getByRole('link', { name: 'ext-stack' });
+    expect(stackCrumb).toBeVisible();
+    // External stacks have no DB id, so the back-link is built from
+    // name/type/external only and must omit stackId and regular.
+    const href = stackCrumb.getAttribute('href');
+    expect(href).toContain('external=true');
+    expect(href).toContain('type=2');
+    expect(href).not.toContain('stackId=');
+    expect(href).not.toContain('regular=');
+
+    expect(
+      screen.queryByRole('link', { name: 'Containers' })
+    ).not.toBeInTheDocument();
+  });
+
   it('renders health status section when container has health data', async () => {
     renderComponent({
       container: {
