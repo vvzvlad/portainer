@@ -1,6 +1,5 @@
 import { AccessHeaders } from '../authorization-guard';
 import { rolesView } from './views/roles';
-import { accessViewer } from './components/access-viewer';
 
 import { RoleService } from './services/role.service';
 import { RolesFactory } from './services/role.rest';
@@ -8,7 +7,6 @@ import { RolesFactory } from './services/role.rest';
 angular
   .module('portainer.rbac', ['ngResource'])
   .constant('API_ENDPOINT_ROLES', 'api/roles')
-  .component('accessViewer', accessViewer)
   .component('rolesView', rolesView)
   .factory('RoleService', RoleService)
   .factory('Roles', RolesFactory)

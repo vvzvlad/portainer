@@ -1,5 +1,3 @@
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-
 export default class DockerFeaturesConfigurationController {
   /* @ngInject */
   constructor($async, $scope, $state, EndpointService, SettingsService, Notifications, StateManager) {
@@ -10,9 +8,6 @@ export default class DockerFeaturesConfigurationController {
     this.SettingsService = SettingsService;
     this.Notifications = Notifications;
     this.StateManager = StateManager;
-
-    this.limitedFeatureAutoUpdate = FeatureId.HIDE_AUTO_UPDATE_WINDOW;
-    this.limitedFeatureUpToDateImage = FeatureId.IMAGE_UP_TO_DATE_INDICATOR;
 
     this.formValues = {
       enableHostManagementFeatures: false,

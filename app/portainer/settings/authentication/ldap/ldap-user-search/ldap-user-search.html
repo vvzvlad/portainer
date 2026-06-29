@@ -9,7 +9,6 @@
       show-username-format="$ctrl.showUsernameFormat"
       base-filter="{{ $ctrl.baseFilter }}"
       on-remove-click="($ctrl.onRemoveClick)"
-      limited-feature-id="$ctrl.limitedFeatureId"
     ></ldap-user-search-item>
   </div>
 
@@ -19,15 +18,13 @@
         class="label label-default interactive vertical-center"
         style="border: 0"
         ng-click="$ctrl.onAddClick()"
-        limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-        limited-feature-tabindex="-1"
       >
         <pr-icon icon="'plus-circle'"></pr-icon>
         Add user search configuration
       </button>
     </div>
     <div class="col-sm-12" style="margin-top: 10px">
-      <button class="btn btm-sm btn-primary" type="button" ng-click="$ctrl.search()" limited-feature-dir="{{::$ctrl.limitedFeatureId}}" limited-feature-tabindex="-1">
+      <button class="btn btm-sm btn-primary" type="button" ng-click="$ctrl.search()">
         Display Users
       </button>
     </div>

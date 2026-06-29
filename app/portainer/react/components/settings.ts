@@ -9,7 +9,6 @@ import { LDAPUsersTable } from '@/react/portainer/settings/AuthenticationView/LD
 import { LDAPGroupsTable } from '@/react/portainer/settings/AuthenticationView/LDAPAuth/LDAPGroupsTable';
 import { ApplicationSettingsPanel } from '@/react/portainer/settings/SettingsView/ApplicationSettingsPanel';
 import { KubeSettingsPanel } from '@/react/portainer/settings/SettingsView/KubeSettingsPanel';
-import { HelmCertPanel } from '@/react/portainer/settings/SettingsView/HelmCertPanel';
 import { HiddenContainersPanel } from '@/react/portainer/settings/SettingsView/HiddenContainersPanel/HiddenContainersPanel';
 import { SSLSettingsPanelWrapper } from '@/react/portainer/settings/SettingsView/SSLSettingsPanel/SSLSettingsPanel';
 import { AuthStyleField } from '@/react/portainer/settings/AuthenticationView/OAuth';
@@ -40,7 +39,7 @@ export const settingsModule = angular
   .component('ldapGroupsDatatable', r2a(LDAPGroupsTable, ['dataset']))
   .component(
     'ldapSettingsDnBuilder',
-    r2a(DnBuilder, ['value', 'onChange', 'suffix', 'label', 'limitedFeatureId'])
+    r2a(DnBuilder, ['value', 'onChange', 'suffix', 'label'])
   )
   .component(
     'ldapSettingsGroupDnBuilder',
@@ -50,7 +49,6 @@ export const settingsModule = angular
       'suffix',
       'index',
       'onRemoveClick',
-      'limitedFeatureId',
     ])
   )
   .component(
@@ -61,7 +59,6 @@ export const settingsModule = angular
     'sslSettingsPanel',
     r2a(withReactQuery(SSLSettingsPanelWrapper), [])
   )
-  .component('helmCertPanel', r2a(withReactQuery(HelmCertPanel), []))
   .component(
     'hiddenContainersPanel',
     r2a(withUIRouter(withReactQuery(HiddenContainersPanel)), [])
@@ -92,12 +89,7 @@ export const settingsModule = angular
   )
   .component(
     'ldapSettingsTestLogin',
-    r2a(withReactQuery(LdapSettingsTestLogin), [
-      'settings',
-      'limitedFeatureId',
-      'showBeIndicatorIfNeeded',
-      'isLimitedFeatureSelfContained',
-    ])
+    r2a(withReactQuery(LdapSettingsTestLogin), ['settings'])
   )
   .component(
     'ldapSecurityFieldset',
@@ -106,7 +98,6 @@ export const settingsModule = angular
       'onChange',
       'errors',
       'uploadState',
-      'limitedFeatureId',
       'title',
     ])
   )
@@ -127,8 +118,6 @@ export const settingsModule = angular
         'onAutoPopulateChange',
         'selectedAdminGroups',
         'onSelectedAdminGroupsChange',
-        'limitedFeatureId',
-        'isLimitedFeatureSelfContained',
       ]
     )
   ).name;

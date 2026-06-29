@@ -1,5 +1,3 @@
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-
 import { BoxSelectorOption } from '@@/BoxSelector/types';
 import { IconProps } from '@@/Icon';
 
@@ -8,8 +6,7 @@ export function buildOption<T extends number | string>(
   icon: IconProps['icon'],
   label: BoxSelectorOption<T>['label'],
   description: BoxSelectorOption<T>['description'],
-  value: BoxSelectorOption<T>['value'],
-  feature?: FeatureId
+  value: BoxSelectorOption<T>['value']
 ): BoxSelectorOption<T> {
-  return { id, icon, label, description, value, feature };
+  return { id, icon, label, description, value };
 }

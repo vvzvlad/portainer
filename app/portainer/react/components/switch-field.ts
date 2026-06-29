@@ -13,7 +13,6 @@ export const switchField = r2a(SwitchField, [
   'data-cy',
   'disabled',
   'onChange',
-  'featureId',
   'switchClass',
   'setTooltipHtmlMessage',
   'valueExplanation',

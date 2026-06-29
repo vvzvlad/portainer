@@ -1,9 +1,7 @@
 import angular from 'angular';
 
-import { adSettings } from './ad-settings';
 import { ldapSettings } from './ldap-settings';
 import { ldapSettingsCustom } from './ldap-settings-custom';
-import { ldapSettingsOpenLdap } from './ldap-settings-openldap';
 
 import { ldapConnectivityCheck } from './ldap-connectivity-check';
 import { ldapGroupSearch } from './ldap-group-search';
@@ -22,13 +20,11 @@ export default angular
   .service('LDAP', LDAP)
   .component('ldapConnectivityCheck', ldapConnectivityCheck)
   .component('ldapSettings', ldapSettings)
-  .component('adSettings', adSettings)
   .component('ldapGroupSearch', ldapGroupSearch)
   .component('ldapGroupSearchItem', ldapGroupSearchItem)
   .component('ldapUserSearch', ldapUserSearch)
   .component('ldapUserSearchItem', ldapUserSearchItem)
   .component('ldapSettingsCustom', ldapSettingsCustom)
   .component('ldapCustomGroupSearch', ldapCustomGroupSearch)
-  .component('ldapSettingsOpenLdap', ldapSettingsOpenLdap)
   .component('ldapSettingsSecurity', ldapSettingsSecurity)
   .component('ldapCustomUserSearch', ldapCustomUserSearch).name;

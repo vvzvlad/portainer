@@ -53,15 +53,6 @@
         Add user search configuration
       </button>
     </div>
-    <div class="col-sm-12" style="margin-top: 10px">
-      <be-teaser-button
-        feature-id="$ctrl.limitedFeatureId"
-        heading="'Display Users'"
-        message="'Allows you to display users from your LDAP server.'"
-        button-text="'Display Users'"
-        button-class-name="'!ml-0'"
-      ></be-teaser-button>
-    </div>
   </div>
 
   <ldap-users-datatable ng-if="$ctrl.showTable" dataset="$ctrl.users"></ldap-users-datatable>
