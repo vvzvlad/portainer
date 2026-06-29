@@ -34,7 +34,7 @@ export interface ContainerImageStatus {
 // is enough and avoids hammering the endpoint when many rows are visible at once.
 const STALE_TIME = 5 * 60 * 1000; // 5 minutes
 
-async function getContainerImageStatus(
+export async function getContainerImageStatus(
   environmentId: EnvironmentId,
   containerId: ContainerId,
   nodeName?: string
