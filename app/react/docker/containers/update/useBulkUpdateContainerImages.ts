@@ -7,17 +7,16 @@ import {
   notifyWarning,
 } from '@/portainer/services/notifications';
 
-import { getContainerImageStatus } from '../queries/useContainerImageStatus';
+import {
+  getContainerImageStatus,
+  STALE_TIME,
+} from '../queries/useContainerImageStatus';
 import { queryKeys as containerQueryKeys } from '../queries/query-keys';
 
 import { applyContainerUpdate } from './applyContainerUpdate';
 import { groupContainersForUpdate } from './groupContainersForUpdate';
 import { invalidateContainerUpdateQueries } from './useUpdateContainerImage';
 import { ContainerUpdateContext } from './types';
-
-// Mirror useContainerImageStatus's client-side staleTime so the bulk action
-// reuses cached badge statuses instead of re-hitting the registry per row.
-const STATUS_STALE_TIME = 5 * 60 * 1000;
 
 interface BulkUpdateParams {
   contexts: ContainerUpdateContext[];
@@ -66,7 +65,7 @@ async function bulkUpdate(
               context.id,
               context.nodeName
             ),
-          { staleTime: STATUS_STALE_TIME }
+          { staleTime: STALE_TIME }
         )
         .then((status) => status.Status)
         .catch(() => 'error' as const)

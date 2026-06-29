@@ -13,6 +13,13 @@ import { ContainerUpdateContext } from './types';
  * Refresh the data affected by a container image update: the container itself,
  * its image-status badge (so it flips away from "outdated") and the stacks
  * list (a stack redeploy bumps its deployment info).
+ *
+ * Note: for a stack redeploy this invalidates only the representative container's
+ * badge, not those of its siblings in the same stack — a stack redeploy updates
+ * every container, but only `context` is passed here. The sibling badges refresh
+ * on their next natural refetch (staleTime / window focus) or a manual reload.
+ * They are deliberately not force-invalidated from this shared helper (also used
+ * by the single standalone "Update now") to avoid an endpoint-wide badge refetch.
  */
 export function invalidateContainerUpdateQueries(
   queryClient: QueryClient,

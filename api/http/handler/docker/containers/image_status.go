@@ -62,8 +62,10 @@ func (handler *Handler) imageStatus(w http.ResponseWriter, r *http.Request) *htt
 	}
 
 	// The detection engine (zlib/CE) routes outbound registry calls through the
-	// RegistryClient, which honors the encrypted credential store and the outbound
-	// SSRF/AllowList. It caches results for 24h and skips digest-pinned/local-only images.
+	// RegistryClient, which honors the encrypted credential store. It caches results
+	// briefly and skips digest-pinned/local-only images. Note: the outbound registry
+	// HEAD (RemoteDigest -> docker.GetDigest) is NOT run through an SSRF/AllowList
+	// filter; this mirrors upstream ContainersImageStatus behaviour.
 	digestClient := images.NewClientWithRegistry(images.NewRegistryClient(handler.dataStore), handler.dockerClientFactory)
 
 	status, err := digestClient.ContainerImageStatus(r.Context(), containerID, endpoint, nodeName)

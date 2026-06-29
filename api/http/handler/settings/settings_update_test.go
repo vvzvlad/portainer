@@ -46,6 +46,46 @@ func TestSettingsUpdatePayloadValidateAutoUpdatePollInterval(t *testing.T) {
 	}
 }
 
+// TestSettingsUpdatePayloadValidateAutoHealCheckInterval covers the auto-heal
+// check-interval floor (F6): durations below minAutoHealCheckInterval (1s), as
+// well as malformed or non-positive durations, must be rejected, mirroring the
+// auto-update poll-interval validation.
+func TestSettingsUpdatePayloadValidateAutoHealCheckInterval(t *testing.T) {
+	cases := []struct {
+		name     string
+		interval string
+		wantErr  bool
+	}{
+		{name: "one millisecond is below the floor", interval: "1ms", wantErr: true},
+		{name: "half a second is below the floor", interval: "500ms", wantErr: true},
+		{name: "exactly one second is allowed", interval: "1s", wantErr: false},
+		{name: "thirty seconds is allowed", interval: "30s", wantErr: false},
+		{name: "zero is rejected", interval: "0s", wantErr: true},
+		{name: "negative is rejected", interval: "-5s", wantErr: true},
+		{name: "unparseable is rejected", interval: "soon", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := settingsUpdatePayload{
+				ContainerAutomation: &containerAutomationSettingsPayload{
+					AutoHeal: &autoHealSettingsPayload{
+						CheckInterval: strptr(tc.interval),
+					},
+				},
+			}
+
+			err := payload.Validate(httptest.NewRequest("PUT", "/settings", nil))
+			if tc.wantErr && err == nil {
+				t.Errorf("Validate(%q) = nil, want error", tc.interval)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("Validate(%q) = %v, want nil", tc.interval, err)
+			}
+		})
+	}
+}
+
 // TestSettingsUpdatePayloadValidateRollbackTimeout covers the M5 health-gated
 // rollback timeout and its floor (F7): it must be a Go duration of at least
 // minAutoUpdateRollbackTimeout (10s), rejecting near-zero, non-positive and

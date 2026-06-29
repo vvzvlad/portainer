@@ -9,7 +9,8 @@ const durationPattern = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
 
 // Lower bound for the poll interval, kept in sync with the backend
 // (minAutoUpdatePollInterval). Polling more often than this only adds registry
-// load: the image-status cache is long-lived, so a sub-minute interval is wasteful.
+// load: the image-status cache (~5m) bounds detection latency, so a sub-minute
+// interval is wasteful.
 const minPollIntervalSeconds = 60;
 
 // Lower bound for the rollback timeout, kept in sync with the backend

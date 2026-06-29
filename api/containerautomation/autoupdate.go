@@ -237,6 +237,19 @@ func (s *Service) stackLookupForEndpoint(endpointID portainer.EndpointID) func(p
 func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer.Endpoint, c UpdateCandidate, opts updateOptions) {
 	endpointID := int(endpoint.ID)
 
+	// Loop-guard safety: the rolled-back map is keyed by endpoint+name (the only
+	// identifier that survives a recreate). An unnamed container cannot be recorded
+	// (recordRolledBack skips it), so with rollback enabled a container that keeps
+	// failing its health gate would update->rollback every tick with NO suppression.
+	// Skip the unnamed case when rollback is on so it cannot enter that
+	// unsuppressable loop; detection/badge refresh already happened upstream and is
+	// unaffected. (With rollback off there is no rollback to loop, so we proceed.)
+	if skipUnnamedForRollback(opts.rollback, c.Name) {
+		log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).
+			Msg("auto-update: skipping unnamed standalone container, rollback is enabled but there is no stable name to key the loop guard")
+		return
+	}
+
 	// Update->rollback loop guard: if this container's update was rolled back
 	// recently and the remote still points at the SAME failed image, skip it until
 	// the cooldown elapses. A genuinely new upstream image (a changed remote digest)
@@ -260,7 +273,12 @@ func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer
 	var startPeriod time.Duration
 	healthGated := false
 	if opts.rollback {
-		if inspect, err := cli.ContainerInspect(s.baseCtx, c.ID); err != nil {
+		// Bound the inspect like every other engine call so a hung/unreachable engine
+		// cannot block the whole sequential tick until shutdown.
+		inspectCtx, inspectCancel := context.WithTimeout(s.baseCtx, endpointTimeout)
+		inspect, err := cli.ContainerInspect(inspectCtx, c.ID)
+		inspectCancel()
+		if err != nil {
 			log.Warn().Err(err).Str("container_id", c.ID).Int("endpoint_id", endpointID).
 				Msg("auto-update: unable to inspect container before update, proceeding without a health gate")
 		} else {
@@ -353,6 +371,17 @@ func containerName(names []string) string {
 	}
 
 	return strings.TrimPrefix(names[0], "/")
+}
+
+// skipUnnamedForRollback reports whether a standalone update must be skipped
+// because rollback is enabled but the container has no stable name to key the
+// loop guard. The rolled-back map is keyed by endpoint+name (the only identifier
+// that survives a recreate); without a name the guard cannot record a failed
+// target, so a repeatedly-failing update would loop update->rollback every tick
+// with no suppression. When rollback is off there is nothing to loop, so an
+// unnamed container is still allowed to update.
+func skipUnnamedForRollback(rollback bool, name string) bool {
+	return rollback && name == ""
 }
 
 // rollbackKey identifies a standalone container in the rolled-back map by its

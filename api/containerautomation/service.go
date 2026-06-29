@@ -27,7 +27,8 @@ const (
 	// defaultCheckInterval is used when the configured auto-heal interval is empty or unparseable.
 	defaultCheckInterval = 30 * time.Second
 	// defaultPollInterval is used when the configured auto-update interval is empty or unparseable.
-	// It is conservative (hours) to stay within registry rate limits and rely on the 24h status cache.
+	// It is conservative (hours) to stay within registry rate limits; the image-status cache is
+	// short-lived (keyed by the local imageID), so each poll re-checks the remote digest.
 	defaultPollInterval = 6 * time.Hour
 )
 
@@ -70,6 +71,13 @@ type Service struct {
 	// by endpoint+name, so the auto-update job does not immediately re-pull the
 	// same failed image and roll back again on the next tick (the update->rollback
 	// loop guard, mirroring the auto-heal retries map).
+	//
+	// This state is in-memory only and is NOT persisted: after a Portainer restart
+	// the map is empty, so at most one extra update->rollback cycle per restart is
+	// possible before the guard re-records the failed target. Persisting it would
+	// require a datastore schema (key + digest + timestamp) and is intentionally out
+	// of scope here; the cooldown-bounded single extra cycle is an acceptable
+	// trade-off against that complexity.
 	rolledBack map[string]rolledBackTarget
 }
 
@@ -125,6 +133,13 @@ func (s *Service) Start() {
 // Reload re-applies the current settings: it stops the running jobs and starts
 // fresh ones with the new intervals, or leaves them stopped if disabled. It is
 // safe to call after a settings update.
+//
+// Note: stopping a job unschedules future ticks but does not interrupt a tick
+// already in progress. An in-flight heal/update pass runs to completion on its
+// original (pre-reload) context and is only cancelled by a server shutdown (via
+// baseCtx); the new interval takes effect from the next scheduled tick. The
+// overlap guards (running/updateRunning) and the per-map mutexes keep this safe
+// against data races, so this is a deliberate behavioural nuance, not a bug.
 func (s *Service) Reload() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -30,9 +30,11 @@ export interface ContainerImageStatus {
   Message?: string;
 }
 
-// The backend caches detection results for 24h, so a generous client-side staleTime
-// is enough and avoids hammering the endpoint when many rows are visible at once.
-const STALE_TIME = 5 * 60 * 1000; // 5 minutes
+// Client-side staleTime for image-status badges: long enough to avoid hammering
+// the endpoint when many rows are visible at once, short enough that a freshly
+// pushed upstream image surfaces reasonably soon. Exported as the single source of
+// truth so the bulk-update action reuses the same window instead of redefining it.
+export const STALE_TIME = 5 * 60 * 1000; // 5 minutes
 
 export async function getContainerImageStatus(
   environmentId: EnvironmentId,

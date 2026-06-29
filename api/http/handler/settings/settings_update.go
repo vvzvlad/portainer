@@ -22,9 +22,16 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// minAutoHealCheckInterval is the lower bound for the auto-heal check interval.
+// A near-zero interval (e.g. 1ms) is valid as a positive duration but would hammer
+// Docker with list/inspect calls for no benefit; keep a sane floor, mirroring the
+// auto-update poll-interval validation.
+const minAutoHealCheckInterval = time.Second
+
 // minAutoUpdatePollInterval is the lower bound for the auto-update poll interval.
 // Polling more often than this hammers registries (rate limits) for no benefit:
-// the image-status cache is long-lived, so a sub-minute interval only adds load.
+// the image-status cache (~5m) bounds detection latency, so a sub-minute interval
+// only adds registry load without resolving new images any faster.
 const minAutoUpdatePollInterval = time.Minute
 
 // minAutoUpdateRollbackTimeout is the lower bound for the health-gate rollback
@@ -142,8 +149,8 @@ func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
 	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoHeal != nil {
 		autoHeal := payload.ContainerAutomation.AutoHeal
 		if autoHeal.CheckInterval != nil {
-			if d, err := time.ParseDuration(*autoHeal.CheckInterval); err != nil || d <= 0 {
-				return errors.New("Invalid auto-heal check interval. Must be a positive duration (e.g. 30s)")
+			if d, err := time.ParseDuration(*autoHeal.CheckInterval); err != nil || d < minAutoHealCheckInterval {
+				return errors.New("Invalid auto-heal check interval. Must be a duration of at least 1s (e.g. 30s)")
 			}
 		}
 

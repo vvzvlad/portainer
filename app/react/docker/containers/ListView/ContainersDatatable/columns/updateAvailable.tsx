@@ -19,7 +19,7 @@ function UpdateAvailableCell({
 }: CellContext<ContainerListViewModel, unknown>) {
   const environmentId = useEnvironmentId();
   // One detection request per visible row is acceptable: the backend caches results
-  // for 24h and the hook keeps a generous client-side staleTime, so re-renders and
+  // for ~5m and the hook keeps a generous client-side staleTime, so re-renders and
   // pagination don't re-hit the registry. The query is non-blocking, so the table
   // renders immediately and badges fill in as statuses resolve.
   const statusQuery = useContainerImageStatus(

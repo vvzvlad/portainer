@@ -183,6 +183,28 @@ func TestIsTagReference(t *testing.T) {
 	}
 }
 
+func TestSkipUnnamedForRollback(t *testing.T) {
+	tests := []struct {
+		name     string
+		rollback bool
+		cName    string
+		want     bool
+	}{
+		{name: "rollback on, unnamed -> skip (unsuppressable loop otherwise)", rollback: true, cName: "", want: true},
+		{name: "rollback on, named -> proceed (guard can key it)", rollback: true, cName: "web", want: false},
+		{name: "rollback off, unnamed -> proceed (no rollback to loop)", rollback: false, cName: "", want: false},
+		{name: "rollback off, named -> proceed", rollback: false, cName: "web", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := skipUnnamedForRollback(tt.rollback, tt.cName); got != tt.want {
+				t.Errorf("skipUnnamedForRollback(%v, %q) = %v, want %v", tt.rollback, tt.cName, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHasHealthGate(t *testing.T) {
 	tests := []struct {
 		name string
