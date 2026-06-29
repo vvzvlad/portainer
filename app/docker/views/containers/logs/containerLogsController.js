@@ -46,30 +46,13 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
       // Handed to the reconnecting processor so it drops only genuine duplicates
       // Docker re-delivers, never a new line that shares the boundary nanosecond.
       boundaryLines: [],
-      // The processor of the in-flight stream, so an intentional pause can flush
-      // its buffered partial last line for display.
-      processor: null,
-      // How many cosmetic lines an intentional-pause flush appended; removed on
-      // resume before Docker re-delivers them in full (see pauseStream/startStream).
-      pausedFlushCount: 0,
-      // false while the stream is intentionally paused (Live toggle off) or the
-      // view is being destroyed — suppresses auto-reconnect.
+      // false while the stream is being torn down (view destroyed / reconnect
+      // teardown) — suppresses auto-reconnect.
       active: false,
       skipHeaders: false,
       // Whether we already surfaced the current reconnect-loop error, so the 3s
       // reconnect loop does not spam a notification on every attempt.
       errorNotified: false,
-    };
-
-    // Live toggle (the "Auto-refresh logs" switch in the viewer).
-    $scope.changeLogCollection = function (logCollectionStatus) {
-      if (!logCollectionStatus) {
-        pauseStream(true);
-      } else {
-        // Resume without wiping the buffer (pause promises to keep it) and
-        // continue from the last timestamp we saw.
-        startStream(false);
-      }
     };
 
     $scope.$on('$destroy', function () {
@@ -90,43 +73,18 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
       }
     }
 
-    // Pause: stop streaming but keep the current buffer on screen.
-    //
-    // `flushPartial` is set only on an intentional pause (Live -> off): with no
-    // reconnect to re-deliver it, the buffered unfinished last line would stay
-    // hidden until resume, so we flush it for display. We do NOT advance the
-    // resume point past it (it is incomplete); on resume Docker re-delivers that
-    // line in full from `since`, and startStream() first strips these cosmetic
-    // flushed lines so the buffer never shows a stale partial twin. On reconnect
-    // (flushPartial omitted) the partial is correctly discarded, unchanged.
-    function pauseStream(flushPartial) {
+    // Stop streaming but keep the current buffer on screen. Used for the
+    // reconnect/teardown path: aborts the in-flight request and cancels any
+    // pending reconnect so a fresh connect (or view destroy) starts clean.
+    function pauseStream() {
       stream.active = false;
       clearReconnectTimer();
       abortInFlight();
-      if (flushPartial && stream.processor) {
-        const tail = stream.processor.flush();
-        if (tail.length) {
-          appendLines(tail);
-          stream.pausedFlushCount += tail.length;
-        }
-      }
     }
 
-    // Remove the last `count` lines from the buffer (the cosmetic lines an
-    // intentional-pause flush appended), about to be re-delivered in full.
-    function removeTailLines(count) {
-      if (count <= 0) {
-        return;
-      }
-      $scope.$applyAsync(function () {
-        const start = Math.max(0, $scope.logs.length - count);
-        $scope.logs.splice(start, count);
-      });
-    }
-
-    // Full teardown on view destroy: no flush (the view is going away).
+    // Full teardown on view destroy.
     function stopStream() {
-      pauseStream(false);
+      pauseStream();
     }
 
     function appendLines(lines) {
@@ -163,20 +121,14 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
     // `resetBuffer` clears the on-screen buffer (used on first connect / param
     // changes); reconnects after a drop keep the buffer and resume via `since`.
     function startStream(resetBuffer) {
-      pauseStream(false);
+      pauseStream();
       stream.active = true;
 
       if (resetBuffer) {
         $scope.logs.length = 0;
         stream.lastTimestamp = '';
         stream.boundaryLines = [];
-        stream.pausedFlushCount = 0;
         stream.errorNotified = false;
-      } else if (stream.pausedFlushCount) {
-        // Resuming after an intentional pause: drop the cosmetic partial line(s)
-        // we flushed for display; Docker re-delivers them in full from `since`.
-        removeTailLines(stream.pausedFlushCount);
-        stream.pausedFlushCount = 0;
       }
 
       const resuming = !!stream.lastTimestamp;
@@ -194,7 +146,6 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
         skipUntilTimestamp: resuming ? stream.lastTimestamp : undefined,
         skipBoundaryContents: resuming ? stream.boundaryLines : undefined,
       });
-      stream.processor = processor;
 
       const abortController = new AbortController();
       stream.abortController = abortController;

@@ -4,56 +4,32 @@
       <rd-widget-header icon="file" title-text="Log viewer settings"></rd-widget-header>
       <rd-widget-body>
         <form class="form-horizontal">
-          <div class="form-group">
-            <div class="col-sm-12">
-              <por-switch-field
-                label-class="'col-sm-2'"
-                checked="$ctrl.state.logCollection"
-                label="'Auto-refresh logs'"
-                tooltip="'Disabling this option pauses log collection. Auto-scroll follows the bottom of the log and pauses on its own when you scroll up.'"
-                on-change="($ctrl.handleLogsCollectionChange)"
-              ></por-switch-field>
-            </div>
-          </div>
-          <div class="form-group">
-            <div class="col-sm-12">
-              <por-switch-field label-class="'col-sm-2'" checked="$ctrl.state.wrapLines" label="'Wrap lines'" on-change="($ctrl.handleLogsWrapLinesChange)"></por-switch-field>
-            </div>
-          </div>
-          <div class="form-group">
-            <div class="col-sm-12">
-              <por-switch-field
-                label-class="'col-sm-2'"
-                checked="$ctrl.displayTimestamps"
-                label="'Display timestamps'"
-                on-change="($ctrl.handleDisplayTimestampsChange)"
-              ></por-switch-field>
-            </div>
-          </div>
-          <div class="form-group">
-            <label for="logs_since" class="col-sm-2 control-label text-left"> Fetch </label>
-            <div class="col-sm-2">
-              <select class="form-control" ng-model="$ctrl.sinceTimestamp" id="logs_since">
+          <!-- Compact single-row settings bar: every control sits inline and
+               wraps onto extra rows only on narrow widths. -->
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <por-switch-field label-class="'!w-auto'" checked="$ctrl.state.wrapLines" label="'Wrap lines'" on-change="($ctrl.handleLogsWrapLinesChange)"></por-switch-field>
+            <por-switch-field
+              label-class="'!w-auto'"
+              checked="$ctrl.displayTimestamps"
+              label="'Display timestamps'"
+              on-change="($ctrl.handleDisplayTimestampsChange)"
+            ></por-switch-field>
+            <div class="flex items-center gap-x-2">
+              <label for="logs_since" class="control-label !p-0 text-left !w-auto whitespace-nowrap"> Fetch </label>
+              <select class="form-control !w-auto" ng-model="$ctrl.sinceTimestamp" id="logs_since">
                 <option selected value="">All logs</option>
                 <option ng-repeat="dt in $ctrl.state.availableSinceDatetime" ng-value="dt.value" title="{{ dt.value }}">{{ dt.desc }}</option>
               </select>
             </div>
-          </div>
-          <div class="form-group">
-            <label for="logs_search" class="col-sm-2 control-label text-left"> Search </label>
-            <div class="col-sm-8">
-              <input class="form-control" type="text" name="logs_search" ng-model="$ctrl.state.search" ng-change="$ctrl.state.selectedLines.length = 0;" placeholder="Filter..." />
+            <div class="flex items-center gap-x-2">
+              <label for="lines_count" class="control-label !p-0 text-left !w-auto whitespace-nowrap"> Lines </label>
+              <input class="form-control !w-24" type="number" name="lines_count" ng-model="$ctrl.lineCount" placeholder="Lines..." />
             </div>
-          </div>
-          <div class="form-group">
-            <label for="lines_count" class="col-sm-2 control-label text-left"> Lines </label>
-            <div class="col-sm-8">
-              <input class="form-control" type="number" name="lines_count" ng-model="$ctrl.lineCount" placeholder="Enter no of lines..." />
+            <div class="flex flex-1 items-center gap-x-2" style="min-width: 160px">
+              <label for="logs_search" class="control-label !p-0 text-left !w-auto whitespace-nowrap"> Search </label>
+              <input class="form-control flex-1" type="text" name="logs_search" ng-model="$ctrl.state.search" ng-change="$ctrl.state.selectedLines.length = 0;" placeholder="Filter..." />
             </div>
-          </div>
-          <div class="form-group" ng-if="$ctrl.state.copySupported">
-            <label class="col-sm-2 control-label text-left"> Actions </label>
-            <div class="col-sm-10">
+            <div class="flex flex-wrap items-center gap-1" ng-if="$ctrl.state.copySupported">
               <button class="btn btn-primary btn-sm" type="button" ng-click="$ctrl.downloadLogs()" style="margin-left: 0" data-cy="download-logs-button"
                 ><pr-icon icon="'download'"></pr-icon> Download logs</button
               >

@@ -16,7 +16,6 @@ angular.module('portainer.docker').controller('LogViewerController', [
         { desc: 'Last 10 minutes', value: moment().subtract(10, 'minutes').format() },
       ],
       copySupported: clipboard.supported,
-      logCollection: true,
       autoScroll: true,
       wrapLines: true,
       search: '',
@@ -24,7 +23,6 @@ angular.module('portainer.docker').controller('LogViewerController', [
       selectedLines: [],
     };
 
-    this.handleLogsCollectionChange = handleLogsCollectionChange.bind(this);
     this.handleLogsWrapLinesChange = handleLogsWrapLinesChange.bind(this);
     this.handleDisplayTimestampsChange = handleDisplayTimestampsChange.bind(this);
     this.applyFilter = applyFilter.bind(this);
@@ -46,17 +44,6 @@ angular.module('portainer.docker').controller('LogViewerController', [
       this.state.filteredLogs = search
         ? data.filter((log) => log.line && log.line.toLowerCase().indexOf(search) > -1)
         : data;
-    }
-
-    function handleLogsCollectionChange(enabled) {
-      $scope.$evalAsync(() => {
-        // Decouple Live (log collection) from auto-scroll: pausing the stream no
-        // longer also forces auto-scroll off, and auto-scroll is driven by
-        // scroll-glue (it disengages when the user scrolls up, re-engages at the
-        // bottom) so reading/selecting is never yanked around.
-        this.state.logCollection = enabled;
-        this.logCollectionChange(enabled);
-      });
     }
 
     function handleLogsWrapLinesChange(enabled) {

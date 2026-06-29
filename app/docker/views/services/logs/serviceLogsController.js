@@ -14,14 +14,6 @@ angular.module('portainer.docker').controller('ServiceLogsController', [
       displayTimestamps: false,
     };
 
-    $scope.changeLogCollection = function (logCollectionStatus) {
-      if (!logCollectionStatus) {
-        stopRepeater();
-      } else {
-        setUpdateRepeater();
-      }
-    };
-
     $scope.$on('$destroy', function () {
       stopRepeater();
     });
