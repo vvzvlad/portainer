@@ -27,11 +27,34 @@ angular.module('portainer.docker').controller('LogViewerController', [
     this.handleLogsCollectionChange = handleLogsCollectionChange.bind(this);
     this.handleLogsWrapLinesChange = handleLogsWrapLinesChange.bind(this);
     this.handleDisplayTimestampsChange = handleDisplayTimestampsChange.bind(this);
+    this.applyFilter = applyFilter.bind(this);
+
+    this.$onInit = function () {
+      this.applyFilter();
+      // Compute the filtered list in the controller (not in the template) so we
+      // do not rebuild `filteredLogs` on every digest. `$watchCollection` only
+      // fires when lines are actually appended; combined with `track by log.id`
+      // in the template, already-rendered rows are never re-bound — so a live
+      // text selection survives incoming log lines.
+      $scope.$watchCollection(() => this.data, this.applyFilter);
+      $scope.$watch(() => this.state.search, this.applyFilter);
+    };
+
+    function applyFilter() {
+      const data = this.data || [];
+      const search = (this.state.search || '').toLowerCase();
+      this.state.filteredLogs = search
+        ? data.filter((log) => log.line && log.line.toLowerCase().indexOf(search) > -1)
+        : data;
+    }
 
     function handleLogsCollectionChange(enabled) {
       $scope.$evalAsync(() => {
+        // Decouple Live (log collection) from auto-scroll: pausing the stream no
+        // longer also forces auto-scroll off, and auto-scroll is driven by
+        // scroll-glue (it disengages when the user scrolls up, re-engages at the
+        // bottom) so reading/selecting is never yanked around.
         this.state.logCollection = enabled;
-        this.state.autoScroll = enabled;
         this.logCollectionChange(enabled);
       });
     }

@@ -2,7 +2,14 @@ import _ from 'lodash';
 
 import { EnvironmentId } from '@/react/portainer/environments/types';
 import PortainerError from '@/portainer/error';
-import axios, { parseAxiosError } from '@/portainer/services/axios/axios';
+import axios, {
+  agentTargetHeader,
+  parseAxiosError,
+} from '@/portainer/services/axios/axios';
+import {
+  portainerAgentManagerOperation,
+  portainerAgentTargetHeader,
+} from '@/portainer/services/http-request.helper';
 
 import { withAgentTargetHeader } from '../proxy/queries/utils';
 import { buildDockerProxyUrl } from '../proxy/queries/buildDockerProxyUrl';
@@ -188,5 +195,101 @@ export async function getContainerLogs(
     return data;
   } catch (e) {
     throw parseAxiosError(e, 'Unable to get container logs');
+  }
+}
+
+export type StreamLogsParams = ContainerLogsParams & {
+  /** follow=1 — keep the connection open and stream new lines as they arrive */
+  follow?: boolean;
+};
+
+/**
+ * Live-tail a container's logs over HTTP.
+ *
+ * Unlike `getContainerLogs` (axios, buffers the whole body), this uses `fetch`
+ * so we can read the response body as a `ReadableStream` and surface decoded
+ * text chunks to the caller as they arrive (`follow=1`). The backend already
+ * streams `follow=1` transparently through the Docker proxy — including for
+ * Agent/Edge environments — so no backend change is needed.
+ *
+ * Auth: the API uses an httpOnly JWT cookie (SameSite=Strict), so a same-origin
+ * `fetch` with `credentials: 'include'` carries it automatically — no
+ * `Authorization` header. CSRF middleware only guards mutating methods; logs is
+ * a GET, so it is unaffected. The agent-target / manager-operation headers
+ * (normally added by the axios `agentInterceptor`) are replicated here so the
+ * stream also resolves the correct node on Agent/Edge environments.
+ *
+ * The caller drives lifetime via `signal`: aborting it (unmount, container
+ * switch, pausing Live) cancels the in-flight fetch and ends the read loop.
+ */
+export async function streamContainerLogs(
+  environmentId: EnvironmentId,
+  containerId: ContainerId,
+  params: StreamLogsParams,
+  onChunk: (text: string) => void,
+  signal: AbortSignal
+): Promise<void> {
+  const path = buildDockerProxyUrl(
+    environmentId,
+    'containers',
+    containerId,
+    'logs'
+  );
+
+  const query = new URLSearchParams();
+  // _.pickBy drops undefined/0/'' the same way the axios path does
+  Object.entries(_.pickBy(params)).forEach(([key, value]) => {
+    query.set(key, String(typeof value === 'boolean' ? Number(value) : value));
+  });
+
+  // axios baseURL is 'api'; mirror it here since fetch doesn't share it.
+  const url = `api${path}?${query.toString()}`;
+
+  const headers: Record<string, string> = {};
+  const target = portainerAgentTargetHeader();
+  if (target) {
+    headers[agentTargetHeader] = target;
+  }
+  if (portainerAgentManagerOperation()) {
+    headers['X-PortainerAgent-ManagerOperation'] = '1';
+  }
+
+  const response = await fetch(url, {
+    signal,
+    credentials: 'include',
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new PortainerError(
+      `Unable to stream container logs (HTTP ${response.status})`
+    );
+  }
+
+  if (!response.body) {
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+
+  try {
+    for (;;) {
+       
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value) {
+        onChunk(decoder.decode(value, { stream: true }));
+      }
+    }
+    // flush any bytes held by the decoder (multi-byte char split across chunks)
+    const tail = decoder.decode();
+    if (tail) {
+      onChunk(tail);
+    }
+  } finally {
+    reader.releaseLock();
   }
 }
