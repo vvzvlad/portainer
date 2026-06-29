@@ -62,13 +62,21 @@ type settingsUpdatePayload struct {
 }
 
 type containerAutomationSettingsPayload struct {
-	AutoHeal *autoHealSettingsPayload
+	AutoHeal   *autoHealSettingsPayload
+	AutoUpdate *autoUpdateSettingsPayload
 }
 
 type autoHealSettingsPayload struct {
 	Enabled       *bool   `example:"false"`
 	CheckInterval *string `example:"30s"`
 	Scope         *string `example:"labeled"`
+}
+
+type autoUpdateSettingsPayload struct {
+	Enabled      *bool   `example:"false"`
+	PollInterval *string `example:"6h"`
+	Scope        *string `example:"labeled"`
+	Cleanup      *bool   `example:"false"`
 }
 
 func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
@@ -128,6 +136,19 @@ func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
 
 		if autoHeal.Scope != nil && *autoHeal.Scope != "labeled" && *autoHeal.Scope != "all" {
 			return errors.New("Invalid auto-heal scope. Value must be one of: labeled, all")
+		}
+	}
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoUpdate != nil {
+		autoUpdate := payload.ContainerAutomation.AutoUpdate
+		if autoUpdate.PollInterval != nil {
+			if d, err := time.ParseDuration(*autoUpdate.PollInterval); err != nil || d <= 0 {
+				return errors.New("Invalid auto-update poll interval. Must be a positive duration (e.g. 6h)")
+			}
+		}
+
+		if autoUpdate.Scope != nil && *autoUpdate.Scope != "labeled" && *autoUpdate.Scope != "all" {
+			return errors.New("Invalid auto-update scope. Value must be one of: labeled, all")
 		}
 	}
 
@@ -276,6 +297,15 @@ func (handler *Handler) updateSettings(tx dataservices.DataStoreTx, payload sett
 		current.Enabled = *cmp.Or(autoHeal.Enabled, &current.Enabled)
 		current.CheckInterval = *cmp.Or(autoHeal.CheckInterval, &current.CheckInterval)
 		current.Scope = *cmp.Or(autoHeal.Scope, &current.Scope)
+	}
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoUpdate != nil {
+		autoUpdate := payload.ContainerAutomation.AutoUpdate
+		current := &settings.ContainerAutomation.AutoUpdate
+		current.Enabled = *cmp.Or(autoUpdate.Enabled, &current.Enabled)
+		current.PollInterval = *cmp.Or(autoUpdate.PollInterval, &current.PollInterval)
+		current.Scope = *cmp.Or(autoUpdate.Scope, &current.Scope)
+		current.Cleanup = *cmp.Or(autoUpdate.Cleanup, &current.Cleanup)
 	}
 
 	if err := tx.Settings().UpdateSettings(settings); err != nil {

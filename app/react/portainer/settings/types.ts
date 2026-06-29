@@ -145,8 +145,20 @@ export interface AutoHealSettings {
   Scope: AutoHealScope;
 }
 
+// AutoUpdateScope shares the same values as AutoHealScope but is named
+// separately so the two automation features can diverge later.
+export type AutoUpdateScope = 'labeled' | 'all';
+
+export interface AutoUpdateSettings {
+  Enabled: boolean;
+  PollInterval: string;
+  Scope: AutoUpdateScope;
+  Cleanup: boolean;
+}
+
 export interface ContainerAutomationSettings {
   AutoHeal: AutoHealSettings;
+  AutoUpdate: AutoUpdateSettings;
 }
 
 export interface GlobalDeploymentOptions {

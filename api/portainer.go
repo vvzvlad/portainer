@@ -1219,6 +1219,12 @@ type (
 				CheckInterval string `json:"CheckInterval" example:"30s"`
 				Scope         string `json:"Scope" example:"labeled"` // "labeled" | "all"
 			} `json:"AutoHeal"`
+			AutoUpdate struct {
+				Enabled      bool   `json:"Enabled"`
+				PollInterval string `json:"PollInterval" example:"6h"`
+				Scope        string `json:"Scope" example:"labeled"` // "labeled" | "all"
+				Cleanup      bool   `json:"Cleanup"`                 // remove dangling old images after a standalone update
+			} `json:"AutoUpdate"`
 		} `json:"ContainerAutomation"`
 	}
 

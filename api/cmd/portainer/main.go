@@ -578,7 +578,8 @@ func buildServer(flags *portainer.CLIFlags, shutdownCtx context.Context, shutdow
 		log.Fatal().Err(err).Msg("failed to start stack scheduler")
 	}
 
-	containerAutomationService := containerautomation.NewService(scheduler, dataStore, dockerClientFactory)
+	containerService := docker.NewContainerService(dockerClientFactory, dataStore)
+	containerAutomationService := containerautomation.NewService(scheduler, dataStore, dockerClientFactory, containerService, stackDeployer, gitService)
 	containerAutomationService.Start()
 
 	sslDBSettings, err := dataStore.SSLSettings().Settings()

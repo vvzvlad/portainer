@@ -590,6 +590,12 @@
         "CheckInterval": "30s",
         "Enabled": false,
         "Scope": "labeled"
+      },
+      "AutoUpdate": {
+        "Cleanup": false,
+        "Enabled": false,
+        "PollInterval": "6h",
+        "Scope": "labeled"
       }
     },
     "Edge": {

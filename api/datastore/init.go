@@ -66,6 +66,11 @@ func (store *Store) checkOrCreateDefaultSettings() error {
 		defaultSettings.ContainerAutomation.AutoHeal.CheckInterval = "30s"
 		defaultSettings.ContainerAutomation.AutoHeal.Scope = "labeled"
 
+		defaultSettings.ContainerAutomation.AutoUpdate.Enabled = false
+		defaultSettings.ContainerAutomation.AutoUpdate.PollInterval = "6h"
+		defaultSettings.ContainerAutomation.AutoUpdate.Scope = "labeled"
+		defaultSettings.ContainerAutomation.AutoUpdate.Cleanup = false
+
 		return store.SettingsService.UpdateSettings(defaultSettings)
 	}
 	if err != nil {

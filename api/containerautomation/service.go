@@ -1,7 +1,9 @@
 // Package containerautomation provides native container automation that runs as
-// a background scheduler job. M1 implements auto-heal: restarting Docker
+// background scheduler jobs. M1 implements auto-heal (restarting Docker
 // containers whose healthcheck reports "unhealthy", replacing the
-// willfarrell/autoheal sidecar.
+// willfarrell/autoheal sidecar); M4 adds auto-update (periodically detecting
+// outdated images and applying updates, replacing the containrrr/watchtower
+// sidecar).
 package containerautomation
 
 import (
@@ -9,45 +11,76 @@ import (
 	"sync/atomic"
 	"time"
 
+	portainer "github.com/portainer/portainer/api"
 	"github.com/portainer/portainer/api/dataservices"
+	"github.com/portainer/portainer/api/docker"
 	dockerclient "github.com/portainer/portainer/api/docker/client"
+	"github.com/portainer/portainer/api/docker/images"
 	"github.com/portainer/portainer/api/scheduler"
+	"github.com/portainer/portainer/api/stacks/deployments"
 
 	"github.com/rs/zerolog/log"
 )
 
-// defaultCheckInterval is used when the configured interval is empty or unparseable.
-const defaultCheckInterval = 30 * time.Second
+const (
+	// defaultCheckInterval is used when the configured auto-heal interval is empty or unparseable.
+	defaultCheckInterval = 30 * time.Second
+	// defaultPollInterval is used when the configured auto-update interval is empty or unparseable.
+	// It is conservative (hours) to stay within registry rate limits and rely on the 24h status cache.
+	defaultPollInterval = 6 * time.Hour
+)
 
-// Service manages the lifecycle of the auto-heal scheduler job and keeps the
-// per-container retry state in memory across ticks.
+// Service manages the lifecycle of the auto-heal and auto-update scheduler jobs
+// and keeps the per-container retry state in memory across ticks.
 type Service struct {
 	scheduler     *scheduler.Scheduler
 	dataStore     dataservices.DataStore
 	clientFactory *dockerclient.ClientFactory
 
-	mu    sync.Mutex
-	jobID string
+	// Dependencies used by the auto-update job (M4).
+	digestClient     *images.DigestClient
+	containerService *docker.ContainerService
+	stackDeployer    deployments.StackDeployer
+	gitService       portainer.GitService
+
+	mu          sync.Mutex
+	healJobID   string
+	updateJobID string
 
 	// running guards against overlapping heal ticks.
 	running atomic.Bool
+	// updateRunning guards against overlapping update ticks.
+	updateRunning atomic.Bool
 
 	retryMu sync.Mutex
 	retries map[string]retryState
 }
 
 // NewService creates a new container automation service. Call Start to schedule
-// the job according to the persisted settings.
-func NewService(scheduler *scheduler.Scheduler, dataStore dataservices.DataStore, clientFactory *dockerclient.ClientFactory) *Service {
+// the jobs according to the persisted settings. The stackDeployer, gitService
+// and containerService are used by the auto-update job; they may be nil only in
+// tests that do not exercise auto-update.
+func NewService(
+	scheduler *scheduler.Scheduler,
+	dataStore dataservices.DataStore,
+	clientFactory *dockerclient.ClientFactory,
+	containerService *docker.ContainerService,
+	stackDeployer deployments.StackDeployer,
+	gitService portainer.GitService,
+) *Service {
 	return &Service{
-		scheduler:     scheduler,
-		dataStore:     dataStore,
-		clientFactory: clientFactory,
-		retries:       make(map[string]retryState),
+		scheduler:        scheduler,
+		dataStore:        dataStore,
+		clientFactory:    clientFactory,
+		digestClient:     images.NewClientWithRegistry(images.NewRegistryClient(dataStore), clientFactory),
+		containerService: containerService,
+		stackDeployer:    stackDeployer,
+		gitService:       gitService,
+		retries:          make(map[string]retryState),
 	}
 }
 
-// Start schedules the auto-heal job if it is enabled in the settings.
+// Start schedules the enabled jobs according to the persisted settings.
 func (s *Service) Start() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,9 +88,9 @@ func (s *Service) Start() {
 	s.start()
 }
 
-// Reload re-applies the current settings: it stops the running job and starts a
-// fresh one with the new interval, or leaves it stopped if auto-heal is now
-// disabled. It is safe to call after a settings update.
+// Reload re-applies the current settings: it stops the running jobs and starts
+// fresh ones with the new intervals, or leaves them stopped if disabled. It is
+// safe to call after a settings update.
 func (s *Service) Reload() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -68,18 +101,21 @@ func (s *Service) Reload() error {
 	return nil
 }
 
-// start (re)schedules the job from settings. Caller must hold s.mu. It is a
-// no-op when a job is already scheduled, so calling Start more than once does
-// not leak an orphaned job; Reload first calls stop (clearing jobID) and so
-// always reschedules.
+// start (re)schedules the enabled jobs from settings. Caller must hold s.mu.
 func (s *Service) start() {
-	if s.jobID != "" {
+	settings, err := s.dataStore.Settings().Settings()
+	if err != nil {
+		log.Warn().Err(err).Msg("container automation: unable to read settings, jobs not scheduled")
 		return
 	}
 
-	settings, err := s.dataStore.Settings().Settings()
-	if err != nil {
-		log.Warn().Err(err).Msg("auto-heal: unable to read settings, job not scheduled")
+	s.startHeal(settings)
+	s.startUpdate(settings)
+}
+
+// startHeal schedules the auto-heal job if enabled. Caller must hold s.mu.
+func (s *Service) startHeal(settings *portainer.Settings) {
+	if s.healJobID != "" {
 		return
 	}
 
@@ -95,21 +131,49 @@ func (s *Service) start() {
 		interval = defaultCheckInterval
 	}
 
-	s.jobID = s.scheduler.StartJobEvery(interval, s.heal)
+	s.healJobID = s.scheduler.StartJobEvery(interval, s.heal)
 	log.Info().Dur("interval", interval).Msg("auto-heal: job scheduled")
 }
 
-// stop cancels the running job, if any. Caller must hold s.mu.
-func (s *Service) stop() {
-	if s.jobID == "" {
+// startUpdate schedules the auto-update job if enabled. Caller must hold s.mu.
+func (s *Service) startUpdate(settings *portainer.Settings) {
+	if s.updateJobID != "" {
 		return
 	}
 
-	if err := s.scheduler.StopJob(s.jobID); err != nil {
-		log.Warn().Err(err).Msg("auto-heal: could not stop the job")
+	autoUpdate := settings.ContainerAutomation.AutoUpdate
+	if !autoUpdate.Enabled {
+		return
 	}
 
-	s.jobID = ""
+	interval, err := time.ParseDuration(autoUpdate.PollInterval)
+	if err != nil || interval <= 0 {
+		log.Warn().Str("interval", autoUpdate.PollInterval).Dur("default", defaultPollInterval).
+			Msg("auto-update: invalid poll interval, falling back to default")
+		interval = defaultPollInterval
+	}
+
+	s.updateJobID = s.scheduler.StartJobEvery(interval, s.update)
+	log.Info().Dur("interval", interval).Msg("auto-update: job scheduled")
+}
+
+// stop cancels the running jobs, if any. Caller must hold s.mu.
+func (s *Service) stop() {
+	if s.healJobID != "" {
+		if err := s.scheduler.StopJob(s.healJobID); err != nil {
+			log.Warn().Err(err).Msg("auto-heal: could not stop the job")
+		}
+
+		s.healJobID = ""
+	}
+
+	if s.updateJobID != "" {
+		if err := s.scheduler.StopJob(s.updateJobID); err != nil {
+			log.Warn().Err(err).Msg("auto-update: could not stop the job")
+		}
+
+		s.updateJobID = ""
+	}
 }
 
 // scope returns the configured auto-heal scope, defaulting to "labeled".
