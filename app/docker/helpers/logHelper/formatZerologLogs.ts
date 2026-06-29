@@ -7,7 +7,7 @@ import {
   formatTime,
 } from './formatters';
 import {
-  FormattedLine,
+  FormattedLineContent,
   JSONStackTrace,
   Level,
   Span,
@@ -50,7 +50,7 @@ type Pair = {
 
 export function formatZerologLogs(rawText: string, withTimestamps?: boolean) {
   const spans: Span[] = [];
-  const lines: FormattedLine[] = [];
+  const lines: FormattedLineContent[] = [];
   let line = '';
 
   const text = withTimestamps ? rawText.substring(TIMESTAMP_LENGTH) : rawText;

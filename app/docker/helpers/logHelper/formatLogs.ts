@@ -9,7 +9,14 @@ import {
 } from './colors';
 import { formatJSONLine } from './formatJSONLogs';
 import { formatZerologLogs, ZerologRegex } from './formatZerologLogs';
-import { Token, Span, TIMESTAMP_LENGTH, FormattedLine } from './types';
+import { nextLineId } from './lineId';
+import {
+  Token,
+  Span,
+  TIMESTAMP_LENGTH,
+  FormattedLine,
+  FormattedLineContent,
+} from './types';
 
 type FormatOptions = {
   stripHeaders?: boolean;
@@ -43,7 +50,7 @@ export function formatLogs(
   }
 
   const tokens: Token[][] = tokenize(logs);
-  const formattedLogs: FormattedLine[] = [];
+  const formattedLogs: FormattedLineContent[] = [];
 
   let fgColor: string | undefined;
   let bgColor: string | undefined;
@@ -118,10 +125,19 @@ export function formatLogs(
     formattedLogs.push({ line, spans });
   }
 
-  return formattedLogs;
+  // Assign the stable id centrally, once, here — so every line (plain, JSON,
+  // zerolog, stack-trace) gets a monotonic id regardless of which formatter
+  // produced it. Enables `track by log.id` in the viewer template.
+  return formattedLogs.map(
+    (content): FormattedLine => ({ id: nextLineId(), ...content })
+  );
 }
 
-function stripHeadersFunc(logs: string) {
+// Strips Docker's 8-byte multiplexed-stream headers from a non-TTY log buffer:
+// drops the leading header, then every header that follows a newline. The
+// buffer passed in must start on a frame boundary (the streaming demuxer in
+// logStream.ts guarantees this by only ever cutting on newline boundaries).
+export function stripHeadersFunc(logs: string) {
   return logs.substring(8).replace(/\r?\n(.{8})/g, '\n');
 }
 
