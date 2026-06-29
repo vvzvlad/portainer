@@ -1,13 +1,6 @@
-import {
-  IComponentOptions,
-  IComponentController,
-  IFormController,
-  IScope,
-} from 'angular';
+import { IComponentOptions, IComponentController, IScope } from 'angular';
 
 class BoxSelectorController implements IComponentController {
-  formCtrl!: IFormController;
-
   onChange!: (value: string | number) => void;
 
   radioName!: string;
@@ -21,9 +14,8 @@ class BoxSelectorController implements IComponentController {
     this.$scope = $scope;
   }
 
-  handleChange(value: string | number, limitedToBE: boolean) {
+  handleChange(value: string | number) {
     this.$scope.$evalAsync(() => {
-      this.formCtrl.$setValidity(this.radioName, !limitedToBE, this.formCtrl);
       this.onChange(value);
     });
   }
@@ -45,9 +37,6 @@ export const BoxSelectorAngular: IComponentOptions = {
     radioName: '<',
     slim: '<',
     label: '<',
-  },
-  require: {
-    formCtrl: '^form',
   },
   controller: BoxSelectorController,
 };

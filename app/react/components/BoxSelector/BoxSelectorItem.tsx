@@ -16,7 +16,7 @@ type Props<T extends Value> = {
   radioName: string;
   disabled?: boolean;
   tooltip?: string;
-  onSelect(value: T, limitedToBE: boolean): void;
+  onSelect(value: T): void;
   isSelected(value: T): boolean;
   type?: 'radio' | 'checkbox';
   slim?: boolean;
@@ -43,7 +43,7 @@ export function BoxSelectorItem<T extends Value>({
       option={option}
       isSelected={isSelected}
       disabled={isDisabled()}
-      onSelect={(value) => onSelect(value, false)}
+      onSelect={onSelect}
       tooltip={tooltip}
       type={type}
       checkIcon={checkIcon}
