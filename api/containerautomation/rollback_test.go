@@ -277,3 +277,35 @@ func TestDecideUpdateSkip(t *testing.T) {
 		})
 	}
 }
+
+// TestPruneRolledBack locks in the F8 fix: pruneRolledBack must iterate the
+// rolledBack map and drop only entries whose cooldown has fully elapsed, keeping
+// fresh ones, so the map cannot grow unbounded. It mirrors TestPruneRetries. The
+// boundary is inclusive (production uses now.Sub(at) >= updateRollbackCooldown),
+// so an entry exactly at the cooldown is pruned.
+func TestPruneRolledBack(t *testing.T) {
+	now := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	s := &Service{rolledBack: map[string]rolledBackTarget{
+		// within the cooldown -> retained
+		"fresh": {ref: "img:fresh", digest: "sha256:aaa", at: now.Add(-updateRollbackCooldown / 2)},
+		// exactly at the cooldown boundary -> pruned (>= is inclusive)
+		"edge": {ref: "img:edge", digest: "sha256:bbb", at: now.Add(-updateRollbackCooldown)},
+		// long past the cooldown -> pruned
+		"stale": {ref: "img:stale", digest: "sha256:ccc", at: now.Add(-2 * updateRollbackCooldown)},
+	}}
+
+	s.pruneRolledBack(now)
+
+	if _, ok := s.rolledBack["fresh"]; !ok {
+		t.Error("entry within the rollback cooldown should be retained")
+	}
+	if _, ok := s.rolledBack["edge"]; ok {
+		t.Error("entry exactly at the cooldown boundary should be pruned")
+	}
+	if _, ok := s.rolledBack["stale"]; ok {
+		t.Error("entry past the rollback cooldown should be pruned")
+	}
+	if len(s.rolledBack) != 1 {
+		t.Errorf("rolledBack length = %d, want 1", len(s.rolledBack))
+	}
+}
