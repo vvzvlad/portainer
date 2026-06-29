@@ -124,7 +124,7 @@ func (s *Service) healEndpoint(endpoint *portainer.Endpoint, scope string) {
 	}
 	defer cli.Close()
 
-	listCtx, cancel := context.WithTimeout(context.Background(), endpointTimeout)
+	listCtx, cancel := context.WithTimeout(s.baseCtx, endpointTimeout)
 	defer cancel()
 
 	// List running unhealthy containers only (All:false). Docker keeps
@@ -162,7 +162,7 @@ func (s *Service) healEndpoint(endpoint *portainer.Endpoint, scope string) {
 		// plus a buffer, so one slow restart cannot starve the others and a hung
 		// engine call is bounded independently of the list deadline.
 		restartTimeout := time.Duration(timeout)*time.Second + restartTimeoutBuffer
-		restartCtx, restartCancel := context.WithTimeout(context.Background(), restartTimeout)
+		restartCtx, restartCancel := context.WithTimeout(s.baseCtx, restartTimeout)
 		err := cli.ContainerRestart(restartCtx, c.ID, container.StopOptions{Timeout: &timeout})
 		restartCancel()
 		if err != nil {

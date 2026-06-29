@@ -22,6 +22,11 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// minAutoUpdatePollInterval is the lower bound for the auto-update poll interval.
+// Polling more often than this hammers registries (rate limits) for no benefit:
+// the image-status cache is long-lived, so a sub-minute interval only adds load.
+const minAutoUpdatePollInterval = time.Minute
+
 type settingsUpdatePayload struct {
 	// URL to a logo that will be displayed on the login page as well as on top of the sidebar. Will use default Portainer logo when value is empty string
 	LogoURL *string `example:"https://mycompany.mydomain.tld/logo.png"`
@@ -142,8 +147,8 @@ func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
 	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoUpdate != nil {
 		autoUpdate := payload.ContainerAutomation.AutoUpdate
 		if autoUpdate.PollInterval != nil {
-			if d, err := time.ParseDuration(*autoUpdate.PollInterval); err != nil || d <= 0 {
-				return errors.New("Invalid auto-update poll interval. Must be a positive duration (e.g. 6h)")
+			if d, err := time.ParseDuration(*autoUpdate.PollInterval); err != nil || d < minAutoUpdatePollInterval {
+				return errors.New("Invalid auto-update poll interval. Must be a duration of at least 1m (e.g. 6h)")
 			}
 		}
 

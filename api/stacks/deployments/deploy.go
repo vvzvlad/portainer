@@ -14,6 +14,7 @@ import (
 	"github.com/portainer/portainer/api/git/update"
 	"github.com/portainer/portainer/api/gitops/workflows"
 	"github.com/portainer/portainer/api/http/security"
+	"github.com/portainer/portainer/api/internal/registryutils"
 	"github.com/portainer/portainer/api/scheduler"
 	"github.com/portainer/portainer/api/stacks/stackutils"
 
@@ -234,6 +235,36 @@ func redeployWhenChangedSecondStage(
 	}
 
 	return nil
+}
+
+// ResolveStackRegistries resolves the registries to use when redeploying a stack
+// from a userless/system context such as the auto-update daemon. It mirrors the
+// git redeploy path (redeployWhenChangedSecondStage): registries are scoped to
+// the stack author's access on the endpoint via getUserRegistries, then ECR
+// tokens are refreshed and persisted (matching the deployment config layer) so
+// the redeploy authenticates with fresh credentials. Returns StackAuthorMissingErr
+// when the stack author no longer exists, like the git path.
+func ResolveStackRegistries(datastore dataservices.DataStore, stack *portainer.Stack, endpointID portainer.EndpointID) ([]portainer.Registry, error) {
+	author := cmp.Or(stack.UpdatedBy, stack.CreatedBy)
+
+	user, err := datastore.User().UserByUsername(author)
+	if err != nil {
+		return nil, &StackAuthorMissingErr{int(stack.ID), author}
+	}
+
+	registries, err := getUserRegistries(datastore, user, endpointID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := datastore.UpdateTx(func(tx dataservices.DataStoreTx) error {
+		registryutils.RefreshAndPersistECRTokens(tx, registries)
+		return nil
+	}); err != nil {
+		return nil, errors.WithMessage(err, "failed to refresh ECR registry tokens")
+	}
+
+	return registries, nil
 }
 
 func getUserRegistries(datastore dataservices.DataStore, user *portainer.User, endpointID portainer.EndpointID) ([]portainer.Registry, error) {

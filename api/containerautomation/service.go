@@ -7,6 +7,7 @@
 package containerautomation
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +34,11 @@ const (
 // Service manages the lifecycle of the auto-heal and auto-update scheduler jobs
 // and keeps the per-container retry state in memory across ticks.
 type Service struct {
+	// baseCtx is the application shutdown context. It is the base for every
+	// per-operation timeout context, so a server shutdown cancels in-flight heal
+	// restarts and update redeploys instead of letting them run detached.
+	baseCtx context.Context
+
 	scheduler     *scheduler.Scheduler
 	dataStore     dataservices.DataStore
 	clientFactory *dockerclient.ClientFactory
@@ -57,10 +63,13 @@ type Service struct {
 }
 
 // NewService creates a new container automation service. Call Start to schedule
-// the jobs according to the persisted settings. The stackDeployer, gitService
-// and containerService are used by the auto-update job; they may be nil only in
-// tests that do not exercise auto-update.
+// the jobs according to the persisted settings. baseCtx is the application
+// shutdown context: it bounds the job operation contexts so a shutdown cancels
+// any in-flight heal/update. The stackDeployer, gitService and containerService
+// are used by the auto-update job; they may be nil only in tests that do not
+// exercise auto-update.
 func NewService(
+	baseCtx context.Context,
 	scheduler *scheduler.Scheduler,
 	dataStore dataservices.DataStore,
 	clientFactory *dockerclient.ClientFactory,
@@ -68,7 +77,12 @@ func NewService(
 	stackDeployer deployments.StackDeployer,
 	gitService portainer.GitService,
 ) *Service {
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
 	return &Service{
+		baseCtx:          baseCtx,
 		scheduler:        scheduler,
 		dataStore:        dataStore,
 		clientFactory:    clientFactory,

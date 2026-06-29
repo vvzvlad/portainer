@@ -90,7 +90,7 @@ func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, cle
 	}
 	defer cli.Close()
 
-	listCtx, cancel := context.WithTimeout(context.Background(), endpointTimeout)
+	listCtx, cancel := context.WithTimeout(s.baseCtx, endpointTimeout)
 	defer cancel()
 
 	// Running containers only: a stopped container has nothing to update now and
@@ -101,8 +101,11 @@ func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, cle
 		return
 	}
 
-	// Collect the in-scope, outdated, non-monitor-only containers as candidates;
-	// monitor-only ones are still status-checked so the badge cache stays warm.
+	// Collect the in-scope, outdated, non-monitor-only containers as candidates.
+	// An in-scope monitor-only container is still status-checked (keeping its badge
+	// cache warm) but never auto-applied. This only covers in-scope containers: in
+	// "labeled" scope a monitor-only container without the enable label is filtered
+	// out below before any status check, so its badge is not refreshed here.
 	var candidates []UpdateCandidate
 	for _, c := range containers {
 		if !InUpdateScope(scope, c.Labels) {
@@ -110,8 +113,9 @@ func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, cle
 		}
 
 		// Resolve the image status. This also refreshes the package-level status
-		// cache that backs the badge, so monitor-only containers are still checked.
-		statusCtx, statusCancel := context.WithTimeout(context.Background(), statusCheckTimeout)
+		// cache that backs the badge, so in-scope monitor-only containers are still
+		// checked even though they are never auto-applied.
+		statusCtx, statusCancel := context.WithTimeout(s.baseCtx, statusCheckTimeout)
 		status, err := s.digestClient.ContainerImageStatus(statusCtx, c.ID, endpoint, "")
 		statusCancel()
 		if err != nil {
@@ -185,7 +189,7 @@ func (s *Service) stackLookupForEndpoint(endpointID portainer.EndpointID) func(p
 func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer.Endpoint, c UpdateCandidate, cleanup bool) {
 	oldImageID := c.ImageID
 
-	ctx, cancel := context.WithTimeout(context.Background(), recreateTimeout)
+	ctx, cancel := context.WithTimeout(s.baseCtx, recreateTimeout)
 	defer cancel()
 
 	newContainer, err := s.containerService.Recreate(ctx, endpoint, c.ID, true, "", "")
@@ -215,7 +219,7 @@ func (s *Service) cleanupOldImage(cli *dockerclient.Client, endpoint *portainer.
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), endpointTimeout)
+	ctx, cancel := context.WithTimeout(s.baseCtx, endpointTimeout)
 	defer cancel()
 
 	if _, err := cli.ImageRemove(ctx, oldImageID, image.RemoveOptions{Force: false, PruneChildren: false}); err != nil {
@@ -228,32 +232,30 @@ func (s *Service) cleanupOldImage(cli *dockerclient.Client, endpoint *portainer.
 		Msg("auto-update: removed dangling old image after update")
 }
 
-// updateStack redeploys a Portainer-managed compose stack with a re-pull so its
+// updateStack applies an image update to a Portainer-managed compose stack so its
 // containers are recreated by the stack engine and stay part of the stack. It is
 // called at most once per stack per tick.
 //
-//   - git stacks: routed through the blessed git redeploy path
-//     (RedeployWhenChanged), which re-clones, force-pulls and keeps the stack's
-//     git/deployment bookkeeping consistent. Limitation: an image-only update
-//     (same compose manifest, newer upstream digest) is picked up on the next
-//     git change or via the manual "Update now" path, not by this tick.
+//   - git stacks: detect-only here. A git stack's source of truth is its commit;
+//     this tick's trigger is an image-only update (same compose manifest, newer
+//     upstream digest), which the git redeploy path (RedeployWhenChanged) would
+//     short-circuit without applying — while still doing a real git fetch every
+//     tick. So we skip git stacks: the image update lands on the stack's next git
+//     change or via a manual "Update now", and we do not fetch git every tick.
 //   - file stacks: the deployer is driven directly with forcePullImage=true,
 //     applying the image update immediately.
 func (s *Service) updateStack(endpoint *portainer.Endpoint, st StackUpdate) {
-	ctx, cancel := context.WithTimeout(context.Background(), stackRedeployTimeout)
-	defer cancel()
-
 	if st.IsGit {
-		if err := deployments.RedeployWhenChanged(ctx, portainer.StackID(st.StackID), s.stackDeployer, s.dataStore, s.gitService); err != nil {
-			log.Warn().Err(err).Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
-				Msg("auto-update: failed to redeploy git stack")
-			return
-		}
-
-		log.Info().Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
-			Msg("auto-update: triggered git stack redeploy")
+		// Detect-only: leave git bookkeeping to the git redeploy path. Logged at
+		// debug so it does not repeat at info on every tick (it would otherwise
+		// fire for an unchanged git stack indefinitely).
+		log.Debug().Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
+			Msg("auto-update: outdated git stack image detected, detect only (applied on next git change or manual update)")
 		return
 	}
+
+	ctx, cancel := context.WithTimeout(s.baseCtx, stackRedeployTimeout)
+	defer cancel()
 
 	stack, err := s.dataStore.Stack().Read(portainer.StackID(st.StackID))
 	if err != nil {
@@ -262,13 +264,14 @@ func (s *Service) updateStack(endpoint *portainer.Endpoint, st StackUpdate) {
 		return
 	}
 
-	// Registries: the daemon is a system actor with no user context, so it uses
-	// every configured registry (the admin path of the manual deploy helper)
-	// rather than hand-rolling auth.
-	registries, err := s.dataStore.Registry().ReadAll()
+	// Resolve registries the same way the established userless/system redeploy does
+	// (RedeployWhenChanged): scope them to the stack author's access on the endpoint
+	// and refresh ECR tokens, so an ECR-backed stack authenticates with fresh
+	// credentials instead of the stale token a raw ReadAll() would pass.
+	registries, err := deployments.ResolveStackRegistries(s.dataStore, stack, endpoint.ID)
 	if err != nil {
-		log.Warn().Err(err).Int("stack_id", st.StackID).
-			Msg("auto-update: unable to read registries for stack redeploy")
+		log.Warn().Err(err).Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
+			Msg("auto-update: unable to resolve registries for stack redeploy")
 		return
 	}
 

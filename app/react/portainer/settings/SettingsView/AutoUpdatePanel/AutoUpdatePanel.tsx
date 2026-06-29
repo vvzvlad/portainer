@@ -44,14 +44,16 @@ export function AutoUpdatePanel() {
         <div className="mb-3">
           <TextTip color="blue">
             When enabled, Portainer periodically checks running containers for a
-            newer image and applies the update, replacing the
-            containrrr/watchtower sidecar. Standalone containers are recreated
-            with a re-pull; containers belonging to a Portainer stack are updated
-            by redeploying their stack so they stay part of it. Per-container
-            opt-in is controlled with the{' '}
-            <code>io.portainer.update.enable=true</code> label; add{' '}
-            <code>io.portainer.update.monitor-only=true</code> to detect updates
-            without applying them.
+            newer image, replacing the containrrr/watchtower sidecar. Standalone
+            containers are recreated with a re-pull, and containers belonging to a
+            Portainer file-based (non-git) compose stack are updated by redeploying
+            their stack so they stay part of it. Git-backed stacks and
+            externally-managed containers are detection-only here: a newer image is
+            reported but applied through their own flow (the next git change or a
+            manual &quot;Update now&quot;), not by this daemon. Per-container opt-in
+            is controlled with the <code>io.portainer.update.enable=true</code>{' '}
+            label; add <code>io.portainer.update.monitor-only=true</code> to detect
+            updates without applying them.
           </TextTip>
         </div>
 
