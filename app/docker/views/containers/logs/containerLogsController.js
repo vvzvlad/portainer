@@ -33,21 +33,27 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
     var stream = {
       abortController: null,
       reconnectTimer: null,
-      // wall-clock seconds of the last received chunk; used as `since` on
-      // reconnect so we neither duplicate nor lose lines across a reconnect.
-      lastReceivedAt: 0,
+      // RFC3339 timestamp of the last log line we received. Used as `since` on
+      // reconnect so we resume from the exact log position (not the client
+      // wall-clock) and neither duplicate nor lose lines across a reconnect.
+      lastTimestamp: '',
       // false while the stream is intentionally paused (Live toggle off) or the
       // view is being destroyed — suppresses auto-reconnect.
       active: false,
       skipHeaders: false,
+      // Whether we already surfaced the current reconnect-loop error, so the 3s
+      // reconnect loop does not spam a notification on every attempt.
+      errorNotified: false,
     };
 
-    // Live toggle (the "Auto-refresh logs"/Live switch in the viewer).
+    // Live toggle (the "Live logs" switch in the viewer).
     $scope.changeLogCollection = function (logCollectionStatus) {
       if (!logCollectionStatus) {
         pauseStream();
       } else {
-        startStream(true);
+        // Resume without wiping the buffer (pause promises to keep it) and
+        // continue from the last timestamp we saw.
+        startStream(false);
       }
     };
 
@@ -85,7 +91,6 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
       if (!lines.length) {
         return;
       }
-      stream.lastReceivedAt = moment().unix();
       $scope.$applyAsync(function () {
         Array.prototype.push.apply($scope.logs, lines);
         const overflow = $scope.logs.length - MAX_LOG_LINES;
@@ -94,6 +99,15 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
           $scope.logs.splice(0, overflow);
         }
       });
+    }
+
+    // After feeding the processor, advance the reconnect resume point to the
+    // timestamp of the last line it parsed.
+    function updateResumePoint(processor) {
+      const ts = processor.getLastTimestamp();
+      if (ts) {
+        stream.lastTimestamp = ts;
+      }
     }
 
     // Connect (or reconnect) the live stream.
@@ -105,31 +119,43 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
 
       if (resetBuffer) {
         $scope.logs.length = 0;
-        stream.lastReceivedAt = 0;
+        stream.lastTimestamp = '';
+        stream.errorNotified = false;
       }
+
+      const resuming = !!stream.lastTimestamp;
 
       const processor = createLogStreamProcessor({
         stripHeaders: stream.skipHeaders,
         withTimestamps: $scope.state.displayTimestamps,
+        // We always request timestamps from Docker (see params below) so we can
+        // resume from the exact log timestamp on reconnect; the processor parses
+        // them and strips the prefix when the user has timestamps hidden.
+        streamHasTimestamps: true,
+        // On reconnect, drop lines Docker re-delivers at/before the resume point
+        // (its `since` filter is inclusive).
+        skipUntilTimestamp: resuming ? stream.lastTimestamp : undefined,
       });
 
       const abortController = new AbortController();
       stream.abortController = abortController;
 
-      // On a reconnect resume from the last line we saw (seconds granularity);
+      // On a reconnect resume from the exact timestamp of the last line we saw;
       // on the initial connect honour the user's "Fetch since" selection.
       const sinceFromUser = $scope.state.sinceTimestamp ? moment($scope.state.sinceTimestamp).unix() : 0;
-      const since = stream.lastReceivedAt || sinceFromUser;
+      const since = stream.lastTimestamp || sinceFromUser;
 
       const params = {
         stdout: true,
         stderr: true,
         follow: true,
-        timestamps: $scope.state.displayTimestamps,
+        // Always request timestamps so we can resume precisely on reconnect; the
+        // processor hides them from display when the user toggle is off.
+        timestamps: true,
         // tail is a historical-backfill request: apply it only on the initial
         // connect. On a reconnect we resume from `since`, so re-applying tail
         // would re-deliver the tail window. (0 is dropped by the service.)
-        tail: stream.lastReceivedAt ? 0 : $scope.state.lineCount,
+        tail: resuming ? 0 : $scope.state.lineCount,
         since,
       };
 
@@ -137,21 +163,36 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
         endpoint.Id,
         $transition$.params().id,
         params,
-        function onChunk(text) {
-          appendLines(processor.push(text));
+        function onChunk(bytes) {
+          const lines = processor.push(bytes);
+          appendLines(lines);
+          updateResumePoint(processor);
+          if (lines.length) {
+            // got data again -> allow a fresh error notification next failure
+            stream.errorNotified = false;
+          }
         },
         abortController.signal
       )
         .then(function onEnd() {
           appendLines(processor.flush());
+          updateResumePoint(processor);
           scheduleReconnect();
         })
         .catch(function onError(err) {
           if (abortController.signal.aborted) {
             return; // intentional abort (pause/destroy/param change)
           }
+          // Flush the trailing partial line before reconnecting (parity with
+          // onEnd); a truncated final frame is dropped by the processor.
+          appendLines(processor.flush());
+          updateResumePoint(processor);
+          // Notify once per reconnect loop, not on every 3s retry.
+          if (!stream.errorNotified) {
+            stream.errorNotified = true;
+            Notifications.error('Failure', err, 'Unable to stream container logs');
+          }
           scheduleReconnect();
-          Notifications.error('Failure', err, 'Unable to stream container logs');
         });
     }
 

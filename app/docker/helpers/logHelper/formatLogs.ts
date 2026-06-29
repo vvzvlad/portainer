@@ -134,9 +134,11 @@ export function formatLogs(
 }
 
 // Strips Docker's 8-byte multiplexed-stream headers from a non-TTY log buffer:
-// drops the leading header, then every header that follows a newline. The
-// buffer passed in must start on a frame boundary (the streaming demuxer in
-// logStream.ts guarantees this by only ever cutting on newline boundaries).
+// drops the leading header, then every header that follows a newline. This
+// text-level strip is only safe on a fully-buffered body (the AngularJS polling
+// services for container/service/task logs) where every line starts on a frame
+// boundary. The live-stream path (logStream.ts) demuxes frames at the byte
+// level instead and calls formatLogs WITHOUT `stripHeaders`.
 export function stripHeadersFunc(logs: string) {
   return logs.substring(8).replace(/\r?\n(.{8})/g, '\n');
 }

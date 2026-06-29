@@ -1,4 +1,5 @@
 import _ from 'lodash';
+import { InternalAxiosRequestConfig } from 'axios';
 
 import { EnvironmentId } from '@/react/portainer/environments/types';
 import PortainerError from '@/portainer/error';
@@ -10,6 +11,7 @@ import {
   portainerAgentManagerOperation,
   portainerAgentTargetHeader,
 } from '@/portainer/services/http-request.helper';
+import { dockerMaxAPIVersionInterceptor } from '@/portainer/services/dockerMaxApiVersionInterceptor';
 
 import { withAgentTargetHeader } from '../proxy/queries/utils';
 import { buildDockerProxyUrl } from '../proxy/queries/buildDockerProxyUrl';
@@ -207,8 +209,11 @@ export type StreamLogsParams = ContainerLogsParams & {
  * Live-tail a container's logs over HTTP.
  *
  * Unlike `getContainerLogs` (axios, buffers the whole body), this uses `fetch`
- * so we can read the response body as a `ReadableStream` and surface decoded
- * text chunks to the caller as they arrive (`follow=1`). The backend already
+ * so we can read the response body as a `ReadableStream` and surface the raw
+ * byte chunks to the caller as they arrive (`follow=1`). Bytes are handed over
+ * undecoded so the caller can demux Docker's binary multiplexed frames at the
+ * byte level (UTF-8-decoding the whole stream would corrupt frame headers). The
+ * backend already
  * streams `follow=1` transparently through the Docker proxy — including for
  * Agent/Edge environments — so no backend change is needed.
  *
@@ -226,7 +231,7 @@ export async function streamContainerLogs(
   environmentId: EnvironmentId,
   containerId: ContainerId,
   params: StreamLogsParams,
-  onChunk: (text: string) => void,
+  onChunk: (bytes: Uint8Array) => void,
   signal: AbortSignal
 ): Promise<void> {
   const path = buildDockerProxyUrl(
@@ -236,6 +241,14 @@ export async function streamContainerLogs(
     'logs'
   );
 
+  // The fetch path bypasses the axios request interceptors, so apply the same
+  // Docker max-API-version pinning axios applies to getContainerLogs. Reuse the
+  // shared interceptor (it only reads/rewrites `config.url`).
+  const pinnedConfig = await dockerMaxAPIVersionInterceptor({
+    url: path,
+  } as InternalAxiosRequestConfig);
+  const effectivePath = pinnedConfig.url ?? path;
+
   const query = new URLSearchParams();
   // _.pickBy drops undefined/0/'' the same way the axios path does
   Object.entries(_.pickBy(params)).forEach(([key, value]) => {
@@ -243,7 +256,7 @@ export async function streamContainerLogs(
   });
 
   // axios baseURL is 'api'; mirror it here since fetch doesn't share it.
-  const url = `api${path}?${query.toString()}`;
+  const url = `api${effectivePath}?${query.toString()}`;
 
   const headers: Record<string, string> = {};
   const target = portainerAgentTargetHeader();
@@ -271,23 +284,21 @@ export async function streamContainerLogs(
   }
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
 
   try {
     for (;;) {
-       
+
       const { value, done } = await reader.read();
       if (done) {
         break;
       }
       if (value) {
-        onChunk(decoder.decode(value, { stream: true }));
+        // Hand over the raw bytes undecoded; the caller demuxes Docker's binary
+        // frames and decodes complete lines itself. UTF-8 chars split across
+        // chunks are reassembled there before decoding, so no decoder flush is
+        // needed here. The caller flushes its own trailing partial line on end.
+        onChunk(value);
       }
-    }
-    // flush any bytes held by the decoder (multi-byte char split across chunks)
-    const tail = decoder.decode();
-    if (tail) {
-      onChunk(tail);
     }
   } finally {
     reader.releaseLock();
