@@ -34,6 +34,7 @@ func NewHandler(routePrefix string, bouncer security.BouncerService, dataStore d
 	router.Use(bouncer.AuthenticatedAccess, middlewares.CheckEndpointAuthorization(bouncer))
 
 	router.Handle("/{containerId}/gpus", httperror.LoggerHandler(h.containerGpusInspect)).Methods(http.MethodGet)
+	router.Handle("/{containerId}/image_status", httperror.LoggerHandler(h.imageStatus)).Methods(http.MethodGet)
 	router.Handle("/{containerId}/recreate", httperror.LoggerHandler(h.recreate)).Methods(http.MethodPost)
 
 	return h
