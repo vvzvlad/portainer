@@ -35,6 +35,8 @@ export function AutoUpdatePanel() {
     pollInterval: autoUpdate.PollInterval || '6h',
     scope: autoUpdate.Scope || 'labeled',
     cleanup: autoUpdate.Cleanup,
+    rollbackOnFailure: autoUpdate.RollbackOnFailure,
+    rollbackTimeout: autoUpdate.RollbackTimeout || '120s',
   };
 
   return (
@@ -79,6 +81,8 @@ export function AutoUpdatePanel() {
             PollInterval: values.pollInterval,
             Scope: values.scope,
             Cleanup: values.cleanup,
+            RollbackOnFailure: values.rollbackOnFailure,
+            RollbackTimeout: values.rollbackTimeout,
           },
         },
       },
@@ -154,6 +158,37 @@ function InnerForm({ isLoading }: { isLoading: boolean }) {
           />
         </div>
       </div>
+
+      <div className="form-group">
+        <div className="col-sm-12">
+          <SwitchField
+            label="Roll back on failed health check"
+            tooltip="When a standalone container with a healthcheck does not become healthy within the rollback timeout after an update, it is recreated on its previous image. Stack-managed containers are not rolled back."
+            checked={values.rollbackOnFailure}
+            name="rollbackOnFailure"
+            onChange={(value) => setFieldValue('rollbackOnFailure', value)}
+            labelClass="col-sm-3 col-lg-2"
+            disabled={!values.enabled}
+            data-cy="settings-autoUpdateRollback"
+          />
+        </div>
+      </div>
+
+      <FormControl
+        label="Rollback timeout"
+        inputId="autoupdate_rollback_timeout"
+        errors={errors.rollbackTimeout}
+        required
+      >
+        <Field
+          as={Input}
+          id="autoupdate_rollback_timeout"
+          placeholder="e.g. 120s"
+          name="rollbackTimeout"
+          disabled={!values.enabled || !values.rollbackOnFailure}
+          data-cy="settings-autoUpdateRollbackTimeout"
+        />
+      </FormControl>
 
       <div className="form-group">
         <div className="col-sm-12">

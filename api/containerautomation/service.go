@@ -49,6 +49,10 @@ type Service struct {
 	stackDeployer    deployments.StackDeployer
 	gitService       portainer.GitService
 
+	// notifier receives automation events (update/rollback/failure/heal). The
+	// default is logNotifier; the field is the seam external senders plug into.
+	notifier Notifier
+
 	mu          sync.Mutex
 	healJobID   string
 	updateJobID string
@@ -90,8 +94,18 @@ func NewService(
 		containerService: containerService,
 		stackDeployer:    stackDeployer,
 		gitService:       gitService,
+		notifier:         logNotifier{},
 		retries:          make(map[string]retryState),
 	}
+}
+
+// AutomationEnabledForEndpoint reports whether container automation (auto-heal and
+// auto-update) should run for an environment. It is the per-endpoint opt-out (M5)
+// layered on top of the global switch: an environment participates unless it has
+// been explicitly disabled. The zero value (not disabled) preserves the
+// pre-M5 behavior for every existing environment.
+func AutomationEnabledForEndpoint(endpoint *portainer.Endpoint) bool {
+	return endpoint != nil && !endpoint.ContainerAutomationDisabled
 }
 
 // Start schedules the enabled jobs according to the persisted settings.

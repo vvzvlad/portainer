@@ -70,6 +70,8 @@ func (store *Store) checkOrCreateDefaultSettings() error {
 		defaultSettings.ContainerAutomation.AutoUpdate.PollInterval = "6h"
 		defaultSettings.ContainerAutomation.AutoUpdate.Scope = "labeled"
 		defaultSettings.ContainerAutomation.AutoUpdate.Cleanup = false
+		defaultSettings.ContainerAutomation.AutoUpdate.RollbackOnFailure = false
+		defaultSettings.ContainerAutomation.AutoUpdate.RollbackTimeout = "120s"
 
 		return store.SettingsService.UpdateSettings(defaultSettings)
 	}

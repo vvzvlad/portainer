@@ -5,4 +5,6 @@ export interface Values {
   pollInterval: string;
   scope: AutoUpdateScope;
   cleanup: boolean;
+  rollbackOnFailure: boolean;
+  rollbackTimeout: string;
 }

@@ -49,7 +49,11 @@ func (s *Service) update() error {
 		scope = ScopeAll
 	}
 
-	cleanup := settings.ContainerAutomation.AutoUpdate.Cleanup
+	opts := updateOptions{
+		cleanup:         settings.ContainerAutomation.AutoUpdate.Cleanup,
+		rollback:        settings.ContainerAutomation.AutoUpdate.RollbackOnFailure,
+		rollbackTimeout: parseRollbackTimeout(settings.ContainerAutomation.AutoUpdate.RollbackTimeout),
+	}
 
 	endpoints, err := s.dataStore.Endpoint().Endpoints()
 	if err != nil {
@@ -66,17 +70,47 @@ func (s *Service) update() error {
 			continue
 		}
 
-		s.updateEndpoint(endpoint, scope, cleanup)
+		// Per-endpoint opt-out (M5): skip environments where automation is disabled,
+		// independently of the global switch. Zero value participates, so existing
+		// installs are unaffected.
+		if !AutomationEnabledForEndpoint(endpoint) {
+			log.Debug().Int("endpoint_id", int(endpoint.ID)).
+				Msg("auto-update: automation disabled for this environment, skipping")
+			continue
+		}
+
+		s.updateEndpoint(endpoint, scope, opts)
 	}
 
 	return nil
+}
+
+// updateOptions carries the per-pass auto-update toggles resolved from settings.
+type updateOptions struct {
+	// cleanup removes the now-dangling old image after a confirmed-good update.
+	cleanup bool
+	// rollback enables the health gate + rollback of a failed standalone update.
+	rollback bool
+	// rollbackTimeout bounds how long the health gate waits before rolling back.
+	rollbackTimeout time.Duration
+}
+
+// parseRollbackTimeout resolves the configured rollback timeout, falling back to
+// the default when empty or unparseable.
+func parseRollbackTimeout(raw string) time.Duration {
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return defaultRollbackTimeout
+	}
+
+	return d
 }
 
 // updateEndpoint applies image updates to the in-scope, outdated containers of a
 // single endpoint, routing each container to the standalone / stack / external
 // apply path. Stack-managed candidates are grouped so each owning stack is
 // redeployed at most once per tick.
-func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, cleanup bool) {
+func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, opts updateOptions) {
 	endpointID := int(endpoint.ID)
 
 	// Swarm note (M4 limitation, mirrors auto-heal): we connect to the endpoint's
@@ -149,7 +183,7 @@ func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, cle
 	}
 
 	for _, c := range grouped.Standalone {
-		s.updateStandalone(cli, endpoint, c, cleanup)
+		s.updateStandalone(cli, endpoint, c, opts)
 	}
 
 	for _, st := range grouped.Stacks {
@@ -184,10 +218,44 @@ func (s *Service) stackLookupForEndpoint(endpointID portainer.EndpointID) func(p
 	}
 }
 
-// updateStandalone recreates a standalone container with a re-pull of its image.
-// On a successful update it optionally removes the now-dangling old image.
-func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer.Endpoint, c UpdateCandidate, cleanup bool) {
+// updateStandalone recreates a standalone container with a re-pull of its image,
+// then (when rollback is enabled and the container has a healthcheck) holds a
+// health gate over the new container and rolls back to the previous image if it
+// fails to become healthy. The old-image cleanup is deliberately ordered AFTER
+// the health gate, so the rollback target is never removed before the update is
+// confirmed good.
+//
+// Sequence: capture old image id + original ref + healthcheck -> recreate(pull)
+// -> [health gate] -> on healthy: cleanup (if enabled); on unhealthy: rollback
+// (never cleanup).
+func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer.Endpoint, c UpdateCandidate, opts updateOptions) {
+	endpointID := int(endpoint.ID)
+
+	// Capture the pre-update image identity for a possible rollback. The container
+	// list gives us the old image id; an inspect adds the original reference (re-tag
+	// target) and whether a usable healthcheck exists. We only health-gate when
+	// rollback is enabled, the container has a healthcheck, and we resolved both the
+	// old image id and its reference; otherwise there is nothing to gate on / roll
+	// back to.
 	oldImageID := c.ImageID
+	var originalRef string
+	healthGated := false
+	if opts.rollback {
+		if inspect, err := cli.ContainerInspect(s.baseCtx, c.ID); err != nil {
+			log.Warn().Err(err).Str("container_id", c.ID).Int("endpoint_id", endpointID).
+				Msg("auto-update: unable to inspect container before update, proceeding without a health gate")
+		} else {
+			originalRef = inspect.Config.Image
+			if oldImageID == "" {
+				oldImageID = inspect.Image
+			}
+			healthGated = hasHealthGate(inspect.Config.Healthcheck) && oldImageID != "" && originalRef != ""
+			if !healthGated {
+				log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).
+					Msg("auto-update: container has no healthcheck, updating without a rollback gate")
+			}
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(s.baseCtx, recreateTimeout)
 	defer cancel()
@@ -196,15 +264,37 @@ func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer
 	if err != nil {
 		// Recreate preserves config and rolls back on a create failure; a pull or
 		// create failure leaves the original container running.
-		log.Warn().Err(err).Str("container_id", c.ID).Int("endpoint_id", int(endpoint.ID)).
+		log.Warn().Err(err).Str("container_id", c.ID).Int("endpoint_id", endpointID).
 			Msg("auto-update: failed to recreate standalone container")
+		s.notifier.Notify(Event{
+			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID,
+			Message: "failed to recreate standalone container", Err: err,
+		})
 		return
 	}
 
-	log.Info().Str("container_id", c.ID).Int("endpoint_id", int(endpoint.ID)).
+	log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).
 		Msg("auto-update: recreated standalone container with updated image")
+	newImage := ""
+	if newContainer != nil {
+		newImage = newContainer.Config.Image
+	}
+	s.notifier.Notify(Event{
+		Kind: EventUpdated, EndpointID: endpointID, ContainerID: newContainer.ID,
+		Image: newImage, Message: "updated standalone container",
+	})
 
-	if cleanup && newContainer != nil && newContainer.Image != oldImageID {
+	// Health gate: roll back if the new container does not become healthy in time.
+	// The old image is preserved (not cleaned up) until the gate confirms health,
+	// so the rollback target is still available.
+	if healthGated {
+		if !s.healthGate(cli, newContainer.ID, opts.rollbackTimeout) {
+			s.rollback(cli, endpoint, newContainer.ID, oldImageID, originalRef)
+			return
+		}
+	}
+
+	if opts.cleanup && newContainer != nil && newContainer.Image != oldImageID {
 		s.cleanupOldImage(cli, endpoint, oldImageID)
 	}
 }
@@ -291,4 +381,8 @@ func (s *Service) updateStack(endpoint *portainer.Endpoint, st StackUpdate) {
 
 	log.Info().Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
 		Msg("auto-update: redeployed compose stack with updated images")
+	s.notifier.Notify(Event{
+		Kind: EventUpdated, EndpointID: int(endpoint.ID), StackID: st.StackID,
+		Message: "redeployed compose stack with updated images",
+	})
 }

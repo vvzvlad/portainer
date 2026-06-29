@@ -154,6 +154,10 @@ export interface AutoUpdateSettings {
   PollInterval: string;
   Scope: AutoUpdateScope;
   Cleanup: boolean;
+  // RollbackOnFailure health-gates a standalone update and rolls back to the
+  // previous image when the new container does not become healthy in time.
+  RollbackOnFailure: boolean;
+  RollbackTimeout: string;
 }
 
 export interface ContainerAutomationSettings {

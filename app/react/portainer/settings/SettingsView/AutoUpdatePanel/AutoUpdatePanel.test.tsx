@@ -31,6 +31,8 @@ describe('AutoUpdatePanel', () => {
               PollInterval: '12h',
               Scope: 'all',
               Cleanup: true,
+              RollbackOnFailure: true,
+              RollbackTimeout: '90s',
             },
           },
         })
@@ -58,6 +60,14 @@ describe('AutoUpdatePanel', () => {
         name: /Remove dangling old images after update/i,
       })
     ).toBeChecked();
+
+    expect(
+      screen.getByRole('checkbox', {
+        name: /Roll back on failed health check/i,
+      })
+    ).toBeChecked();
+
+    expect(screen.getByLabelText(/Rollback timeout/i)).toHaveValue('90s');
   });
 
   it('defaults the poll interval when missing', async () => {
@@ -75,6 +85,8 @@ describe('AutoUpdatePanel', () => {
               PollInterval: '',
               Scope: 'labeled',
               Cleanup: false,
+              RollbackOnFailure: false,
+              RollbackTimeout: '',
             },
           },
         })
@@ -91,5 +103,14 @@ describe('AutoUpdatePanel', () => {
     expect(
       screen.getByRole('checkbox', { name: /Enable auto-update/i })
     ).not.toBeChecked();
+
+    expect(
+      screen.getByRole('checkbox', {
+        name: /Roll back on failed health check/i,
+      })
+    ).not.toBeChecked();
+
+    // Falls back to the default rollback timeout when missing.
+    expect(screen.getByLabelText(/Rollback timeout/i)).toHaveValue('120s');
   });
 });

@@ -13,6 +13,8 @@ const base: Values = {
   pollInterval: '6h',
   scope: 'labeled',
   cleanup: false,
+  rollbackOnFailure: false,
+  rollbackTimeout: '120s',
 };
 
 describe('AutoUpdatePanel validation', () => {
@@ -45,6 +47,25 @@ describe('AutoUpdatePanel validation', () => {
   it('rejects an empty poll interval', async () => {
     expect(await validate({ ...base, pollInterval: '' })).toContain(
       'Poll interval is required'
+    );
+  });
+
+  it('accepts a positive rollback timeout', async () => {
+    expect(
+      await validate({ ...base, rollbackTimeout: '120s' })
+    ).toBeUndefined();
+    expect(await validate({ ...base, rollbackTimeout: '2m' })).toBeUndefined();
+  });
+
+  it('rejects an empty rollback timeout', async () => {
+    expect(await validate({ ...base, rollbackTimeout: '' })).toContain(
+      'Rollback timeout is required'
+    );
+  });
+
+  it('rejects a malformed rollback timeout', async () => {
+    expect(await validate({ ...base, rollbackTimeout: 'soon' })).toContain(
+      'Must be a valid duration (e.g. 120s, 2m)'
     );
   });
 });

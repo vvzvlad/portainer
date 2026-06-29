@@ -53,6 +53,9 @@ type endpointUpdatePayload struct {
 	EdgeCheckinInterval *int `example:"5"`
 	// Associated Kubernetes data
 	Kubernetes *portainer.KubernetesData
+	// ContainerAutomationDisabled opts this environment out of native container
+	// automation (auto-heal / auto-update) regardless of the global switch.
+	ContainerAutomationDisabled *bool `example:"false"`
 }
 
 func (payload *endpointUpdatePayload) Validate(r *http.Request) error {
@@ -118,6 +121,10 @@ func (handler *Handler) endpointUpdate(w http.ResponseWriter, r *http.Request) *
 
 	if payload.Gpus != nil {
 		endpoint.Gpus = payload.Gpus
+	}
+
+	if payload.ContainerAutomationDisabled != nil {
+		endpoint.ContainerAutomationDisabled = *payload.ContainerAutomationDisabled
 	}
 
 	endpoint.PublicURL = *cmp.Or(payload.PublicURL, &endpoint.PublicURL)

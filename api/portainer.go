@@ -500,6 +500,11 @@ type (
 
 		EnableGPUManagement bool `json:"EnableGPUManagement,omitempty"`
 
+		// ContainerAutomationDisabled opts this environment out of native container
+		// automation (auto-heal / auto-update) regardless of the global switch (M5).
+		// The zero value participates, preserving behavior for existing environments.
+		ContainerAutomationDisabled bool `json:"ContainerAutomationDisabled,omitempty"`
+
 		// Deprecated fields
 		// Deprecated in DBVersion == 4
 		TLS           bool   `json:"TLS,omitempty" swaggerignore:"true"`
@@ -1224,6 +1229,11 @@ type (
 				PollInterval string `json:"PollInterval" example:"6h"`
 				Scope        string `json:"Scope" example:"labeled"` // "labeled" | "all"
 				Cleanup      bool   `json:"Cleanup"`                 // remove dangling old images after a standalone update
+				// RollbackOnFailure health-gates a standalone update: if the new
+				// container does not become healthy within RollbackTimeout, it is
+				// recreated back on the previous image. Standalone-only (M5).
+				RollbackOnFailure bool   `json:"RollbackOnFailure"`
+				RollbackTimeout   string `json:"RollbackTimeout" example:"120s"`
 			} `json:"AutoUpdate"`
 		} `json:"ContainerAutomation"`
 	}

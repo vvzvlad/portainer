@@ -45,3 +45,39 @@ func TestSettingsUpdatePayloadValidateAutoUpdatePollInterval(t *testing.T) {
 		})
 	}
 }
+
+// TestSettingsUpdatePayloadValidateRollbackTimeout covers the M5 health-gated
+// rollback timeout: it must be a positive Go duration.
+func TestSettingsUpdatePayloadValidateRollbackTimeout(t *testing.T) {
+	cases := []struct {
+		name    string
+		timeout string
+		wantErr bool
+	}{
+		{name: "two minutes is allowed", timeout: "120s", wantErr: false},
+		{name: "compound duration is allowed", timeout: "1m30s", wantErr: false},
+		{name: "zero is rejected", timeout: "0s", wantErr: true},
+		{name: "negative is rejected", timeout: "-5s", wantErr: true},
+		{name: "unparseable is rejected", timeout: "soon", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := settingsUpdatePayload{
+				ContainerAutomation: &containerAutomationSettingsPayload{
+					AutoUpdate: &autoUpdateSettingsPayload{
+						RollbackTimeout: strptr(tc.timeout),
+					},
+				},
+			}
+
+			err := payload.Validate(httptest.NewRequest("PUT", "/settings", nil))
+			if tc.wantErr && err == nil {
+				t.Errorf("Validate(%q) = nil, want error", tc.timeout)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("Validate(%q) = %v, want nil", tc.timeout, err)
+			}
+		})
+	}
+}

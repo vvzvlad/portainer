@@ -97,6 +97,15 @@ func (s *Service) heal() error {
 			continue
 		}
 
+		// Per-endpoint opt-out (M5): skip environments where automation is disabled,
+		// independently of the global switch. Zero value participates, so existing
+		// installs are unaffected.
+		if !AutomationEnabledForEndpoint(endpoint) {
+			log.Debug().Int("endpoint_id", int(endpoint.ID)).
+				Msg("auto-heal: automation disabled for this environment, skipping")
+			continue
+		}
+
 		s.healEndpoint(endpoint, scope)
 	}
 
@@ -173,5 +182,9 @@ func (s *Service) healEndpoint(endpoint *portainer.Endpoint, scope string) {
 
 		log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).Int("attempt", newState.attempts).
 			Msg("auto-heal: restarted unhealthy container")
+		s.notifier.Notify(Event{
+			Kind: EventHealRestarted, EndpointID: endpointID, ContainerID: c.ID,
+			Message: "restarted unhealthy container",
+		})
 	}
 }

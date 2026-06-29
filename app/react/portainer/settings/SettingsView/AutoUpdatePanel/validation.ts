@@ -68,5 +68,25 @@ export function validation(): SchemaOf<Values> {
       .oneOf(['labeled', 'all'])
       .required('Scope is required'),
     cleanup: boolean().default(false),
+    rollbackOnFailure: boolean().default(false),
+    rollbackTimeout: string()
+      .required('Rollback timeout is required')
+      .matches(durationPattern, 'Must be a valid duration (e.g. 120s, 2m)')
+      .test(
+        'positive-rollback-timeout',
+        'Rollback timeout must be positive',
+        (value) => {
+          if (!value) {
+            return true; // let required/matches report the error first
+          }
+
+          const seconds = parseGoDurationSeconds(value);
+          if (seconds === null) {
+            return true; // let matches report the format error first
+          }
+
+          return seconds > 0;
+        }
+      ),
   });
 }

@@ -595,6 +595,8 @@
         "Cleanup": false,
         "Enabled": false,
         "PollInterval": "6h",
+        "RollbackOnFailure": false,
+        "RollbackTimeout": "120s",
         "Scope": "labeled"
       }
     },

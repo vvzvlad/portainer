@@ -78,10 +78,12 @@ type autoHealSettingsPayload struct {
 }
 
 type autoUpdateSettingsPayload struct {
-	Enabled      *bool   `example:"false"`
-	PollInterval *string `example:"6h"`
-	Scope        *string `example:"labeled"`
-	Cleanup      *bool   `example:"false"`
+	Enabled           *bool   `example:"false"`
+	PollInterval      *string `example:"6h"`
+	Scope             *string `example:"labeled"`
+	Cleanup           *bool   `example:"false"`
+	RollbackOnFailure *bool   `example:"false"`
+	RollbackTimeout   *string `example:"120s"`
 }
 
 func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
@@ -154,6 +156,12 @@ func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
 
 		if autoUpdate.Scope != nil && *autoUpdate.Scope != "labeled" && *autoUpdate.Scope != "all" {
 			return errors.New("Invalid auto-update scope. Value must be one of: labeled, all")
+		}
+
+		if autoUpdate.RollbackTimeout != nil {
+			if d, err := time.ParseDuration(*autoUpdate.RollbackTimeout); err != nil || d <= 0 {
+				return errors.New("Invalid auto-update rollback timeout. Must be a positive duration (e.g. 120s)")
+			}
 		}
 	}
 
@@ -311,6 +319,8 @@ func (handler *Handler) updateSettings(tx dataservices.DataStoreTx, payload sett
 		current.PollInterval = *cmp.Or(autoUpdate.PollInterval, &current.PollInterval)
 		current.Scope = *cmp.Or(autoUpdate.Scope, &current.Scope)
 		current.Cleanup = *cmp.Or(autoUpdate.Cleanup, &current.Cleanup)
+		current.RollbackOnFailure = *cmp.Or(autoUpdate.RollbackOnFailure, &current.RollbackOnFailure)
+		current.RollbackTimeout = *cmp.Or(autoUpdate.RollbackTimeout, &current.RollbackTimeout)
 	}
 
 	if err := tx.Settings().UpdateSettings(settings); err != nil {
