@@ -436,6 +436,65 @@ angular.module('portainer.docker', ['portainer.app', reactModule]).config([
       },
     };
 
+    // Stack-scoped container attribute sub-tabs. These mirror the global
+    // docker.containers.container.* states but live under the stack tree so the
+    // inherited stack params (name/stackId/type/...) are preserved and the
+    // breadcrumb keeps the stack trail (Stacks > stack > container > tab) when a
+    // container is opened from a stack.
+    var stackContainerAttach = {
+      name: 'docker.stacks.stack.container.attach',
+      url: '/attach',
+      views: {
+        'content@': {
+          templateUrl: '~@/docker/views/containers/console/attach.html',
+          controller: 'ContainerConsoleController',
+        },
+      },
+    };
+
+    var stackContainerExec = {
+      name: 'docker.stacks.stack.container.exec',
+      url: '/exec',
+      views: {
+        'content@': {
+          templateUrl: '~@/docker/views/containers/console/exec.html',
+          controller: 'ContainerConsoleController',
+        },
+      },
+    };
+
+    var stackContainerInspect = {
+      name: 'docker.stacks.stack.container.inspect',
+      url: '/inspect',
+      views: {
+        'content@': {
+          component: 'dockerContainerInspectView',
+        },
+      },
+    };
+
+    var stackContainerLogs = {
+      name: 'docker.stacks.stack.container.logs',
+      url: '/logs',
+      views: {
+        'content@': {
+          templateUrl: '~@/docker/views/containers/logs/containerlogs.html',
+          controller: 'ContainerLogsController',
+        },
+      },
+    };
+
+    var stackContainerStats = {
+      name: 'docker.stacks.stack.container.stats',
+      url: '/stats',
+      views: {
+        'content@': {
+          templateUrl: '~@/docker/views/containers/stats/containerstats.html',
+          controller: 'ContainerStatsController',
+        },
+      },
+    };
+
     var stackCreation = {
       name: 'docker.stacks.newstack',
       url: '/newstack',
@@ -669,6 +728,11 @@ angular.module('portainer.docker', ['portainer.app', reactModule]).config([
     $stateRegistryProvider.register(stacks);
     $stateRegistryProvider.register(stack);
     $stateRegistryProvider.register(stackContainer);
+    $stateRegistryProvider.register(stackContainerAttach);
+    $stateRegistryProvider.register(stackContainerExec);
+    $stateRegistryProvider.register(stackContainerInspect);
+    $stateRegistryProvider.register(stackContainerLogs);
+    $stateRegistryProvider.register(stackContainerStats);
     $stateRegistryProvider.register(stackCreation);
     $stateRegistryProvider.register(swarm);
     $stateRegistryProvider.register(swarmVisualizer);

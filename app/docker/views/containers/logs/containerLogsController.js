@@ -1,5 +1,8 @@
 import moment from 'moment';
 
+import { trimContainerName } from '@/docker/filters/utils';
+import { getContainerSubTabBreadcrumbs } from '@/react/docker/containers/ItemView/containerBreadcrumbs';
+
 angular.module('portainer.docker').controller('ContainerLogsController', [
   '$scope',
   '$transition$',
@@ -81,10 +84,16 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
 
     function initView() {
       HttpRequestHelper.setPortainerAgentTargetHeader($transition$.params().nodeName);
+      // Set the trail up-front (without the container name) so it survives the
+      // load window and a load error; the success path fills in the name.
+      $scope.breadcrumbs = getContainerSubTabBreadcrumbs($transition$.to().name, $transition$.params(), '', 'Logs');
       ContainerService.container(endpoint.Id, $transition$.params().id)
         .then(function success(data) {
           var container = data;
           $scope.container = container;
+          // Stack-aware breadcrumb: keeps the stack trail when the container was
+          // opened from a stack, falls back to the global Containers trail otherwise.
+          $scope.breadcrumbs = getContainerSubTabBreadcrumbs($transition$.to().name, $transition$.params(), trimContainerName(container.Name), 'Logs');
 
           const logsEnabled = container.HostConfig && container.HostConfig.LogConfig && container.HostConfig.LogConfig.Type && container.HostConfig.LogConfig.Type !== 'none';
           $scope.logsEnabled = logsEnabled;

@@ -12,12 +12,12 @@ import { ButtonSelector } from '@@/form-components/ButtonSelector/ButtonSelector
 import { Code } from '@@/Code';
 
 import { useContainerInspect } from '../queries/useContainerInspect';
+import { getContainerSubTabBreadcrumbs } from '../ItemView/containerBreadcrumbs';
 
 export function InspectView() {
   const environmentId = useEnvironmentId();
-  const {
-    params: { id, nodeName },
-  } = useCurrentStateAndParams();
+  const { state, params } = useCurrentStateAndParams();
+  const { id, nodeName } = params;
   const inspectQuery = useContainerInspect(environmentId, id, { nodeName });
   const [viewType, setViewType] = useState<'tree' | 'text'>('tree');
 
@@ -31,15 +31,12 @@ export function InspectView() {
     <>
       <PageHeader
         title="Container inspect"
-        breadcrumbs={[
-          { label: 'Containers', link: 'docker.containers' },
-          {
-            label: trimContainerName(containerInfo.Name),
-            link: '^',
-            // linkParams: { id: containerInfo.Id },
-          },
-          'Inspect',
-        ]}
+        breadcrumbs={getContainerSubTabBreadcrumbs(
+          state?.name,
+          params,
+          trimContainerName(containerInfo.Name),
+          'Inspect'
+        )}
       />
 
       <div className="row">
