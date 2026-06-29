@@ -46,7 +46,6 @@ export function InnerForm({
     setFieldValue,
     errors,
     isValid,
-    setFieldError,
     setValues,
     isSubmitting,
     dirty,
@@ -175,7 +174,6 @@ export function InnerForm({
           }}
           values={values.EdgeSettings}
           errors={errors.EdgeSettings as FormikErrors<EdgeTemplateSettings>}
-          setFieldError={setFieldError}
         />
       )}
 

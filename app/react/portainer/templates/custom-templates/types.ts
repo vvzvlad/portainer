@@ -1,17 +1,12 @@
 import { UserId } from '@/portainer/users/types';
 import { StackType } from '@/react/common/stacks/types';
-import {
-  StaggerConfig,
-  getDefaultStaggerConfig,
-} from '@/react/edge/edge-stacks/components/StaggerFieldset.types';
+import { StaggerConfig } from '@/react/edge/edge-stacks/components/StaggerFieldset.types';
 
 import { ResourceControlResponse } from '../../access-control/types';
 import { RelativePathModel, RepoConfigResponse } from '../../gitops/types';
 import { VariableDefinition } from '../../custom-templates/components/CustomTemplatesVariablesDefinitionField';
 import { Platform } from '../types';
 import { RegistryId } from '../../registries/types/registry';
-import { getDefaultRelativePathModel } from '../../gitops/RelativePathFieldset/types';
-import { isBE } from '../../feature-flags/feature-flags.service';
 
 export type CustomTemplate = {
   Id: number;
@@ -137,15 +132,5 @@ export const CustomTemplateKubernetesType = StackType.Kubernetes;
 export function getDefaultEdgeTemplateSettings():
   | EdgeTemplateSettings
   | undefined {
-  if (!isBE) {
-    return undefined;
-  }
-
-  return {
-    PrePullImage: false,
-    RetryDeploy: false,
-    PrivateRegistryId: undefined,
-    RelativePathSettings: getDefaultRelativePathModel(),
-    StaggerConfig: getDefaultStaggerConfig(),
-  };
+  return undefined;
 }

@@ -8,7 +8,6 @@ interface AdminGroupSearchConfigItemProps {
   value: LDAPGroupSearchSettings;
   index: number;
   count: number;
-  isLimited: boolean;
   onChange: (value: LDAPGroupSearchSettings) => void;
   onRemove: () => void;
 }
@@ -17,7 +16,6 @@ export function AdminGroupSearchConfigItem({
   value,
   index,
   count,
-  isLimited,
   onChange,
   onRemove,
 }: AdminGroupSearchConfigItemProps) {
@@ -39,8 +37,6 @@ export function AdminGroupSearchConfigItem({
               onChange({ ...value, GroupBaseDN: e.target.value })
             }
             placeholder="dc=ldap,dc=domain,dc=tld"
-            disabled={isLimited}
-            className={isLimited ? 'limited-be border-0' : undefined}
           />
         </FormControl>
 
@@ -59,8 +55,6 @@ export function AdminGroupSearchConfigItem({
               onChange({ ...value, GroupAttribute: e.target.value })
             }
             placeholder="member"
-            disabled={isLimited}
-            className={isLimited ? 'limited-be border-0' : undefined}
           />
         </FormControl>
       </div>
@@ -82,15 +76,12 @@ export function AdminGroupSearchConfigItem({
                 onChange({ ...value, GroupFilter: e.target.value })
               }
               placeholder="(objectClass=groupOfNames)"
-              className={isLimited ? 'limited-be border-0' : undefined}
-              disabled={isLimited}
             />
             <InputListActionButtons
               index={index}
               count={count}
               showDelete={index > 0}
               onDelete={onRemove}
-              disabled={isLimited}
               data-cy="admin-group-search"
             />
           </div>

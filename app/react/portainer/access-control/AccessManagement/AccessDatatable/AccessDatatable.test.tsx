@@ -7,10 +7,6 @@ import { withTestQueryProvider } from '@/react/test-utils/withTestQuery';
 import { AccessDatatable } from './AccessDatatable';
 import { Access } from './types';
 
-vi.mock('@/react/portainer/feature-flags/feature-flags.service', () => ({
-  isBE: true,
-}));
-
 function createMockAccess(overrides: Partial<Access> = {}): Access {
   return {
     Id: 1,
@@ -28,9 +24,7 @@ function renderComponent(
     tableKey: 'test-access-table',
     dataset: [],
     onRemove: vi.fn(),
-    isUpdatingAccess: false,
     isLoading: false,
-    onUpdate: vi.fn(),
   };
 
   const Wrapped = withTestQueryProvider(withTestRouter(AccessDatatable));
@@ -102,59 +96,6 @@ describe('AccessDatatable', () => {
       const elements = screen.getAllByText(/Access tagged as/);
       expect(elements.length).toBeGreaterThan(0);
       expect(elements[0]).toBeVisible();
-    });
-  });
-
-  describe('update functionality', () => {
-    it('should render update button when isUpdateEnabled is true', () => {
-      const mockAccess = createMockAccess();
-      renderComponent({
-        isLoading: false,
-        isUpdateEnabled: true,
-        showRoles: true,
-        dataset: [mockAccess],
-      });
-
-      const updateButton = screen.getByRole('button', { name: /update/i });
-      expect(updateButton).toBeVisible();
-    });
-
-    it('should disable update button when no roles are changed', () => {
-      const mockAccess = createMockAccess();
-      renderComponent({
-        isLoading: false,
-        isUpdateEnabled: true,
-        showRoles: true,
-        dataset: [mockAccess],
-      });
-
-      const updateButton = screen.getByRole('button', { name: /update/i });
-      expect(updateButton).toBeDisabled();
-    });
-
-    it('should show "Updating..." text when isUpdatingAccess is true', () => {
-      const mockAccess = createMockAccess();
-      renderComponent({
-        isLoading: false,
-        isUpdatingAccess: true,
-        isUpdateEnabled: true,
-        showRoles: true,
-        dataset: [mockAccess],
-      });
-
-      expect(screen.getByText('Updating...')).toBeVisible();
-    });
-
-    it('should show warning text when showWarning and isUpdateEnabled are true', () => {
-      const mockAccess = createMockAccess();
-      renderComponent({
-        isLoading: false,
-        isUpdateEnabled: true,
-        showWarning: true,
-        dataset: [mockAccess],
-      });
-
-      expect(screen.getByText(/logout and login/i)).toBeVisible();
     });
   });
 });

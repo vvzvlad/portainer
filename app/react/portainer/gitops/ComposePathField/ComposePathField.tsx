@@ -4,17 +4,11 @@ import { FormControl } from '@@/form-components/FormControl';
 import { TextTip } from '@@/Tip/TextTip';
 import { Input } from '@@/form-components/Input';
 
-import { GitFormModel } from '../types';
-import { isBE } from '../../feature-flags/feature-flags.service';
-
-import { PathSelector } from './PathSelector';
-
 interface Props {
   errors?: string;
   value: string;
   onChange(value: string): void;
   isCompose: boolean;
-  model: GitFormModel;
   isDockerStandalone: boolean;
 }
 
@@ -22,7 +16,6 @@ export function ComposePathField({
   value,
   onChange,
   isCompose,
-  model,
   isDockerStandalone,
   errors,
 }: Props) {
@@ -68,25 +61,15 @@ export function ComposePathField({
           required
           errors={errors}
         >
-          {isBE ? (
-            <PathSelector
-              value={value}
-              onChange={onChange}
-              placeholder={isCompose ? 'docker-compose.yml' : 'manifest.yml'}
-              model={model}
-              inputId="stack_repository_path"
-            />
-          ) : (
-            <Input
-              value={inputValue}
-              data-cy="stack-repository-path-input"
-              onChange={(e) => {
-                updateInputValue(e.target.value);
-              }}
-              placeholder={isCompose ? 'docker-compose.yml' : 'manifest.yml'}
-              id="stack_repository_path"
-            />
-          )}
+          <Input
+            value={inputValue}
+            data-cy="stack-repository-path-input"
+            onChange={(e) => {
+              updateInputValue(e.target.value);
+            }}
+            placeholder={isCompose ? 'docker-compose.yml' : 'manifest.yml'}
+            id="stack_repository_path"
+          />
         </FormControl>
       </div>
     </div>

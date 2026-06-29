@@ -1,10 +1,7 @@
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
 import Docker from '@/assets/ico/vendor/docker.svg?c';
 import Podman from '@/assets/ico/vendor/podman.svg?c';
 import Kubernetes from '@/assets/ico/vendor/kubernetes.svg?c';
-import Kubesolo from '@/assets/ico/vendor/kubesolo.svg?c';
 import Azure from '@/assets/ico/vendor/azure.svg?c';
-import InstallK8s from '@/assets/ico/vendor/install-kubernetes.svg?c';
 
 import { BoxSelectorOption } from '@@/BoxSelector';
 
@@ -64,29 +61,7 @@ export const existingEnvironmentTypes: EnvironmentOption[] = [
   },
 ];
 
-export const newEnvironmentTypes: EnvironmentOption[] = [
-  {
-    id: 'kubesolo',
-    value: 'kubesolo',
-    label: 'KubeSolo (Edge)',
-    description:
-      'Deploy a single-node Kubernetes edge environment with KubeSolo',
-    icon: Kubesolo,
-    iconType: 'logo',
-    feature: FeatureId.KUBESOLO,
-    disabledWhenLimited: true,
-  },
-  {
-    id: 'k8sInstall',
-    value: 'k8sInstall',
-    label: 'Create Kubernetes cluster',
-    description: 'Create a Kubernetes cluster on existing infrastructure',
-    icon: InstallK8s,
-    iconType: 'logo',
-    feature: FeatureId.K8SINSTALL,
-    disabledWhenLimited: true,
-  },
-];
+export const newEnvironmentTypes: EnvironmentOption[] = [];
 
 export const environmentTypes: EnvironmentOption[] = [
   ...existingEnvironmentTypes,

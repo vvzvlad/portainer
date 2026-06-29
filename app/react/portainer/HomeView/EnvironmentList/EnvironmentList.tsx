@@ -25,7 +25,6 @@ import { useAvailableSortGroups } from '@/react/portainer/environments/queries/u
 import { getPlatformIconByPlatform } from '@/react/portainer/environments/utils/get-platform-icon';
 import { getHealthIcon } from '@/react/portainer/environments/utils/get-health-icon';
 import { getGroupIcon } from '@/react/portainer/environments/utils/get-group-icon';
-import { UpdateBadge } from '@/react/portainer/HomeView/EnvironmentList/UpdateBadge';
 import { KubeconfigButton } from '@/react/portainer/HomeView/EnvironmentList/KubeconfigButton';
 import { EnvironmentCard } from '@/react/portainer/HomeView/EnvironmentList/EnvironmentItem/EnvironmentCard';
 
@@ -139,7 +138,7 @@ export function EnvironmentList({ onClickBrowse }: Props) {
 
   const sortOrder = tableState.sortBy?.desc ? 'desc' : 'asc';
 
-  const { isLoading, environments, totalCount, updateAvailable } =
+  const { isLoading, environments, totalCount } =
     useEnvironmentList(
       {
         page: tableState.page + 1,
@@ -173,7 +172,6 @@ export function EnvironmentList({ onClickBrowse }: Props) {
   );
 
   const headerButtons = [
-    updateAvailable && <UpdateBadge key="update-badge" />,
     <KubeconfigButton
       key="kube-config-button"
       environments={environments}

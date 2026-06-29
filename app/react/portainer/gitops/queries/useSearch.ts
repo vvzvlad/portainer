@@ -2,8 +2,6 @@ import { useQuery } from '@tanstack/react-query';
 
 import axios from '@/portainer/services/axios/axios';
 
-import { isBE } from '../../feature-flags/feature-flags.service';
-
 interface SearchPayload {
   keyword: string;
   reference?: string;
@@ -15,7 +13,7 @@ export function useSearch(payload: SearchPayload, enabled: boolean) {
   return useQuery({
     queryKey: ['gitops', 'search', payload],
     queryFn: () => searchRepo(payload),
-    enabled: isBE && enabled,
+    enabled: false,
     retry: false,
     cacheTime: 0,
   });

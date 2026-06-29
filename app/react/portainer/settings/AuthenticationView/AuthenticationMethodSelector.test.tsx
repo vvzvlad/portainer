@@ -24,9 +24,6 @@ describe('AuthenticationMethodSelector', () => {
     // Verify all authentication methods are rendered
     expect(screen.getByLabelText('Internal', { exact: false })).toBeVisible();
     expect(screen.getByLabelText('LDAP', { exact: false })).toBeVisible();
-    expect(
-      screen.getByLabelText('Microsoft Active Directory', { exact: false })
-    ).toBeVisible();
     expect(screen.getByLabelText('OAuth', { exact: false })).toBeVisible();
   });
 

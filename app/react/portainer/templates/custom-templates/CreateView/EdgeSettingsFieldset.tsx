@@ -16,13 +16,11 @@ export function EdgeSettingsFieldset({
   errors,
   gitConfig,
   fileValues,
-  setFieldError,
 }: {
   values: EdgeTemplateSettings;
   setValues: (values: SetStateAction<EdgeTemplateSettings>) => void;
   errors?: FormikErrors<EdgeTemplateSettings>;
   gitConfig?: GitFormModel;
-  setFieldError: (field: string, message: string) => void;
   fileValues: {
     fileContent?: string;
     file?: File;
@@ -58,7 +56,6 @@ export function EdgeSettingsFieldset({
           }))
         }
         values={fileValues}
-        onFieldError={(error) => setFieldError('Edge?.Registries', error)}
         error={errors?.PrivateRegistryId}
         isGit={isGit}
       />

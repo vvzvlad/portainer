@@ -1,6 +1,4 @@
-import { DownloadCloud, UploadCloud } from 'lucide-react';
-
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
+import { DownloadCloud } from 'lucide-react';
 
 import { BadgeIcon } from '@@/BadgeIcon';
 
@@ -15,13 +13,5 @@ export const options = [
     icon: <BadgeIcon icon={DownloadCloud} />,
     label: 'Download backup file',
     value: BackupFormType.File,
-  },
-  {
-    id: 'backup_s3',
-    icon: <BadgeIcon icon={UploadCloud} />,
-    label: 'Store in S3',
-    description: 'Define a cron schedule',
-    value: BackupFormType.S3,
-    feature: FeatureId.S3_BACKUP_SETTING,
   },
 ];

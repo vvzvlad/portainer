@@ -5,7 +5,6 @@ import { FormikErrors } from 'formik';
 import { ComposePathField } from '@/react/portainer/gitops/ComposePathField';
 import { RefField } from '@/react/portainer/gitops/RefField';
 import { DeployMethod, GitFormModel } from '@/react/portainer/gitops/types';
-import { TimeWindowDisplay } from '@/react/portainer/gitops/TimeWindowDisplay';
 import { GitSourceSelector } from '@/react/portainer/gitops/sources/GitSourceSelector';
 
 import { FormSection } from '@@/form-components/FormSection';
@@ -65,7 +64,6 @@ export function GitForm({
       <RefField
         value={value.RepositoryReferenceName || ''}
         onChange={(value) => handleChange({ RepositoryReferenceName: value })}
-        sourceId={value.SourceId}
         error={errors.RepositoryReferenceName}
       />
 
@@ -75,7 +73,6 @@ export function GitForm({
           handleChange({ ComposeFilePathInRepository: value || undefined })
         }
         isCompose={deployMethod === 'compose'}
-        model={value}
         isDockerStandalone={isDockerStandalone}
         errors={errors.ComposeFilePathInRepository}
       />
@@ -100,8 +97,6 @@ export function GitForm({
           webhooksDocs={webhooksDocs}
         />
       )}
-
-      <TimeWindowDisplay />
     </FormSection>
   );
 

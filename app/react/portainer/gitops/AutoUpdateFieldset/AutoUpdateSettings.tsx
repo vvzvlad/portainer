@@ -1,6 +1,5 @@
 import { FormikErrors } from 'formik';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
 import { type AutoUpdateModel } from '@/react/portainer/gitops/types';
 
 import { ButtonSelector } from '@@/form-components/ButtonSelector/ButtonSelector';
@@ -73,7 +72,6 @@ export function AutoUpdateSettings({
             <SwitchField
               name="forcePullImage"
               data-cy="gitops-force-pull-image-switch"
-              featureId={FeatureId.STACK_PULL_IMAGE}
               checked={value.ForcePullImage || false}
               label="Re-pull image"
               labelClass="col-sm-3 col-lg-2"

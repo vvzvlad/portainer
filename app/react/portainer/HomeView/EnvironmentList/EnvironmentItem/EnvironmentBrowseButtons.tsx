@@ -1,4 +1,4 @@
-import { History, Wifi, WifiOff, X } from 'lucide-react';
+import { Wifi, WifiOff } from 'lucide-react';
 import clsx from 'clsx';
 
 import { Environment } from '@/react/portainer/environments/types';
@@ -6,7 +6,6 @@ import {
   getDashboardRoute,
   isEdgeAsync as checkEdgeAsync,
 } from '@/react/portainer/environments/utils';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 
 import { Icon } from '@@/Icon';
 import { LinkButton } from '@@/LinkButton';
@@ -31,40 +30,6 @@ export function EnvironmentBrowseButtons({
   const dashboardRoute = getDashboardRoute(environment);
   return (
     <div className="flex h-24 w-full flex-col justify-center gap-2 [&>*]:h-1/3">
-      {isBE &&
-        (browseStatus !== 'snapshot' ? (
-          <LinkButton
-            icon={History}
-            disabled={!isEdgeAsync}
-            to="edge.browse.dashboard"
-            params={{
-              environmentId: environment.Id,
-            }}
-            size="medium"
-            color="light"
-            className="!m-0 w-full !py-0"
-            title={
-              !isEdgeAsync
-                ? 'Browse snapshot is only available for async environments'
-                : ''
-            }
-            data-cy={`browse-snapshot-link-${environment.Name}`}
-          >
-            Browse snapshot
-          </LinkButton>
-        ) : (
-          <Button
-            icon={X}
-            data-cy={`close-snapshot-link-${environment.Name}`}
-            onClick={onClickDisconnect}
-            className="!m-0 w-full !py-0 opacity-60"
-            size="medium"
-            color="light"
-          >
-            Close snapshot
-          </Button>
-        ))}
-
       {browseStatus !== 'connected' ? (
         <LinkButton
           title={

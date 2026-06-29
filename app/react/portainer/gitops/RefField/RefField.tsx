@@ -7,40 +7,16 @@ import { FormControl } from '@@/form-components/FormControl';
 import { Input } from '@@/form-components/Input';
 import { TextTip } from '@@/Tip/TextTip';
 
-import { isBE } from '../../feature-flags/feature-flags.service';
-
-import { RefSelector } from './RefSelector';
-
 interface Props {
   value: string;
   onChange(value: string): void;
-  sourceId?: number;
   error?: string;
 }
 
-export function RefField({ value, onChange, sourceId, error }: Props) {
+export function RefField({ value, onChange, error }: Props) {
   const [inputValue, updateInputValue] = useStateWrapper(value, onChange);
   const inputId = 'repository-reference-field';
-  return isBE ? (
-    <Wrapper
-      inputId={inputId}
-      errors={error}
-      tip={
-        <>
-          Specify a reference of the repository using the following syntax:
-          branches with <code>refs/heads/branch_name</code> or tags with{' '}
-          <code>refs/tags/tag_name</code>.
-        </>
-      }
-    >
-      <RefSelector
-        inputId={inputId}
-        value={value}
-        onChange={onChange}
-        sourceId={sourceId}
-      />
-    </Wrapper>
-  ) : (
+  return (
     <Wrapper
       inputId={inputId}
       errors={error}
@@ -91,10 +67,5 @@ function Wrapper({
 }
 
 export function refFieldValidation(): SchemaOf<string> {
-  return string()
-    .when({
-      is: isBE,
-      then: string().required('Repository reference name is required'),
-    })
-    .default('');
+  return string().default('');
 }

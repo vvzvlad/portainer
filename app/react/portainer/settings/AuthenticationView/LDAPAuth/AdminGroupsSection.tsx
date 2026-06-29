@@ -1,8 +1,5 @@
 import { PlusIcon } from 'lucide-react';
 
-import { isLimitedToBE } from '@/react/portainer/feature-flags/feature-flags.service';
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-
 import { MultiSelect } from '@@/form-components/PortainerSelect';
 import { SwitchField } from '@@/form-components/SwitchField';
 import { Button } from '@@/buttons';
@@ -11,7 +8,6 @@ import { useInputList } from '@@/form-components/InputList/useInputList';
 import { Widget, WidgetBody } from '@@/Widget';
 import { FormSection } from '@@/form-components/FormSection';
 import { FormError } from '@@/form-components/FormError';
-import { BEFeatureIndicator } from '@@/BEFeatureIndicator';
 
 import { LDAPGroupSearchSettings } from '../../types';
 
@@ -29,8 +25,6 @@ export function AdminGroupsSectionCE({
   onAutoPopulateChange,
   selectedAdminGroups,
   onSelectedAdminGroupsChange,
-  limitedFeatureId,
-  isLimitedFeatureSelfContained,
 }: CEProps) {
   return (
     <AdminGroupsSection
@@ -40,8 +34,6 @@ export function AdminGroupsSectionCE({
       onAutoPopulateChange={onAutoPopulateChange}
       selectedAdminGroups={selectedAdminGroups}
       onSelectedAdminGroupsChange={onSelectedAdminGroupsChange}
-      limitedFeatureId={limitedFeatureId}
-      isLimitedFeatureSelfContained={isLimitedFeatureSelfContained}
       groups={null}
       isFetching={false}
       onFetch={noop}
@@ -59,8 +51,6 @@ interface AdminGroupsSectionProps {
   groups: string[] | null;
   isFetching: boolean;
   onFetch: () => void;
-  limitedFeatureId?: FeatureId;
-  isLimitedFeatureSelfContained?: boolean;
 }
 
 export function AdminGroupsSection({
@@ -73,12 +63,7 @@ export function AdminGroupsSection({
   groups,
   isFetching,
   onFetch,
-  limitedFeatureId,
-  isLimitedFeatureSelfContained,
 }: AdminGroupsSectionProps) {
-  const isLimited =
-    (isLimitedFeatureSelfContained ?? false) || isLimitedToBE(limitedFeatureId);
-
   const { handleAdd, handleRemoveItem, handleChangeItem } = useInputList({
     value: searchSettings,
     onChange: onSearchSettingsChange,
@@ -94,14 +79,7 @@ export function AdminGroupsSection({
 
   return (
     <FormSection
-      title={
-        <>
-          Auto-populate team admins
-          {isLimitedFeatureSelfContained && limitedFeatureId && (
-            <BEFeatureIndicator featureId={limitedFeatureId} className="ml-2" />
-          )}
-        </>
-      }
+      title="Auto-populate team admins"
     >
       <div className="space-y-3">
         {searchSettings.map((config, index) => (
@@ -122,7 +100,6 @@ export function AdminGroupsSection({
                 value={config}
                 index={index}
                 count={searchSettings.length}
-                isLimited={isLimited}
                 onChange={(value) => handleChangeItem(index, value)}
                 onRemove={() => handleRemoveItem(index, config)}
               />
@@ -136,7 +113,6 @@ export function AdminGroupsSection({
           <Button
             color="light"
             size="small"
-            disabled={isLimited}
             onClick={handleAdd}
             data-cy="add-group-btn"
             icon={PlusIcon}
@@ -150,11 +126,9 @@ export function AdminGroupsSection({
             color="primary"
             size="medium"
             type="button"
-            disabled={isLimited}
             isLoading={isFetching}
             loadingText="Fetching..."
             onClick={onFetch}
-            className={isLimited ? 'limited-be' : undefined}
             data-cy="ldap-fetch-admin-groups"
           >
             Fetch Admin Group(s)

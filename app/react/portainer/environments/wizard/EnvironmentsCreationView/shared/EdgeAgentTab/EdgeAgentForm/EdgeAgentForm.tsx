@@ -62,7 +62,6 @@ export function EdgeAgentForm({
         <Form>
           <EdgeAgentFieldset
             readonly={readonly}
-            asyncMode={asyncMode}
             containerEngine={containerEngine}
           />
 

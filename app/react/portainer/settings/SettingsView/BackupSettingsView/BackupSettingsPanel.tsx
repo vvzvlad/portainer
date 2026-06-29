@@ -5,9 +5,8 @@ import { Widget, WidgetBody, WidgetTitle } from '@@/Widget';
 import { FormSection } from '@@/form-components/FormSection';
 import { BoxSelector } from '@@/BoxSelector';
 
-import { BackupFormType, options } from './backup-options';
+import { options } from './backup-options';
 import { BackupFileForm } from './BackupFileForm';
-import { BackupS3Form } from './BackupS3Form';
 
 export function BackupSettingsPanel() {
   const [backupType, setBackupType] = useState(options[0].value);
@@ -30,11 +29,7 @@ export function BackupSettingsPanel() {
               radioName="backup-type"
             />
 
-            {backupType === BackupFormType.S3 ? (
-              <BackupS3Form />
-            ) : (
-              <BackupFileForm />
-            )}
+            <BackupFileForm />
           </FormSection>
         </div>
       </WidgetBody>
