@@ -3,9 +3,7 @@ import { SetStateAction, useCallback } from 'react';
 
 import { GitForm } from '@/react/portainer/gitops/GitForm';
 import { baseEdgeStackWebhookUrl } from '@/portainer/helpers/webhookHelper';
-import { RelativePathFieldset } from '@/react/portainer/gitops/RelativePathFieldset/RelativePathFieldset';
 import { applySetStateAction } from '@/react-tools/apply-set-state-action';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 
 import { BoxSelector } from '@@/BoxSelector';
 import { FormSection } from '@@/form-components/FormSection';
@@ -124,43 +122,22 @@ export function DockerComposeForm({ webhookId, onChangeTemplate }: Props) {
       )}
 
       {method === git.value && (
-        <>
-          <GitForm
-            errors={errors?.git}
-            value={values.git}
-            onChange={(gitValues) =>
-              setValues((values) => ({
-                ...values,
-                git: {
-                  ...values.git,
-                  ...gitValues,
-                },
-              }))
-            }
-            baseWebhookUrl={baseEdgeStackWebhookUrl()}
-            webhookId={webhookId}
-            isAutoUpdateVisible={isBE}
-          />
-
-          {isBE && (
-            <FormSection title="Advanced configurations">
-              <RelativePathFieldset
-                values={values.relativePath}
-                errors={errors.relativePath}
-                gitModel={values.git}
-                onChange={(relativePath) =>
-                  setValues((values) => ({
-                    ...values,
-                    relativePath: {
-                      ...values.relativePath,
-                      ...relativePath,
-                    },
-                  }))
-                }
-              />
-            </FormSection>
-          )}
-        </>
+        <GitForm
+          errors={errors?.git}
+          value={values.git}
+          onChange={(gitValues) =>
+            setValues((values) => ({
+              ...values,
+              git: {
+                ...values.git,
+                ...gitValues,
+              },
+            }))
+          }
+          baseWebhookUrl={baseEdgeStackWebhookUrl()}
+          webhookId={webhookId}
+          isAutoUpdateVisible={false}
+        />
       )}
     </>
   );

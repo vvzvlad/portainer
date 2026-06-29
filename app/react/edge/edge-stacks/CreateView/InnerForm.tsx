@@ -2,24 +2,18 @@ import { Form, useFormikContext } from 'formik';
 
 import { applySetStateAction } from '@/react-tools/apply-set-state-action';
 import { EnvironmentType } from '@/react/portainer/environments/types';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 
-import { EnvironmentVariablesPanel } from '@@/form-components/EnvironmentVariablesFieldset';
 import { FormActions } from '@@/form-components/FormActions';
 
 import { EdgeGroupsSelector } from '../components/EdgeGroupsSelector';
 import { EdgeStackDeploymentTypeSelector } from '../components/EdgeStackDeploymentTypeSelector';
-import { StaggerFieldset } from '../components/StaggerFieldset';
-import { PrivateRegistryFieldsetWrapper } from '../ItemView/EditEdgeStackForm/PrivateRegistryFieldsetWrapper';
 import { useEdgeGroupHasType } from '../ItemView/EditEdgeStackForm/useEdgeGroupHasType';
 import { DeploymentType } from '../types';
 
 import { DockerComposeForm } from './DockerComposeForm';
 import { KubeFormValues, KubeManifestForm } from './KubeManifestForm';
 import { NameField } from './NameField';
-import { WebhookSwitch } from './WebhookSwitch';
 import { FormValues } from './types';
-import { DeploymentOptions } from './DeploymentOptions';
 
 export function InnerForm({
   webhookId,
@@ -36,7 +30,7 @@ export function InnerForm({
     templateId: number | undefined;
   }) => void;
 }) {
-  const { values, setFieldValue, errors, setValues, setFieldError, isValid } =
+  const { values, setFieldValue, errors, setValues, isValid } =
     useFormikContext<FormValues>();
   const { hasType } = useEdgeGroupHasType(values.groupIds);
 
@@ -92,48 +86,6 @@ export function InnerForm({
             }))
           }
         />
-      )}
-
-      {isBE && (
-        <>
-          {values.method !== 'repository' && (
-            <WebhookSwitch
-              onChange={(value) => setFieldValue('enableWebhook', value)}
-              value={values.enableWebhook}
-            />
-          )}
-
-          {values.deploymentType === DeploymentType.Compose && (
-            <EnvironmentVariablesPanel
-              values={values.envVars}
-              onChange={(value) => setFieldValue('envVars', value)}
-            />
-          )}
-
-          <PrivateRegistryFieldsetWrapper
-            onChange={(value) => setFieldValue('privateRegistryId', value)}
-            value={values.privateRegistryId}
-            values={{ fileContent: values.fileContent, file: values.file }}
-            error={errors.privateRegistryId}
-            onFieldError={(message) =>
-              setFieldError('privateRegistryId', message)
-            }
-            isGit={values.method === 'repository'}
-          />
-
-          {values.deploymentType === DeploymentType.Compose && (
-            <DeploymentOptions values={values} setFieldValue={setFieldValue} />
-          )}
-
-          <StaggerFieldset
-            isEdit={false}
-            values={values.staggerConfig}
-            errors={errors.staggerConfig}
-            onChange={(newStaggerValues) =>
-              setFieldValue('staggerConfig', newStaggerValues)
-            }
-          />
-        </>
       )}
 
       <FormActions

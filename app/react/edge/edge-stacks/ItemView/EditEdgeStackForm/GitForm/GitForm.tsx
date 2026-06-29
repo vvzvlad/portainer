@@ -26,9 +26,7 @@ import { notifySuccess } from '@/portainer/services/notifications';
 import { EnvironmentType } from '@/react/portainer/environments/types';
 import { Registry } from '@/react/portainer/registries/types/registry';
 import { useRegistries } from '@/react/portainer/registries/queries/useRegistries';
-import { RelativePathFieldset } from '@/react/portainer/gitops/RelativePathFieldset/RelativePathFieldset';
 import { parseRelativePathResponse } from '@/react/portainer/gitops/RelativePathFieldset/utils';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 import { GitReferenceCard } from '@/react/portainer/gitops/GitReferenceCard';
 
 import { LoadingButton } from '@@/buttons';
@@ -222,7 +220,6 @@ function InnerForm({
         <RefField
           value={values.refName}
           onChange={(value) => setFieldValue('refName', value)}
-          sourceId={stack.GitSourceId}
           error={errors.refName}
         />
 
@@ -237,14 +234,6 @@ function InnerForm({
             Edit source
           </Link>
         </TextTip>
-
-        {isBE && (
-          <RelativePathFieldset
-            values={values.relativePath}
-            isEditing
-            onChange={() => {}}
-          />
-        )}
 
         <EnvironmentVariablesPanel
           onChange={(value) => setFieldValue('envVars', value)}

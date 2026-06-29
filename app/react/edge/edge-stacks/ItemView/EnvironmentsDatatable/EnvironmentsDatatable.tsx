@@ -5,7 +5,6 @@ import { EdgeStackStatus, StatusType } from '@/react/edge/edge-stacks/types';
 import { useEnvironmentList } from '@/react/portainer/environments/queries';
 import { useParamState } from '@/react/hooks/useParamState';
 import { EnvironmentId } from '@/react/portainer/environments/types';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 import { useIdParam } from '@/react/hooks/useIdParam';
 
 import { Datatable } from '@@/datatables';
@@ -90,13 +89,6 @@ export function EnvironmentsDatatable() {
     { value: StatusType.Running, label: 'Deployed' },
     { value: StatusType.Error, label: 'Failed' },
   ];
-  if (isBE) {
-    envStatusSelectOptions.concat([
-      { value: StatusType.PausedDeploying, label: 'Paused' },
-      { value: StatusType.RollingBack, label: 'Rolling back' },
-      { value: StatusType.RolledBack, label: 'Rolled back' },
-    ]);
-  }
 
   return (
     <Datatable
