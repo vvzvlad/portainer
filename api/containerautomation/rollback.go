@@ -2,6 +2,8 @@ package containerautomation
 
 import (
 	"context"
+	"errors"
+	"regexp"
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
@@ -9,6 +11,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	dockerclient "github.com/docker/docker/client"
 	"github.com/rs/zerolog/log"
+	"go.podman.io/image/v5/docker/reference"
 )
 
 const (
@@ -22,6 +25,17 @@ const (
 	// context deadline, leaving room for the final probe to complete after the
 	// decision deadline elapses.
 	rollbackGateBuffer = 10 * time.Second
+	// startPeriodBuffer is added to a container's healthcheck start_period when it
+	// is longer than the rollback timeout, so the gate waits through the whole
+	// start period (during which Docker reports "starting") plus a small grace
+	// before deciding. Without it a legitimately slow-starting container would be
+	// rolled back while it is still initializing normally.
+	startPeriodBuffer = 15 * time.Second
+	// maxConsecutiveInspectErrors is how many back-to-back inspect failures the
+	// health gate tolerates before declaring the update failed. A single transient
+	// Docker API blip must not trigger a false rollback, so the gate keeps polling
+	// and only gives up once the failures are clearly not transient.
+	maxConsecutiveInspectErrors = 3
 )
 
 // rollbackOutcome is the decision produced from a single health sample.
@@ -35,6 +49,30 @@ const (
 	// rollbackTrigger: the new container failed the health gate, roll back.
 	rollbackTrigger
 )
+
+// gateResult is the terminal outcome of healthGate. It is a tri-state because a
+// shutdown mid-gate must be distinguished from a genuine failure: only a real
+// unhealthy/not-running/deadline outcome may roll back.
+type gateResult int
+
+const (
+	// gateHealthy: the new container became healthy in time, accept the update.
+	gateHealthy gateResult = iota
+	// gateRollback: the new container failed the gate, roll back to the old image.
+	gateRollback
+	// gateAborted: the service base context was cancelled (server shutdown) while
+	// the gate was open. The new container is left running as-is; no rollback and
+	// no failure event, since we never observed an actual failure.
+	gateAborted
+)
+
+// imageIDReference matches a content-addressable image id carried verbatim in a
+// container's Config.Image when it was started from a bare id (e.g.
+// "sha256:ab12…"). Such an id is not a tag and cannot be re-tagged, so it must
+// not enable the health gate. A full bare hex id (no algorithm prefix) is
+// already rejected by reference.ParseNormalizedNamed; this catches the
+// algorithm-prefixed digest form, which otherwise parses as a bogus tag.
+var imageIDReference = regexp.MustCompile(`^[a-z0-9]+:[0-9a-f]{64}$`)
 
 // containerHealth is the minimal health signal the gate polls. It is built from
 // a container inspect but kept independent of the Docker SDK so the decision
@@ -78,6 +116,32 @@ func decideRollback(h containerHealth, now, deadline time.Time) rollbackOutcome 
 	return rollbackContinue
 }
 
+// effectiveRollbackDeadline derives the health-gate deadline from the gate start
+// time, the configured rollback timeout, and the container's healthcheck
+// start_period. While a container is within its start_period Docker keeps
+// reporting "starting" (it never reports unhealthy yet), so a start_period
+// longer than the rollback timeout would otherwise trip a premature rollback
+// while the container is initializing normally. The deadline is therefore the
+// later of (start + timeout) and (start + start_period + buffer).
+func effectiveRollbackDeadline(start time.Time, timeout, startPeriod time.Duration) time.Time {
+	window := timeout
+	if startPeriod > 0 {
+		if d := startPeriod + startPeriodBuffer; d > window {
+			window = d
+		}
+	}
+
+	return start.Add(window)
+}
+
+// inspectErrorTolerated reports whether the health gate should keep polling after
+// `consecutive` back-to-back inspect failures rather than declaring the update
+// failed. Up to maxConsecutiveInspectErrors transient errors are tolerated; the
+// counter is reset by the caller on any successful inspect.
+func inspectErrorTolerated(consecutive int) bool {
+	return consecutive <= maxConsecutiveInspectErrors
+}
+
 // hasHealthGate reports whether a container's healthcheck config yields a usable
 // health signal. A nil config, an empty test, or an explicit {"NONE"} disable all
 // mean Docker never reports healthy/unhealthy, so there is nothing to gate on.
@@ -89,32 +153,102 @@ func hasHealthGate(hc *container.HealthConfig) bool {
 	return hc.Test[0] != "NONE"
 }
 
+// isTagReference reports whether ref is a proper tag reference that the health
+// gate can roll back. Rolling back re-tags the previous image id onto ref via
+// ImageTag, which Docker rejects for a digest-pinned reference (repo@sha256:…)
+// with "refusing to create a tag with a digest reference", and which is
+// meaningless for a bare image id. Such containers are detected here so the gate
+// is skipped instead of silently no-op'ing.
+func isTagReference(ref string) bool {
+	if ref == "" {
+		return false
+	}
+
+	// Algorithm-prefixed image id (e.g. "sha256:<64 hex>"): a bare id, not a tag.
+	if imageIDReference.MatchString(ref) {
+		return false
+	}
+
+	named, err := reference.ParseNormalizedNamed(ref)
+	if err != nil {
+		// Unparseable (e.g. a full bare hex image id): not a usable tag target.
+		return false
+	}
+
+	// A digest-pinned reference (with or without a tag) cannot be re-tagged.
+	if _, ok := named.(reference.Canonical); ok {
+		return false
+	}
+
+	return true
+}
+
 // healthGate polls the new container's health until it becomes healthy, fails, or
-// the rollback window elapses. It returns true when the update is healthy and may
-// proceed, false when the container must be rolled back. The polling context is
-// derived from the service base context, so a server shutdown ends the wait and
-// is treated as a non-healthy outcome (conservative: prefer rollback over leaving
-// an unverified container in place).
-func (s *Service) healthGate(cli *dockerclient.Client, containerID string, timeout time.Duration) bool {
+// the rollback window elapses, returning the terminal gateResult.
+//
+// The polling context is derived from the service base context, so a server
+// shutdown ends the wait. A shutdown is reported as gateAborted (leave the new
+// container in place, do not roll back): we never observed a real failure, and a
+// rollback derived from the cancelled context would itself fail and emit a
+// misleading "rollback failed" event on every shutdown during a gate window.
+//
+// Transient inspect failures (a brief Docker API blip) are tolerated: the gate
+// keeps polling and only declares the update failed after more than
+// maxConsecutiveInspectErrors consecutive failures, resetting on any success.
+//
+// Scheduling note (known limitation): this poll runs inside the sequential update
+// tick, so N unhealthy standalone containers with rollback enabled can each hold
+// the tick for up to their rollback window, delaying other containers/endpoints
+// in the same tick. The overlap guard in update() still prevents ticks from
+// piling up; this is accepted rather than re-architected (no per-container
+// goroutine) to keep the update path simple and ordered.
+func (s *Service) healthGate(cli *dockerclient.Client, containerID string, timeout, startPeriod time.Duration) gateResult {
 	if timeout <= 0 {
 		timeout = defaultRollbackTimeout
 	}
 
-	deadline := time.Now().Add(timeout)
+	deadline := effectiveRollbackDeadline(time.Now(), timeout, startPeriod)
 
 	ctx, cancel := context.WithDeadline(s.baseCtx, deadline.Add(rollbackGateBuffer))
 	defer cancel()
 
+	consecutiveErrors := 0
 	for {
 		inspect, err := cli.ContainerInspect(ctx, containerID)
 		if err != nil {
-			// The container vanished or the engine is unreachable: treat as a failed
-			// update so the rollback path can restore the previous image.
-			log.Warn().Err(err).Str("container_id", containerID).
-				Msg("auto-update: health gate inspect failed, treating as unhealthy")
+			// Server shutdown cancelled the base context: abort without rolling back.
+			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(s.baseCtx.Err(), context.Canceled) {
+				log.Debug().Str("container_id", containerID).
+					Msg("auto-update: health gate aborted due to shutdown")
 
-			return false
+				return gateAborted
+			}
+
+			consecutiveErrors++
+			if !inspectErrorTolerated(consecutiveErrors) {
+				// Repeated failures: the container vanished or the engine is
+				// unreachable, treat as a failed update so the rollback can restore
+				// the previous image.
+				log.Warn().Err(err).Str("container_id", containerID).Int("consecutive_errors", consecutiveErrors).
+					Msg("auto-update: health gate inspect failed repeatedly, treating as unhealthy")
+
+				return gateRollback
+			}
+
+			// Tolerate a transient blip: keep polling until the data resolves or the
+			// deadline passes.
+			log.Debug().Err(err).Str("container_id", containerID).Int("consecutive_errors", consecutiveErrors).
+				Msg("auto-update: health gate inspect failed, retrying (transient)")
+
+			select {
+			case <-ctx.Done():
+				return s.gateDeadlineResult()
+			case <-time.After(rollbackPollInterval):
+			}
+
+			continue
 		}
+		consecutiveErrors = 0
 
 		h := containerHealth{Running: inspect.State != nil && inspect.State.Running}
 		if inspect.State != nil && inspect.State.Health != nil {
@@ -123,18 +257,30 @@ func (s *Service) healthGate(cli *dockerclient.Client, containerID string, timeo
 
 		switch decideRollback(h, time.Now(), deadline) {
 		case rollbackHealthy:
-			return true
+			return gateHealthy
 		case rollbackTrigger:
-			return false
+			return gateRollback
 		}
 
 		select {
 		case <-ctx.Done():
-			// Deadline reached (or shutdown) while still starting: roll back.
-			return false
+			return s.gateDeadlineResult()
 		case <-time.After(rollbackPollInterval):
 		}
 	}
+}
+
+// gateDeadlineResult maps a context-done gate exit to its outcome: a base-context
+// cancellation (shutdown) aborts without rolling back, while a plain deadline
+// (the container never became healthy in time) rolls back.
+func (s *Service) gateDeadlineResult() gateResult {
+	if errors.Is(s.baseCtx.Err(), context.Canceled) {
+		log.Debug().Msg("auto-update: health gate aborted due to shutdown")
+
+		return gateAborted
+	}
+
+	return gateRollback
 }
 
 // rollback restores the previous image after a failed health-gated update. It

@@ -12,6 +12,11 @@ const durationPattern = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
 // load: the image-status cache is long-lived, so a sub-minute interval is wasteful.
 const minPollIntervalSeconds = 60;
 
+// Lower bound for the rollback timeout, kept in sync with the backend
+// (minAutoUpdateRollbackTimeout). A near-zero timeout would roll back before any
+// container can pass its healthcheck, defeating the gate.
+const minRollbackTimeoutSeconds = 10;
+
 // Seconds per Go duration unit, used to evaluate the configured interval against
 // the floor. Mirrors the units accepted by durationPattern.
 const unitSeconds: Record<string, number> = {
@@ -73,8 +78,8 @@ export function validation(): SchemaOf<Values> {
       .required('Rollback timeout is required')
       .matches(durationPattern, 'Must be a valid duration (e.g. 120s, 2m)')
       .test(
-        'positive-rollback-timeout',
-        'Rollback timeout must be positive',
+        'min-rollback-timeout',
+        'Rollback timeout must be at least 10s',
         (value) => {
           if (!value) {
             return true; // let required/matches report the error first
@@ -85,7 +90,7 @@ export function validation(): SchemaOf<Values> {
             return true; // let matches report the format error first
           }
 
-          return seconds > 0;
+          return seconds >= minRollbackTimeoutSeconds;
         }
       ),
   });

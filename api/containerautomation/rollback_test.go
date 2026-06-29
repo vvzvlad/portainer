@@ -76,6 +76,113 @@ func TestDecideRollback(t *testing.T) {
 	}
 }
 
+func TestEffectiveRollbackDeadline(t *testing.T) {
+	start := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	timeout := 120 * time.Second
+
+	tests := []struct {
+		name        string
+		startPeriod time.Duration
+		want        time.Time
+	}{
+		{
+			name:        "no start period uses the timeout",
+			startPeriod: 0,
+			want:        start.Add(timeout),
+		},
+		{
+			name:        "start period shorter than timeout uses the timeout",
+			startPeriod: 30 * time.Second,
+			want:        start.Add(timeout),
+		},
+		{
+			name:        "start period longer than timeout extends to start period plus buffer",
+			startPeriod: 300 * time.Second,
+			want:        start.Add(300*time.Second + startPeriodBuffer),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveRollbackDeadline(start, timeout, tt.startPeriod); !got.Equal(tt.want) {
+				t.Errorf("effectiveRollbackDeadline() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDecideRollbackWithLongStartPeriod proves the F3 fix end to end at the
+// decision layer: with a start_period longer than the configured rollback
+// timeout, the start-period-aware deadline keeps a still-starting container
+// alive while it is within the start period, and only rolls back after it.
+func TestDecideRollbackWithLongStartPeriod(t *testing.T) {
+	start := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	timeout := 60 * time.Second
+	startPeriod := 300 * time.Second
+
+	deadline := effectiveRollbackDeadline(start, timeout, startPeriod)
+
+	starting := containerHealth{Running: true, Status: string(container.Starting)}
+
+	// Past the bare timeout but still within the start period: keep waiting.
+	if got := decideRollback(starting, start.Add(120*time.Second), deadline); got != rollbackContinue {
+		t.Errorf("within start_period: decideRollback() = %v, want rollbackContinue", got)
+	}
+
+	// After the start period (plus buffer): roll back.
+	if got := decideRollback(starting, start.Add(330*time.Second), deadline); got != rollbackTrigger {
+		t.Errorf("after start_period: decideRollback() = %v, want rollbackTrigger", got)
+	}
+}
+
+func TestInspectErrorTolerated(t *testing.T) {
+	tests := []struct {
+		name        string
+		consecutive int
+		want        bool
+	}{
+		{name: "first transient error is tolerated", consecutive: 1, want: true},
+		{name: "second consecutive error is tolerated", consecutive: 2, want: true},
+		{name: "at the threshold is still tolerated", consecutive: maxConsecutiveInspectErrors, want: true},
+		{name: "beyond the threshold is a failure", consecutive: maxConsecutiveInspectErrors + 1, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := inspectErrorTolerated(tt.consecutive); got != tt.want {
+				t.Errorf("inspectErrorTolerated(%d) = %v, want %v", tt.consecutive, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsTagReference(t *testing.T) {
+	const digest = "sha256:02c921df998f95e849058af14de7045efc3954d90320967418a0d1f182bbc0b2"
+
+	tests := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{name: "tagged reference is rollbackable", ref: "nginx:1.21", want: true},
+		{name: "untagged reference (implicit latest) is rollbackable", ref: "nginx", want: true},
+		{name: "fully-qualified tagged reference is rollbackable", ref: "registry.example.com/team/app:v2", want: true},
+		{name: "digest-pinned reference cannot be re-tagged", ref: "nginx@" + digest, want: false},
+		{name: "tagged-and-digest-pinned reference cannot be re-tagged", ref: "nginx:1.21@" + digest, want: false},
+		{name: "algorithm-prefixed bare image id cannot be re-tagged", ref: digest, want: false},
+		{name: "full bare hex image id cannot be re-tagged", ref: "02c921df998f95e849058af14de7045efc3954d90320967418a0d1f182bbc0b2", want: false},
+		{name: "empty reference is not rollbackable", ref: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isTagReference(tt.ref); got != tt.want {
+				t.Errorf("isTagReference(%q) = %v, want %v", tt.ref, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHasHealthGate(t *testing.T) {
 	tests := []struct {
 		name string

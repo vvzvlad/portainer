@@ -47,7 +47,9 @@ func TestSettingsUpdatePayloadValidateAutoUpdatePollInterval(t *testing.T) {
 }
 
 // TestSettingsUpdatePayloadValidateRollbackTimeout covers the M5 health-gated
-// rollback timeout: it must be a positive Go duration.
+// rollback timeout and its floor (F7): it must be a Go duration of at least
+// minAutoUpdateRollbackTimeout (10s), rejecting near-zero, non-positive and
+// malformed values.
 func TestSettingsUpdatePayloadValidateRollbackTimeout(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -56,6 +58,9 @@ func TestSettingsUpdatePayloadValidateRollbackTimeout(t *testing.T) {
 	}{
 		{name: "two minutes is allowed", timeout: "120s", wantErr: false},
 		{name: "compound duration is allowed", timeout: "1m30s", wantErr: false},
+		{name: "exactly the floor is allowed", timeout: "10s", wantErr: false},
+		{name: "one millisecond is below the floor", timeout: "1ms", wantErr: true},
+		{name: "nine seconds is below the floor", timeout: "9s", wantErr: true},
 		{name: "zero is rejected", timeout: "0s", wantErr: true},
 		{name: "negative is rejected", timeout: "-5s", wantErr: true},
 		{name: "unparseable is rejected", timeout: "soon", wantErr: true},

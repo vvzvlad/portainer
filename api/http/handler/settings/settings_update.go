@@ -27,6 +27,12 @@ import (
 // the image-status cache is long-lived, so a sub-minute interval only adds load.
 const minAutoUpdatePollInterval = time.Minute
 
+// minAutoUpdateRollbackTimeout is the lower bound for the health-gate rollback
+// timeout. A near-zero timeout (e.g. 1ms) would roll back almost immediately,
+// before any container can pass its healthcheck, defeating the gate; keep a sane
+// floor so the gate has a realistic chance to observe health.
+const minAutoUpdateRollbackTimeout = 10 * time.Second
+
 type settingsUpdatePayload struct {
 	// URL to a logo that will be displayed on the login page as well as on top of the sidebar. Will use default Portainer logo when value is empty string
 	LogoURL *string `example:"https://mycompany.mydomain.tld/logo.png"`
@@ -159,8 +165,8 @@ func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
 		}
 
 		if autoUpdate.RollbackTimeout != nil {
-			if d, err := time.ParseDuration(*autoUpdate.RollbackTimeout); err != nil || d <= 0 {
-				return errors.New("Invalid auto-update rollback timeout. Must be a positive duration (e.g. 120s)")
+			if d, err := time.ParseDuration(*autoUpdate.RollbackTimeout); err != nil || d < minAutoUpdateRollbackTimeout {
+				return errors.New("Invalid auto-update rollback timeout. Must be a duration of at least 10s (e.g. 120s)")
 			}
 		}
 	}

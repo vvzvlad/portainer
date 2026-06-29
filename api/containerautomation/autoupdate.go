@@ -233,12 +233,14 @@ func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer
 
 	// Capture the pre-update image identity for a possible rollback. The container
 	// list gives us the old image id; an inspect adds the original reference (re-tag
-	// target) and whether a usable healthcheck exists. We only health-gate when
-	// rollback is enabled, the container has a healthcheck, and we resolved both the
-	// old image id and its reference; otherwise there is nothing to gate on / roll
-	// back to.
+	// target), whether a usable healthcheck exists, and the healthcheck start_period
+	// (which must be waited out before deciding). We only health-gate when rollback
+	// is enabled, the container has a healthcheck, we resolved both the old image id
+	// and its reference, and that reference is a proper tag (a digest-pinned or bare
+	// image id cannot be re-tagged, so the gate could never roll back).
 	oldImageID := c.ImageID
 	var originalRef string
+	var startPeriod time.Duration
 	healthGated := false
 	if opts.rollback {
 		if inspect, err := cli.ContainerInspect(s.baseCtx, c.ID); err != nil {
@@ -249,10 +251,22 @@ func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer
 			if oldImageID == "" {
 				oldImageID = inspect.Image
 			}
-			healthGated = hasHealthGate(inspect.Config.Healthcheck) && oldImageID != "" && originalRef != ""
-			if !healthGated {
+			if hc := inspect.Config.Healthcheck; hc != nil {
+				startPeriod = hc.StartPeriod
+			}
+
+			switch {
+			case !hasHealthGate(inspect.Config.Healthcheck):
 				log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).
 					Msg("auto-update: container has no healthcheck, updating without a rollback gate")
+			case oldImageID == "" || originalRef == "":
+				log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).
+					Msg("auto-update: unable to resolve previous image identity, updating without a rollback gate")
+			case !isTagReference(originalRef):
+				log.Info().Str("container_id", c.ID).Str("image", originalRef).Int("endpoint_id", endpointID).
+					Msg("auto-update: health gate skipped, image is digest-pinned and cannot be rolled back")
+			default:
+				healthGated = true
 			}
 		}
 	}
@@ -279,20 +293,33 @@ func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer
 	if newContainer != nil {
 		newImage = newContainer.Config.Image
 	}
+
+	// Health gate: roll back if the new container does not become healthy in time.
+	// The old image is preserved (not cleaned up) until the gate confirms health,
+	// so the rollback target is still available. The "updated" event is held until
+	// the gate confirms health, so an observer never sees a misleading
+	// "updated" -> "rollback" sequence for the same container; on the rollback path
+	// only EventRollback (or update-failed) is emitted.
+	if healthGated {
+		switch s.healthGate(cli, newContainer.ID, opts.rollbackTimeout, startPeriod) {
+		case gateAborted:
+			// Server shutdown mid-gate: leave the new container in place, do not roll
+			// back and do not emit an event (we never observed a real failure).
+			return
+		case gateRollback:
+			s.rollback(cli, endpoint, newContainer.ID, oldImageID, originalRef)
+			return
+		case gateHealthy:
+			// Confirmed healthy: fall through to emit "updated" and clean up.
+		}
+	}
+
+	// Emit "updated" now: either there was no gate (emitted right after recreate,
+	// as before), or the gate confirmed the new container is healthy.
 	s.notifier.Notify(Event{
 		Kind: EventUpdated, EndpointID: endpointID, ContainerID: newContainer.ID,
 		Image: newImage, Message: "updated standalone container",
 	})
-
-	// Health gate: roll back if the new container does not become healthy in time.
-	// The old image is preserved (not cleaned up) until the gate confirms health,
-	// so the rollback target is still available.
-	if healthGated {
-		if !s.healthGate(cli, newContainer.ID, opts.rollbackTimeout) {
-			s.rollback(cli, endpoint, newContainer.ID, oldImageID, originalRef)
-			return
-		}
-	}
 
 	if opts.cleanup && newContainer != nil && newContainer.Image != oldImageID {
 		s.cleanupOldImage(cli, endpoint, oldImageID)

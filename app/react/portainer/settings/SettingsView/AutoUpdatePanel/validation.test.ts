@@ -50,11 +50,21 @@ describe('AutoUpdatePanel validation', () => {
     );
   });
 
-  it('accepts a positive rollback timeout', async () => {
+  it('accepts a rollback timeout at or above the 10s floor', async () => {
+    expect(await validate({ ...base, rollbackTimeout: '10s' })).toBeUndefined();
     expect(
       await validate({ ...base, rollbackTimeout: '120s' })
     ).toBeUndefined();
     expect(await validate({ ...base, rollbackTimeout: '2m' })).toBeUndefined();
+  });
+
+  it('rejects a rollback timeout below the 10s floor', async () => {
+    expect(await validate({ ...base, rollbackTimeout: '1ms' })).toContain(
+      'Rollback timeout must be at least 10s'
+    );
+    expect(await validate({ ...base, rollbackTimeout: '9s' })).toContain(
+      'Rollback timeout must be at least 10s'
+    );
   });
 
   it('rejects an empty rollback timeout', async () => {
