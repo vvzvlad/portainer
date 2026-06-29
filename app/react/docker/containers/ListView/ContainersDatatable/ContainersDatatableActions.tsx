@@ -11,6 +11,7 @@ import {
 
 import * as notifications from '@/portainer/services/notifications';
 import { useAuthorizations, Authorized } from '@/react/hooks/useUser';
+import { trimContainerName } from '@/docker/filters/utils';
 import { confirmContainerDeletion } from '@/react/docker/containers/common/confirm-container-delete-modal';
 import { setPortainerAgentTargetHeader } from '@/portainer/services/http-request.helper';
 import {
@@ -82,6 +83,12 @@ export function ContainersDatatableActions({
     'DockerContainerDelete',
     'DockerContainerCreate',
   ]);
+
+  // Stack redeploys triggered by "Update" need stack-update rights, gated
+  // separately so we never fire a redeploy the user would get a 403 on.
+  const { authorized: canUpdateStack } = useAuthorizations(
+    'PortainerStackUpdate'
+  );
 
   const router = useRouter();
   const stacksQuery = useStacks();
@@ -276,7 +283,8 @@ export function ContainersDatatableActions({
     const contexts: ContainerUpdateContext[] = selectedItems.map(
       (container) => ({
         id: container.Id,
-        name: container.Names[0],
+        // Strip Docker's leading "/" so toast names match the single-container path.
+        name: trimContainerName(container.Names[0]),
         image: container.Image,
         labels: container.Labels,
         environmentId: endpointId,
@@ -285,7 +293,7 @@ export function ContainersDatatableActions({
     );
 
     bulkUpdateMutation.mutate(
-      { contexts, stacks: stacksQuery.data ?? [] },
+      { contexts, stacks: stacksQuery.data ?? [], canUpdateStack },
       {
         onSettled: () => {
           router.stateService.reload();

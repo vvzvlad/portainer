@@ -7,13 +7,14 @@ import { confirmStackUpdate } from '@/react/common/stacks/common/confirm-stack-u
 import { useStacks } from '@/react/common/stacks/queries/useStacks';
 import { notifySuccess } from '@/portainer/services/notifications';
 import { useContainerImageStatus } from '@/react/docker/containers/queries/useContainerImageStatus';
+import { useAuthorizations } from '@/react/hooks/useUser';
 import {
   resolveContainerUpdatePath,
   useUpdateContainerImage,
   ContainerUpdateContext,
 } from '@/react/docker/containers/update';
 
-import { LoadingButton } from '@@/buttons';
+import { ButtonGroup, LoadingButton } from '@@/buttons';
 import { TooltipWithChildren } from '@@/Tip/TooltipWithChildren';
 
 import { ContainerId } from '../../../types';
@@ -34,6 +35,10 @@ interface UpdateNowButtonProps {
  * standalone -> recreate-with-pull, stack-managed -> stack redeploy-with-pull
  * (container stays in its stack). Externally-managed compose containers are
  * shown disabled with an explanatory tooltip, never recreated out-of-band.
+ *
+ * A stack redeploy is gated by `PortainerStackUpdate` (as everywhere else in the
+ * app): a user with container-create but without stack-update rights sees the
+ * button disabled with a tooltip rather than getting a 403 on click.
  */
 export function UpdateNowButton({
   environmentId,
@@ -52,6 +57,11 @@ export function UpdateNowButton({
   );
   const stacksQuery = useStacks();
   const updateMutation = useUpdateContainerImage();
+  // A stack redeploy needs stack-update rights, not just container-create.
+  const { authorized: canUpdateStack } = useAuthorizations(
+    'PortainerStackUpdate',
+    environmentId
+  );
 
   // Only meaningful when a newer image is actually available.
   if (statusQuery.data?.Status !== 'outdated') {
@@ -61,13 +71,21 @@ export function UpdateNowButton({
   const stacks = stacksQuery.data ?? [];
   const path = resolveContainerUpdatePath({ labels, environmentId }, stacks);
   const isExternal = path.kind === 'external';
+  // Stack-managed container the user isn't allowed to redeploy: disable rather
+  // than let the click 403.
+  const stackUpdateForbidden = path.kind === 'stack' && !canUpdateStack;
 
   const button = (
     <LoadingButton
       color="primary"
       size="small"
       onClick={handleClick}
-      disabled={isPortainer || isExternal || stacksQuery.isLoading}
+      disabled={
+        isPortainer ||
+        isExternal ||
+        stackUpdateForbidden ||
+        stacksQuery.isLoading
+      }
       isLoading={updateMutation.isLoading}
       loadingText="Updating..."
       data-cy="update-now-button"
@@ -79,13 +97,25 @@ export function UpdateNowButton({
 
   if (isExternal) {
     return (
-      <TooltipWithChildren message="This container belongs to a compose project that is managed outside Portainer, so it can't be updated from here.">
-        {button}
-      </TooltipWithChildren>
+      <ButtonGroup>
+        <TooltipWithChildren message="This container belongs to a compose project that is managed outside Portainer, so it can't be updated from here.">
+          {button}
+        </TooltipWithChildren>
+      </ButtonGroup>
     );
   }
 
-  return button;
+  if (stackUpdateForbidden) {
+    return (
+      <ButtonGroup>
+        <TooltipWithChildren message="Updating this container redeploys its stack, which requires stack update permission you don't have.">
+          {button}
+        </TooltipWithChildren>
+      </ButtonGroup>
+    );
+  }
+
+  return <ButtonGroup>{button}</ButtonGroup>;
 
   async function handleClick() {
     const context: ContainerUpdateContext = {

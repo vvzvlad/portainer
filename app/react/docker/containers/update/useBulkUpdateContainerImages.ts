@@ -22,6 +22,11 @@ const STATUS_STALE_TIME = 5 * 60 * 1000;
 interface BulkUpdateParams {
   contexts: ContainerUpdateContext[];
   stacks: Stack[];
+  /**
+   * Whether the user holds `PortainerStackUpdate`. Stack redeploys are gated on
+   * it everywhere else, so without it we skip (never 403) stack-managed ones.
+   */
+  canUpdateStack: boolean;
 }
 
 /**
@@ -34,15 +39,16 @@ export function useBulkUpdateContainerImages() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ contexts, stacks }: BulkUpdateParams) =>
-      bulkUpdate(queryClient, contexts, stacks),
+    mutationFn: ({ contexts, stacks, canUpdateStack }: BulkUpdateParams) =>
+      bulkUpdate(queryClient, contexts, stacks, canUpdateStack),
   });
 }
 
 async function bulkUpdate(
   queryClient: ReturnType<typeof useQueryClient>,
   contexts: ContainerUpdateContext[],
-  stacks: Stack[]
+  stacks: Stack[],
+  canUpdateStack: boolean
 ) {
   // Resolve each container's status (cached where the badge already loaded it).
   const statuses = await Promise.all(
@@ -70,10 +76,24 @@ async function bulkUpdate(
   const outdated = contexts.filter((_c, i) => statuses[i] === 'outdated');
   const skippedNotOutdated = contexts.length - outdated.length;
 
+  // Nothing actionable: make the no-op explicit instead of a vague "skipped".
+  if (outdated.length === 0) {
+    notifyWarning(
+      'Nothing to update',
+      'None of the selected containers have updates available.'
+    );
+    return { containersUpdated: 0, stacksUpdated: 0, failures: [], skipped: 0 };
+  }
+
   const { standalone, stacks: stackGroups, external } =
     groupContainersForUpdate(outdated, stacks);
 
-  let succeeded = 0;
+  // Without stack-update rights we must not attempt a stack redeploy (403).
+  const allowedStackGroups = canUpdateStack ? stackGroups : [];
+  const skippedUnauthorizedStacks = canUpdateStack ? 0 : stackGroups.length;
+
+  let containersUpdated = 0;
+  let stacksUpdated = 0;
   const failures: string[] = [];
 
   // Standalone containers: recreate-with-pull, one per container.
@@ -81,7 +101,7 @@ async function bulkUpdate(
     try {
       await applyContainerUpdate(context, stacks);
       invalidateContainerUpdateQueries(queryClient, context);
-      succeeded += 1;
+      containersUpdated += 1;
     } catch (err) {
       failures.push(context.name);
       notifyError('Failure', err as Error, `Unable to update ${context.name}`);
@@ -89,11 +109,11 @@ async function bulkUpdate(
   });
 
   // Stack-managed containers: redeploy each owning stack exactly once.
-  await runSequential(stackGroups, async ({ context }) => {
+  await runSequential(allowedStackGroups, async ({ context }) => {
     try {
       await applyContainerUpdate(context, stacks);
       invalidateContainerUpdateQueries(queryClient, context);
-      succeeded += 1;
+      stacksUpdated += 1;
     } catch (err) {
       failures.push(context.name);
       notifyError(
@@ -104,15 +124,25 @@ async function bulkUpdate(
     }
   });
 
-  if (succeeded > 0) {
-    notifySuccess(
-      'Success',
-      `${succeeded} ${pluralize(succeeded, 'update')} applied`
-    );
+  // A stack redeploy updates every container in the stack, so report containers
+  // and stacks separately rather than conflating both into one "update" count.
+  if (containersUpdated > 0 || stacksUpdated > 0) {
+    const parts: string[] = [];
+    if (containersUpdated > 0) {
+      parts.push(`${containersUpdated} ${pluralize(containersUpdated, 'container')}`);
+    }
+    if (stacksUpdated > 0) {
+      parts.push(`${stacksUpdated} ${pluralize(stacksUpdated, 'stack')}`);
+    }
+    notifySuccess('Success', `${parts.join(' and ')} updated`);
   }
 
   const skippedExternal = external.length;
-  if (skippedNotOutdated > 0 || skippedExternal > 0) {
+  if (
+    skippedNotOutdated > 0 ||
+    skippedExternal > 0 ||
+    skippedUnauthorizedStacks > 0
+  ) {
     const parts: string[] = [];
     if (skippedNotOutdated > 0) {
       parts.push(`${skippedNotOutdated} not outdated`);
@@ -120,10 +150,23 @@ async function bulkUpdate(
     if (skippedExternal > 0) {
       parts.push(`${skippedExternal} managed outside Portainer`);
     }
+    if (skippedUnauthorizedStacks > 0) {
+      parts.push(
+        `${skippedUnauthorizedStacks} ${pluralize(
+          skippedUnauthorizedStacks,
+          'stack'
+        )} you can't update`
+      );
+    }
     notifyWarning('Some containers were skipped', parts.join(', '));
   }
 
-  return { succeeded, failures, skipped: skippedNotOutdated + skippedExternal };
+  return {
+    containersUpdated,
+    stacksUpdated,
+    failures,
+    skipped: skippedNotOutdated + skippedExternal + skippedUnauthorizedStacks,
+  };
 }
 
 async function runSequential<T>(

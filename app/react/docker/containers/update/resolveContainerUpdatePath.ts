@@ -1,5 +1,5 @@
 import { COMPOSE_STACK_NAME_LABEL } from '@/react/constants';
-import { Stack } from '@/react/common/stacks/types';
+import { Stack, StackType } from '@/react/common/stacks/types';
 import { EnvironmentId } from '@/react/portainer/environments/types';
 
 import { ContainerUpdatePath } from './types';
@@ -10,10 +10,12 @@ import { ContainerUpdatePath } from './types';
  * and reused by the details button, the bulk action and the M4 auto-update job.
  *
  * - No compose project label -> `standalone` (recreate-with-pull).
- * - Compose project that matches a Portainer `Stack` (same name + endpoint) ->
- *   `stack` (redeploy-with-pull, keeps the container in its stack).
- * - Compose project with no matching Portainer stack -> `external`: managed
- *   outside Portainer, so we must not recreate it (would detach it / drift).
+ * - Compose project that matches a Portainer Docker Compose `Stack` (same name +
+ *   endpoint + compose type) -> `stack` (redeploy-with-pull, keeps the container
+ *   in its stack).
+ * - Compose project with no matching Portainer compose stack -> `external`:
+ *   managed outside Portainer (or a same-named stack of another type), so we
+ *   must not recreate it (would detach it / drift).
  */
 export function resolveContainerUpdatePath(
   context: { labels?: Record<string, string>; environmentId: EnvironmentId },
@@ -25,8 +27,13 @@ export function resolveContainerUpdatePath(
     return { kind: 'standalone' };
   }
 
+  // Match by name + endpoint, but only a Docker Compose stack: a same-named
+  // swarm/kubernetes stack must not be redeployed via the compose update path.
   const stack = stacks.find(
-    (s) => s.Name === projectName && s.EndpointId === context.environmentId
+    (s) =>
+      s.Name === projectName &&
+      s.EndpointId === context.environmentId &&
+      s.Type === StackType.DockerCompose
   );
 
   if (!stack) {

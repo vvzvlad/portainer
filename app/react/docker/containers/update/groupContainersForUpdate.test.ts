@@ -1,4 +1,4 @@
-import { Stack } from '@/react/common/stacks/types';
+import { Stack, StackType } from '@/react/common/stacks/types';
 import { COMPOSE_STACK_NAME_LABEL } from '@/react/constants';
 
 import { groupContainersForUpdate } from './groupContainersForUpdate';
@@ -20,6 +20,7 @@ const stack = {
   Id: 7,
   Name: 'my-stack',
   EndpointId: 3,
+  Type: StackType.DockerCompose,
 } as Stack;
 
 describe('groupContainersForUpdate', () => {

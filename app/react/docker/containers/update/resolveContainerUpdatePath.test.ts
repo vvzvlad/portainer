@@ -1,4 +1,4 @@
-import { Stack } from '@/react/common/stacks/types';
+import { Stack, StackType } from '@/react/common/stacks/types';
 import { COMPOSE_STACK_NAME_LABEL } from '@/react/constants';
 
 import { resolveContainerUpdatePath } from './resolveContainerUpdatePath';
@@ -8,6 +8,7 @@ function buildStack(overrides: Partial<Stack>): Stack {
     Id: 1,
     Name: 'my-stack',
     EndpointId: 3,
+    Type: StackType.DockerCompose,
     ...overrides,
   } as Stack;
 }
@@ -60,6 +61,24 @@ describe('resolveContainerUpdatePath', () => {
           environmentId: 3,
         },
         [buildStack({ Name: 'other' })]
+      )
+    ).toEqual({ kind: 'external' });
+  });
+
+  it('returns external when a same-named stack is not a compose stack', () => {
+    const stack = buildStack({
+      Name: 'my-stack',
+      EndpointId: 3,
+      Type: StackType.Kubernetes,
+    });
+
+    expect(
+      resolveContainerUpdatePath(
+        {
+          labels: { [COMPOSE_STACK_NAME_LABEL]: 'my-stack' },
+          environmentId: 3,
+        },
+        [stack]
       )
     ).toEqual({ kind: 'external' });
   });

@@ -46,36 +46,41 @@ export function SecondaryActions({
 
   return (
     <Authorized authorizations="DockerContainerCreate">
-      <ButtonGroup>
-        {/* Self-hides unless the image is outdated; shown for stack & standalone. */}
-        <UpdateNowButton
-          environmentId={environmentId}
-          containerId={containerId}
-          nodeName={nodeName}
-          containerImage={containerImage}
-          containerName={containerName}
-          labels={containerLabels}
-          isPortainer={isPortainer}
-        />
+      {/*
+        Self-hides unless the image is outdated; renders its own ButtonGroup so
+        the recreate/duplicate group never shows up empty when both are hidden.
+      */}
+      <UpdateNowButton
+        environmentId={environmentId}
+        containerId={containerId}
+        nodeName={nodeName}
+        containerImage={containerImage}
+        containerName={containerName}
+        labels={containerLabels}
+        isPortainer={isPortainer}
+      />
 
-        {displayRecreateButton && (
-          <RecreateButton
-            environmentId={environmentId}
-            containerId={containerId}
-            nodeName={nodeName}
-            containerImage={containerImage}
-            isPortainer={isPortainer}
-          />
-        )}
+      {(displayRecreateButton || displayDuplicateEditButton) && (
+        <ButtonGroup>
+          {displayRecreateButton && (
+            <RecreateButton
+              environmentId={environmentId}
+              containerId={containerId}
+              nodeName={nodeName}
+              containerImage={containerImage}
+              isPortainer={isPortainer}
+            />
+          )}
 
-        {displayDuplicateEditButton && (
-          <DuplicateEditButton
-            containerId={containerId}
-            nodeName={nodeName}
-            isPortainer={isPortainer}
-          />
-        )}
-      </ButtonGroup>
+          {displayDuplicateEditButton && (
+            <DuplicateEditButton
+              containerId={containerId}
+              nodeName={nodeName}
+              isPortainer={isPortainer}
+            />
+          )}
+        </ButtonGroup>
+      )}
     </Authorized>
   );
 }
