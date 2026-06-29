@@ -129,27 +129,6 @@ angular
     };
 
     $stateRegistryProvider.register({
-      name: 'edge.devices',
-      url: '/devices',
-      abstract: true,
-    });
-
-    if (process.env.PORTAINER_EDITION === 'BE') {
-      $stateRegistryProvider.register({
-        name: 'edge.devices.waiting-room',
-        url: '/waiting-room',
-        views: {
-          'content@': {
-            component: 'waitingRoomView',
-          },
-        },
-        data: {
-          docs: '/user/edge/waiting-room',
-        },
-      });
-    }
-
-    $stateRegistryProvider.register({
       name: 'edge.templates',
       url: '/templates?template',
       views: {

@@ -2,7 +2,6 @@ import clsx from 'clsx';
 import uuid from 'uuid';
 import { ComponentProps, PropsWithChildren, ReactNode, useState } from 'react';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
 import { AutomationTestingProps } from '@/types';
 
 import { Tooltip } from '@@/Tip/Tooltip';
@@ -24,7 +23,6 @@ export interface Props extends AutomationTestingProps {
   fieldClass?: string;
 
   disabled?: boolean;
-  featureId?: FeatureId;
   valueExplanation?: ReactNode;
 }
 
@@ -39,7 +37,6 @@ export function SwitchField({
   'data-cy': dataCy,
   disabled,
   onChange,
-  featureId,
   switchClass,
   setTooltipHtmlMessage,
   valueExplanation,
@@ -66,7 +63,6 @@ export function SwitchField({
         disabled={disabled}
         onChange={onChange}
         index={index}
-        featureId={featureId}
         data-cy={dataCy}
       />
       {valueExplanation && <span>{valueExplanation}</span>}

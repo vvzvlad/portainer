@@ -1,6 +1,5 @@
-import { Box, Clock, LayoutGrid, Layers, Puzzle, Edit } from 'lucide-react';
+import { Clock, LayoutGrid, Layers, Edit } from 'lucide-react';
 
-import { isBE } from '../portainer/feature-flags/feature-flags.service';
 import { useSettings } from '../portainer/settings/queries';
 
 import { SidebarItem } from './SidebarItem';
@@ -14,8 +13,6 @@ export function EdgeComputeSidebar() {
   if (!settingsQuery.data || !settingsQuery.data.EnableEdgeComputeFeatures) {
     return null;
   }
-
-  const settings = settingsQuery.data;
 
   return (
     <SidebarSection title="Edge compute">
@@ -37,22 +34,6 @@ export function EdgeComputeSidebar() {
         icon={Clock}
         data-cy="portainerSidebar-edgeJobs"
       />
-      {isBE && (
-        <SidebarItem
-          to="edge.configurations"
-          label="Edge Configurations"
-          icon={Puzzle}
-          data-cy="portainerSidebar-edgeConfigurations"
-        />
-      )}
-      {isBE && !settings.TrustOnFirstConnect && (
-        <SidebarItem
-          to="edge.devices.waiting-room"
-          label="Waiting Room"
-          icon={Box}
-          data-cy="portainerSidebar-edgeDevicesWaitingRoom"
-        />
-      )}
       <SidebarParent
         icon={Edit}
         label="Edge Templates"

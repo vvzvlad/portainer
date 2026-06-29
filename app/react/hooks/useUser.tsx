@@ -13,7 +13,6 @@ import { User } from '@/portainer/users/types';
 import { useLoadCurrentUser } from '@/portainer/users/queries/useLoadCurrentUser';
 
 import { useEnvironment } from '../portainer/environments/queries';
-import { isBE } from '../portainer/feature-flags/feature-flags.service';
 
 interface State {
   user?: User;
@@ -120,7 +119,7 @@ export function useAuthorizations(
     return { authorized: true, isLoading: false };
   }
 
-  if (!isBE && adminOnlyCE) {
+  if (adminOnlyCE) {
     return { authorized: false, isLoading: false };
   }
 
@@ -154,27 +153,9 @@ export function hasAuthorizations(
   authorizations: string | string[],
   environmentId?: EnvironmentId
 ) {
-  if (!isBE) {
-    return true;
-  }
-
-  const authorizationsArray =
-    typeof authorizations === 'string' ? [authorizations] : authorizations;
-
-  if (authorizationsArray.length === 0) {
-    return true;
-  }
-
-  if (!environmentId) {
-    return false;
-  }
-
-  const userEndpointAuthorizations =
-    user.EndpointAuthorizations?.[environmentId] || [];
-
-  return authorizationsArray.some(
-    (authorization) => userEndpointAuthorizations[authorization]
-  );
+  // In CE every authenticated user passes endpoint authorization checks here;
+  // per-endpoint authorization gating only existed in the Business Edition.
+  return true;
 }
 
 interface AuthorizedProps {
