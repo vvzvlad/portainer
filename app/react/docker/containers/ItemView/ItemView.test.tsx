@@ -9,7 +9,7 @@ import { server } from '@/setup-tests/server';
 import { User } from '@/portainer/users/types';
 import { ContainerDetailsViewModel } from '@/docker/models/containerDetails';
 
-import { ItemView } from './ItemView';
+import { ItemView, STACK_CONTAINER_STATE_NAME } from './ItemView';
 
 const { useCurrentStateAndParamsMock } = vi.hoisted(() => ({
   useCurrentStateAndParamsMock: vi.fn(),
@@ -52,7 +52,7 @@ describe('ItemView', () => {
 
   it('keeps the stack trail when the container is opened from a stack', async () => {
     useCurrentStateAndParamsMock.mockReturnValue({
-      state: { name: 'docker.stacks.stack.container' },
+      state: { name: STACK_CONTAINER_STATE_NAME },
       params: {
         id: 'container-id-123',
         endpointId: '1',
@@ -82,7 +82,7 @@ describe('ItemView', () => {
 
   it('keeps the stack trail without a stack id for an external stack', async () => {
     useCurrentStateAndParamsMock.mockReturnValue({
-      state: { name: 'docker.stacks.stack.container' },
+      state: { name: STACK_CONTAINER_STATE_NAME },
       params: {
         id: 'container-id-123',
         endpointId: '1',
@@ -115,6 +115,45 @@ describe('ItemView', () => {
     expect(href).toContain('type=2');
     expect(href).not.toContain('stackId=');
     expect(href).not.toContain('regular=');
+
+    expect(
+      screen.queryByRole('link', { name: 'Containers' })
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps the stack trail with the stack id for an orphaned stack', async () => {
+    useCurrentStateAndParamsMock.mockReturnValue({
+      state: { name: STACK_CONTAINER_STATE_NAME },
+      params: {
+        id: 'container-id-123',
+        endpointId: '1',
+        nodeName: undefined,
+        name: 'orphan-stack',
+        stackId: '7',
+        type: '2',
+        // Orphaned stacks are identified by orphaned=true and, unlike regular
+        // stacks, carry no `regular` flag. They still have a DB id (stackId),
+        // so the back-link must keep stackId and must NOT take the external
+        // (id-less) branch.
+        orphaned: 'true',
+        tab: 'logs',
+      },
+    });
+
+    renderComponent();
+
+    // Stack trail is shown instead of the global Containers crumb.
+    const stacksCrumb = await screen.findByRole('link', { name: 'Stacks' });
+    expect(stacksCrumb).toBeVisible();
+
+    const stackCrumb = screen.getByRole('link', { name: 'orphan-stack' });
+    expect(stackCrumb).toBeVisible();
+    const href = stackCrumb.getAttribute('href');
+    // Orphaned stacks keep their numeric stack id so the stack can reload,
+    // flag the orphaned state, and must not be treated as external.
+    expect(href).toContain('stackId=7');
+    expect(href).toContain('orphaned=true');
+    expect(href).not.toContain('external=');
 
     expect(
       screen.queryByRole('link', { name: 'Containers' })

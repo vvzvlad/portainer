@@ -22,6 +22,27 @@ import { VolumesSection } from './VolumesSection/VolumesSection';
 import { ContainerNetworksDatatable } from './ContainerNetworksDatatable';
 import { HealthStatus } from './HealthStatus';
 
+// ui-router state name for a container opened from within a stack. Kept as a
+// single source of truth so a future state rename stays in sync with the
+// breadcrumb logic (and its test) instead of silently falling back to the
+// default crumb.
+export const STACK_CONTAINER_STATE_NAME = 'docker.stacks.stack.container';
+
+// Shape of the params handed to the docker.stacks.stack route when building the
+// back-to-stack breadcrumb link. Values are strings (inherited route params)
+// except `external`, which is emitted as a boolean and serialized to
+// `external=true` by ui-router.
+type StackLinkParams = {
+  name?: string;
+  stackId?: string;
+  type?: string;
+  regular?: string;
+  orphaned?: string;
+  orphanedRunning?: string;
+  external?: boolean;
+  tab?: string;
+};
+
 export function ItemView() {
   const environmentId = useEnvironmentId();
   const { state, params } = useCurrentStateAndParams();
@@ -116,7 +137,7 @@ export function ItemView() {
   );
 }
 
-// When a container is opened from a stack (state docker.stacks.stack.container),
+// When a container is opened from a stack (state STACK_CONTAINER_STATE_NAME),
 // keep the stack trail in the breadcrumbs so the user can navigate back to the
 // stack. Otherwise fall back to the global containers list.
 function getContainerBreadcrumbs(
@@ -124,7 +145,7 @@ function getContainerBreadcrumbs(
   params: Record<string, string | undefined>,
   containerName: string
 ): Array<Crumb | string> {
-  if (stateName === 'docker.stacks.stack.container') {
+  if (stateName === STACK_CONTAINER_STATE_NAME) {
     return [
       { label: 'Stacks', link: 'docker.stacks' },
       {
@@ -143,7 +164,7 @@ function getContainerBreadcrumbs(
 // (container) route params, which are inherited from the parent stack state.
 function buildStackLinkParams(
   params: Record<string, string | undefined>
-): Record<string, unknown> {
+): StackLinkParams {
   // External stacks have no DB id; they are identified by name/type only.
   if (params.external === 'true') {
     return {
