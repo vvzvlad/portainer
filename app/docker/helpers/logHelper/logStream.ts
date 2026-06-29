@@ -122,10 +122,19 @@ export function createLogStreamProcessor({
     ? skipBoundaryContents.slice()
     : [];
   // RFC3339 timestamp of the last complete line we saw (next resume point).
-  let lastTimestamp: string | undefined;
+  // Seeded from the resume point so the boundary set carried in via
+  // `skipBoundaryContents` is preserved: a surviving line at the resume
+  // timestamp is APPENDED to the already-known boundary lines (not treated as a
+  // fresh timestamp), so a second reconnect at the same nanosecond still knows
+  // every line we have shown at it and drops them all instead of re-emitting
+  // duplicates. The first NEWER timestamp resets the set as usual.
+  let lastTimestamp: string | undefined = skipUntilTimestamp;
   // Exact content of the line(s) at `lastTimestamp` we have emitted so far — the
   // boundary set handed to the next processor for content-exact reconnect dedup.
-  let boundaryLines: string[] = [];
+  // Seeded from the inbound boundary set (see `lastTimestamp` above).
+  let boundaryLines: string[] = skipBoundaryContents
+    ? skipBoundaryContents.slice()
+    : [];
 
   const decoder = new TextDecoder();
 

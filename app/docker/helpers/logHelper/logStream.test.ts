@@ -285,6 +285,49 @@ describe('timestamps (always requested, optionally displayed)', () => {
     const lines = proc.push(bytes(`${tsBoundary} only\n${tsAfter} fresh\n`));
     expect(lines.map((l) => l.line)).toEqual(['fresh']);
   });
+
+  // F10: a SECOND reconnect at the same nanosecond timestamp must not re-emit
+  // duplicates. Lines A and B share ts T; the connection drops after only A was
+  // shown. Reconnect #1 (boundary set [A]) redelivers A,B -> drops A, keeps B,
+  // and — because the processor seeds its boundary state from the resume
+  // params — its boundary set becomes [A, B] (A is NOT forgotten). If a second
+  // reconnect happens at the same T before any newer-ts line arrives, it carries
+  // [A, B] forward and drops BOTH redelivered lines (no duplicate). Without the
+  // seeding, reconnect #1's boundary set would be just [B], and reconnect #2
+  // would fail to recognise A as a duplicate and re-emit both A and B.
+  it('does not duplicate lines on a second reconnect at the same nanosecond timestamp', () => {
+    const tsShared = '2024-01-01T00:00:00.000000005Z';
+
+    // Reconnect #1: resume at tsShared, having already shown A.
+    const first = createLogStreamProcessor({
+      stripHeaders: false,
+      withTimestamps: true,
+      streamHasTimestamps: true,
+      skipUntilTimestamp: tsShared,
+      skipBoundaryContents: [`${tsShared} A`],
+    });
+    // Docker redelivers A (duplicate) and B (new, same timestamp).
+    const round1 = first.push(bytes(`${tsShared} A\n${tsShared} B\n`));
+    expect(round1.map((l) => l.line)).toEqual([`${tsShared} B`]);
+    // A must NOT be forgotten: the boundary set now carries both A and B.
+    expect(first.getBoundaryLines()).toEqual([
+      `${tsShared} A`,
+      `${tsShared} B`,
+    ]);
+
+    // Reconnect #2 at the same timestamp, before any newer-ts line arrived,
+    // carrying reconnect #1's boundary set forward.
+    const second = createLogStreamProcessor({
+      stripHeaders: false,
+      withTimestamps: true,
+      streamHasTimestamps: true,
+      skipUntilTimestamp: first.getLastTimestamp(),
+      skipBoundaryContents: first.getBoundaryLines(),
+    });
+    // Docker redelivers A and B again; both are genuine duplicates now.
+    const round2 = second.push(bytes(`${tsShared} A\n${tsShared} B\n`));
+    expect(round2.map((l) => l.line)).toEqual([]);
+  });
 });
 
 describe('stable line ids (append model)', () => {

@@ -1,7 +1,7 @@
 import moment from 'moment';
 
 import { streamContainerLogs } from '@/react/docker/containers/containers.service';
-import { createLogStreamProcessor } from '@/docker/helpers/logHelper';
+import { createLogStreamProcessor, rfc3339ToUnixNanoSince } from '@/docker/helpers/logHelper';
 
 // Hard cap on how many lines we keep in the DOM/buffer during a long live
 // stream. We trim from the head (oldest lines) so a selection anchored in the
@@ -155,25 +155,9 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
       }
     }
 
-    // Build Docker's `since` param as a Unix timestamp with a nanosecond fraction
-    // ("<seconds>.<nanos>"). Both the initial connect and reconnect use this one
-    // form so we never mix unix-seconds and RFC3339 — some proxies / pinned API
-    // versions accept them inconsistently. The fraction needs string precision
-    // (a JS number cannot hold nanoseconds), hence `since` is sent as a string.
-    function rfc3339ToUnixNanoSince(rfc3339) {
-      // Docker emits a fixed-width RFC3339Nano prefix: "...:05.000000000Z".
-      const seconds = Math.floor(Date.parse(rfc3339.substring(0, 19) + 'Z') / 1000);
-      const dot = rfc3339.indexOf('.');
-      const nanos =
-        dot >= 0
-          ? rfc3339
-              .substring(dot + 1)
-              .replace(/[^0-9]/g, '')
-              .padEnd(9, '0')
-              .substring(0, 9)
-          : '000000000';
-      return `${seconds}.${nanos}`;
-    }
+    // `since` is built from the last log timestamp via rfc3339ToUnixNanoSince
+    // (imported from logHelper) as a single "<seconds>.<nanos>" form — see that
+    // helper for why we never mix unix-seconds and RFC3339.
 
     // Connect (or reconnect) the live stream.
     // `resetBuffer` clears the on-screen buffer (used on first connect / param
