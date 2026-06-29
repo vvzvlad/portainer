@@ -5,9 +5,6 @@ import './i18n';
 import angular from 'angular';
 import { UI_ROUTER_REACT_HYBRID } from '@uirouter/react-hybrid';
 
-import { Edition } from '@/react/portainer/feature-flags/enums';
-import { init as initFeatureService } from '@/react/portainer/feature-flags/feature-flags.service';
-
 import './agent';
 import { azureModule } from './azure';
 import './docker/__module';
@@ -29,8 +26,6 @@ if (window.origin == 'http://localhost:49000') {
   var basePath = path ? '/' + path + '/' : '/';
   document.getElementById('base').href = basePath;
 }
-
-initFeatureService(Edition[process.env.PORTAINER_EDITION]);
 
 angular
   .module('portainer', [
