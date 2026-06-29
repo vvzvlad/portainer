@@ -34,9 +34,13 @@ type imageStatusResponse struct {
 // @param id path int true "Environment identifier"
 // @param containerId path string true "Container identifier"
 // @param nodeName query string false "Node name for a Swarm/agent endpoint"
-// @success 200 {object} imageStatusResponse "Success"
-// @failure 400 "Invalid request"
-// @failure 403 "Permission denied"
+// @description Engine-level issues (container not found, registry unreachable, auth
+// @description failure, ...) are not treated as API errors: they degrade gracefully to a
+// @description 200 response carrying a "skipped" or "error" status. HTTP errors are only
+// @description returned for request/authorization problems.
+// @success 200 {object} imageStatusResponse "Image status (also returned with a skipped/error status for engine-level issues)"
+// @failure 400 "Invalid request: missing container identifier"
+// @failure 403 "Permission denied to access the environment"
 // @failure 404 "Environment not found"
 // @router /docker/{id}/containers/{containerId}/image_status [get]
 func (handler *Handler) imageStatus(w http.ResponseWriter, r *http.Request) *httperror.HandlerError {
@@ -66,10 +70,12 @@ func (handler *Handler) imageStatus(w http.ResponseWriter, r *http.Request) *htt
 	if err != nil {
 		// A detection failure (registry unreachable, auth failure, ...) is not an API
 		// failure: degrade gracefully with a 200 + "error" status so the UI can render a
-		// neutral badge instead of surfacing a hard error.
+		// neutral badge instead of surfacing a hard error. The raw error is logged
+		// server-side only; the response carries a generic message to avoid leaking
+		// registry URLs or credential details to the client.
 		log.Warn().Err(err).Str("containerId", containerID).Msg("unable to determine container image status")
 
-		return response.JSON(w, &imageStatusResponse{Status: string(images.Error), Message: err.Error()})
+		return response.JSON(w, &imageStatusResponse{Status: string(images.Error), Message: "unable to determine image status"})
 	}
 
 	return response.JSON(w, &imageStatusResponse{Status: string(status)})

@@ -134,6 +134,18 @@ func (c *DigestClient) ContainerImageStatus(ctx context.Context, containerID str
 		return Skipped, nil
 	}
 
+	// statusCache is the 24h cache keyed by imageID. Reading it here makes the
+	// long-lived cache effective on the input side for every caller (handler,
+	// ContainersImageStatus, the M4 auto-update job): a hit skips the expensive,
+	// rate-limited remote registry digest lookup below. The container/image
+	// inspects above are local Docker calls and cheap; the registry HEAD is the
+	// part worth avoiding. Only successful statuses are ever written (the error
+	// paths return early without caching), so a hit returns the same value the
+	// full computation would have produced.
+	if s, err := CachedResourceImageStatus(imageID); err == nil {
+		return s, nil
+	}
+
 	digs := make([]digest.Digest, 0)
 	images := make([]*Image, 0)
 	if i, err := ParseImage(ParseImageOptions{Name: container.Config.Image}); err == nil {

@@ -57,7 +57,7 @@ export function useContainerImageStatus(
   enabled = true
 ) {
   return useQuery(
-    queryKeys.imageStatus(environmentId, containerId),
+    queryKeys.imageStatus(environmentId, containerId, nodeName),
     () => getContainerImageStatus(environmentId, containerId, nodeName),
     {
       enabled,
