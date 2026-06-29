@@ -6,6 +6,7 @@ import { ButtonGroup } from '@@/buttons';
 import { ContainerId } from '../../types';
 
 import { RecreateButton } from './SecondaryActions/RecreateButton';
+import { UpdateNowButton } from './SecondaryActions/UpdateNowButton';
 import { DuplicateEditButton } from './SecondaryActions/DuplicateEditButton';
 import { useCanRecreateContainer } from './SecondaryActions/useCanRecreateContainer';
 import { useCanDuplicateEditContainer } from './SecondaryActions/useCanDuplicateEditContainer';
@@ -15,6 +16,8 @@ interface Props {
   containerId: ContainerId;
   nodeName?: string;
   containerImage: string;
+  containerName: string;
+  containerLabels?: Record<string, string>;
   containerAutoRemove: boolean | undefined;
   isPortainer: boolean;
   partOfSwarmService: boolean;
@@ -25,6 +28,8 @@ export function SecondaryActions({
   containerId,
   nodeName,
   containerImage,
+  containerName,
+  containerLabels,
   containerAutoRemove = false,
   isPortainer,
   partOfSwarmService,
@@ -39,31 +44,43 @@ export function SecondaryActions({
     partOfSwarmService,
   });
 
-  if (!displayRecreateButton && !displayDuplicateEditButton) {
-    return null;
-  }
-
   return (
     <Authorized authorizations="DockerContainerCreate">
-      <ButtonGroup>
-        {displayRecreateButton && (
-          <RecreateButton
-            environmentId={environmentId}
-            containerId={containerId}
-            nodeName={nodeName}
-            containerImage={containerImage}
-            isPortainer={isPortainer}
-          />
-        )}
+      {/*
+        Self-hides unless the image is outdated; renders its own ButtonGroup so
+        the recreate/duplicate group never shows up empty when both are hidden.
+      */}
+      <UpdateNowButton
+        environmentId={environmentId}
+        containerId={containerId}
+        nodeName={nodeName}
+        containerImage={containerImage}
+        containerName={containerName}
+        labels={containerLabels}
+        isPortainer={isPortainer}
+      />
 
-        {displayDuplicateEditButton && (
-          <DuplicateEditButton
-            containerId={containerId}
-            nodeName={nodeName}
-            isPortainer={isPortainer}
-          />
-        )}
-      </ButtonGroup>
+      {(displayRecreateButton || displayDuplicateEditButton) && (
+        <ButtonGroup>
+          {displayRecreateButton && (
+            <RecreateButton
+              environmentId={environmentId}
+              containerId={containerId}
+              nodeName={nodeName}
+              containerImage={containerImage}
+              isPortainer={isPortainer}
+            />
+          )}
+
+          {displayDuplicateEditButton && (
+            <DuplicateEditButton
+              containerId={containerId}
+              nodeName={nodeName}
+              isPortainer={isPortainer}
+            />
+          )}
+        </ButtonGroup>
+      )}
     </Authorized>
   );
 }
