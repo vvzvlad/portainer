@@ -22,8 +22,8 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
   'endpoint',
   function ($scope, $transition$, $timeout, ContainerService, Notifications, HttpRequestHelper, endpoint) {
     $scope.state = {
-      // refreshRate kept for backwards compat with any external references; the
-      // transport is now a live stream, not a poll, so it is unused.
+      // No refreshRate here: container logs are delivered over a live stream now,
+      // not a 3s poll, so there is nothing to refresh on an interval.
       lineCount: 100,
       sinceTimestamp: '',
       displayTimestamps: false,
@@ -175,18 +175,21 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
         abortController.signal
       )
         .then(function onEnd() {
-          appendLines(processor.flush());
-          updateResumePoint(processor);
+          // The stream always reconnects from here, so discard the processor's
+          // unfinished trailing remainder instead of flushing it: emitting a
+          // truncated fragment AND advancing the resume point to its timestamp
+          // would make Docker re-send the full line under the same `since` and
+          // dedup drop it — losing the line and leaving the fragment on screen.
+          // Completed lines already advanced the resume point in onChunk; `since`
+          // redelivers the full boundary line on reconnect.
           scheduleReconnect();
         })
         .catch(function onError(err) {
           if (abortController.signal.aborted) {
             return; // intentional abort (pause/destroy/param change)
           }
-          // Flush the trailing partial line before reconnecting (parity with
-          // onEnd); a truncated final frame is dropped by the processor.
-          appendLines(processor.flush());
-          updateResumePoint(processor);
+          // Drop the unfinished remainder on reconnect (see onEnd): do not flush
+          // a truncated line nor move the resume point off an incomplete line.
           // Notify once per reconnect loop, not on every 3s retry.
           if (!stream.errorNotified) {
             stream.errorNotified = true;

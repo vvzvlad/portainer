@@ -228,12 +228,13 @@ export function createLogStreamProcessor({
       if (!value || value.length === 0) {
         return [];
       }
-      const rawLines = stripHeaders
-        ? (() => {
-            frameBuf = concatBytes(frameBuf, value);
-            return demuxFrames();
-          })()
-        : takeCompleteLines(value);
+      let rawLines: string[];
+      if (stripHeaders) {
+        frameBuf = concatBytes(frameBuf, value);
+        rawLines = demuxFrames();
+      } else {
+        rawLines = takeCompleteLines(value);
+      }
       return formatBatch(rawLines);
     },
 

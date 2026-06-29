@@ -112,6 +112,13 @@ describe('createLogStreamProcessor (non-TTY, byte-level frame demux)', () => {
     expect(proc.push(full.subarray(0, 10)).map((l) => l.line)).toEqual([]);
     expect(proc.flush().map((l) => l.line)).toEqual([]);
   });
+
+  // F3: a framed line terminated by \r\n must have its trailing CR stripped.
+  it('strips the trailing CR from a \\r\\n line ending (framed)', () => {
+    const proc = createLogStreamProcessor({ stripHeaders: true });
+    const lines = proc.push(frame('with-crlf\r\n'));
+    expect(lines.map((l) => l.line)).toEqual(['with-crlf']);
+  });
 });
 
 describe('createLogStreamProcessor (TTY, no headers)', () => {
@@ -127,6 +134,22 @@ describe('createLogStreamProcessor (TTY, no headers)', () => {
     expect(proc.push(bytes('tial\n')).map((l) => l.line)).toEqual(['partial']);
     expect(proc.push(bytes('tail')).map((l) => l.line)).toEqual([]);
     expect(proc.flush().map((l) => l.line)).toEqual(['tail']);
+  });
+
+  // F3: a \r\n line ending must have its trailing CR stripped (non-TTY path).
+  it('strips the trailing CR from a \\r\\n line ending', () => {
+    const proc = createLogStreamProcessor({ stripHeaders: false });
+    const lines = proc.push(bytes('with-crlf\r\n'));
+    expect(lines.map((l) => l.line)).toEqual(['with-crlf']);
+  });
+
+  // F3: a remainder carrying a trailing CR (no terminating LF) must have the CR
+  // stripped on flush. Split across two chunks to exercise the buffered path.
+  it('strips a trailing CR on flush when the stream ends without a newline', () => {
+    const proc = createLogStreamProcessor({ stripHeaders: false });
+    expect(proc.push(bytes('hel')).map((l) => l.line)).toEqual([]);
+    expect(proc.push(bytes('lo\r')).map((l) => l.line)).toEqual([]);
+    expect(proc.flush().map((l) => l.line)).toEqual(['hello']);
   });
 });
 
@@ -165,6 +188,36 @@ describe('timestamps (always requested, optionally displayed)', () => {
     // ts1 is the inclusive boundary Docker re-delivers -> dropped; ts2 is new
     const lines = proc.push(bytes(`${ts1} old\n${ts2} new\n`));
     expect(lines.map((l) => l.line)).toEqual(['new']);
+  });
+
+  // F4: the real reconnect shape — the redelivered boundary line arrives in its
+  // OWN chunk (the whole batch is dropped, dropTo === lines.length), so the
+  // `skipping` flag must stay on and the NEXT chunk must keep dropping dups up
+  // to the resume point before emitting the first genuinely new line.
+  it('keeps dropping reconnect dups when the redelivered line arrives in its own chunk', () => {
+    const tsA = '2024-01-01T00:00:00.000000001Z';
+    const tsB = '2024-01-01T00:00:00.000000002Z';
+    const tsC = '2024-01-01T00:00:00.000000003Z';
+    const tsD = '2024-01-01T00:00:00.000000004Z';
+    const proc = createLogStreamProcessor({
+      stripHeaders: false,
+      withTimestamps: false,
+      streamHasTimestamps: true,
+      skipUntilTimestamp: tsB,
+    });
+
+    // (1) only a redelivered boundary line (<= resume point) -> fully consumed
+    // by dedup; nothing emitted and skipping stays on.
+    expect(proc.push(bytes(`${tsA} dup-1\n`)).map((l) => l.line)).toEqual([]);
+
+    // (2) another dup + the first new line: because skipping was preserved the
+    // dup is still dropped, and only the new line is returned.
+    expect(
+      proc.push(bytes(`${tsB} dup-2\n${tsC} new\n`)).map((l) => l.line)
+    ).toEqual(['new']);
+
+    // (3) a later line passes through untouched (no skipping anymore).
+    expect(proc.push(bytes(`${tsD} after\n`)).map((l) => l.line)).toEqual(['after']);
   });
 });
 
