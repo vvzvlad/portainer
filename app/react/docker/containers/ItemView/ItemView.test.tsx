@@ -46,6 +46,8 @@ describe('ItemView', () => {
 
     expect(await screen.findByText('test-container')).toBeVisible();
     expect(screen.queryByText('/test-container')).not.toBeInTheDocument();
+    // The global Containers crumb is shown in the default (non-stack) context.
+    expect(screen.getByRole('link', { name: 'Containers' })).toBeVisible();
   });
 
   it('keeps the stack trail when the container is opened from a stack', async () => {

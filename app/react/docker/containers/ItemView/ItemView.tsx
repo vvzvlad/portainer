@@ -56,7 +56,11 @@ export function ItemView() {
     <>
       <PageHeader
         title="Container details"
-        breadcrumbs={getContainerBreadcrumbs(state?.name, params, containerName)}
+        breadcrumbs={getContainerBreadcrumbs(
+          state?.name,
+          params,
+          containerName
+        )}
       />
 
       <div className="mx-4 mb-4 space-y-4 [&>*]:block">
@@ -142,7 +146,12 @@ function buildStackLinkParams(
 ): Record<string, unknown> {
   // External stacks have no DB id; they are identified by name/type only.
   if (params.external === 'true') {
-    return { name: params.name, type: params.type, external: true };
+    return {
+      name: params.name,
+      type: params.type,
+      external: true,
+      tab: params.tab,
+    };
   }
 
   return {
@@ -152,6 +161,7 @@ function buildStackLinkParams(
     regular: params.regular,
     orphaned: params.orphaned,
     orphanedRunning: params.orphanedRunning,
+    tab: params.tab,
   };
 }
 
