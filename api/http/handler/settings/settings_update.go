@@ -18,6 +18,7 @@ import (
 	"github.com/portainer/portainer/pkg/validate"
 
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/oauth2"
 )
 
@@ -56,6 +57,18 @@ type settingsUpdatePayload struct {
 	EdgePortainerURL *string `json:"EdgePortainerURL"`
 	// ForceSecureCookies forces the Secure attribute on auth cookies regardless of the detected scheme
 	ForceSecureCookies *bool `example:"false"`
+	// Native container automation settings (auto-heal)
+	ContainerAutomation *containerAutomationSettingsPayload
+}
+
+type containerAutomationSettingsPayload struct {
+	AutoHeal *autoHealSettingsPayload
+}
+
+type autoHealSettingsPayload struct {
+	Enabled       *bool   `example:"false"`
+	CheckInterval *string `example:"30s"`
+	Scope         *string `example:"labeled"`
 }
 
 func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
@@ -105,6 +118,19 @@ func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
 		}
 	}
 
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoHeal != nil {
+		autoHeal := payload.ContainerAutomation.AutoHeal
+		if autoHeal.CheckInterval != nil {
+			if d, err := time.ParseDuration(*autoHeal.CheckInterval); err != nil || d <= 0 {
+				return errors.New("Invalid auto-heal check interval. Must be a positive duration (e.g. 30s)")
+			}
+		}
+
+		if autoHeal.Scope != nil && *autoHeal.Scope != "labeled" && *autoHeal.Scope != "all" {
+			return errors.New("Invalid auto-heal scope. Value must be one of: labeled, all")
+		}
+	}
+
 	return nil
 }
 
@@ -136,6 +162,14 @@ func (handler *Handler) settingsUpdate(w http.ResponseWriter, r *http.Request) *
 		return err
 	}); err != nil {
 		return response.TxErrorResponse(err)
+	}
+
+	// Re-apply container automation settings so the auto-heal job is rescheduled
+	// (or stopped) with the new interval/scope after a successful save.
+	if handler.ContainerAutomationService != nil {
+		if err := handler.ContainerAutomationService.Reload(); err != nil {
+			log.Warn().Err(err).Msg("unable to reload container automation settings")
+		}
 	}
 
 	hideFields(settings)
@@ -235,6 +269,14 @@ func (handler *Handler) updateSettings(tx dataservices.DataStoreTx, payload sett
 	}
 
 	settings.KubectlShellImage = *cmp.Or(payload.KubectlShellImage, &settings.KubectlShellImage)
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoHeal != nil {
+		autoHeal := payload.ContainerAutomation.AutoHeal
+		current := &settings.ContainerAutomation.AutoHeal
+		current.Enabled = *cmp.Or(autoHeal.Enabled, &current.Enabled)
+		current.CheckInterval = *cmp.Or(autoHeal.CheckInterval, &current.CheckInterval)
+		current.Scope = *cmp.Or(autoHeal.Scope, &current.Scope)
+	}
 
 	if err := tx.Settings().UpdateSettings(settings); err != nil {
 		return nil, httperror.InternalServerError("Unable to persist settings changes inside the database", err)

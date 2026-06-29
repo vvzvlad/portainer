@@ -127,6 +127,7 @@ export interface Settings {
   AllowContainerCapabilitiesForRegularUsers: boolean;
   ForceSecureCookies: boolean;
   GlobalDeploymentOptions?: GlobalDeploymentOptions;
+  ContainerAutomation: ContainerAutomationSettings;
   Edge: {
     PingInterval: number;
     SnapshotInterval: number;
@@ -134,6 +135,18 @@ export interface Settings {
     AsyncMode: boolean;
     TunnelServerAddress: string;
   };
+}
+
+export type AutoHealScope = 'labeled' | 'all';
+
+export interface AutoHealSettings {
+  Enabled: boolean;
+  CheckInterval: string;
+  Scope: AutoHealScope;
+}
+
+export interface ContainerAutomationSettings {
+  AutoHeal: AutoHealSettings;
 }
 
 export interface GlobalDeploymentOptions {

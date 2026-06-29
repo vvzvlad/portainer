@@ -11,6 +11,7 @@ import (
 	portainer "github.com/portainer/portainer/api"
 	"github.com/portainer/portainer/api/adminmonitor"
 	"github.com/portainer/portainer/api/apikey"
+	"github.com/portainer/portainer/api/containerautomation"
 	"github.com/portainer/portainer/api/crypto"
 	"github.com/portainer/portainer/api/dataservices"
 	"github.com/portainer/portainer/api/docker"
@@ -105,6 +106,7 @@ type Server struct {
 	KubernetesDeployer          portainer.KubernetesDeployer
 	HelmPackageManager          libhelmtypes.HelmPackageManager
 	Scheduler                   *scheduler.Scheduler
+	ContainerAutomationService  *containerautomation.Service
 	ShutdownTrigger             context.CancelFunc
 	StackDeployer               deployments.StackDeployer
 	UpgradeService              upgrade.Service
@@ -238,6 +240,7 @@ func (server *Server) Start(ctx context.Context) error {
 	settingsHandler.LDAPService = server.LDAPService
 	settingsHandler.SnapshotService = server.SnapshotService
 	settingsHandler.SetupTokenRequired = server.SetupToken != ""
+	settingsHandler.ContainerAutomationService = server.ContainerAutomationService
 
 	var sslHandler = sslhandler.NewHandler(requestBouncer)
 	sslHandler.SSLService = server.SSLService

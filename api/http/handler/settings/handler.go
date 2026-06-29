@@ -17,15 +17,23 @@ func hideFields(settings *portainer.Settings) {
 	settings.OAuthSettings.KubeSecretKey = nil
 }
 
+// ContainerAutomationReloader re-applies container automation settings (e.g. the
+// auto-heal scheduler job) after a settings change. It is a minimal interface so
+// the settings handler does not depend on the concrete service implementation.
+type ContainerAutomationReloader interface {
+	Reload() error
+}
+
 // Handler is the HTTP handler used to handle settings operations.
 type Handler struct {
 	*mux.Router
-	DataStore          dataservices.DataStore
-	FileService        portainer.FileService
-	JWTService         portainer.JWTService
-	LDAPService        portainer.LDAPService
-	SnapshotService    portainer.SnapshotService
-	SetupTokenRequired bool
+	DataStore                  dataservices.DataStore
+	FileService                portainer.FileService
+	JWTService                 portainer.JWTService
+	LDAPService                portainer.LDAPService
+	SnapshotService            portainer.SnapshotService
+	SetupTokenRequired         bool
+	ContainerAutomationService ContainerAutomationReloader
 }
 
 // NewHandler creates a handler to manage settings operations.

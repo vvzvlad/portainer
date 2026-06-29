@@ -62,6 +62,10 @@ func (store *Store) checkOrCreateDefaultSettings() error {
 			EnforceEdgeID:            true,
 		}
 
+		defaultSettings.ContainerAutomation.AutoHeal.Enabled = false
+		defaultSettings.ContainerAutomation.AutoHeal.CheckInterval = "30s"
+		defaultSettings.ContainerAutomation.AutoHeal.Scope = "labeled"
+
 		return store.SettingsService.UpdateSettings(defaultSettings)
 	}
 	if err != nil {

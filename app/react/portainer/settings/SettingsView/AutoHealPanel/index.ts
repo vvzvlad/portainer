@@ -1,0 +1,1 @@
+export { AutoHealPanel } from './AutoHealPanel';

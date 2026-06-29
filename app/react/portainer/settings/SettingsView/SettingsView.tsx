@@ -10,6 +10,7 @@ import { Settings } from '../types';
 import { isBE } from '../../feature-flags/feature-flags.service';
 
 import { ApplicationSettingsPanel } from './ApplicationSettingsPanel';
+import { AutoHealPanel } from './AutoHealPanel';
 import { BackupSettingsPanel } from './BackupSettingsView';
 import { HelmCertPanel } from './HelmCertPanel';
 import { HiddenContainersPanel } from './HiddenContainersPanel/HiddenContainersPanel';
@@ -53,6 +54,8 @@ export function SettingsView() {
         {isBE && <ExperimentalFeatures />}
 
         <HiddenContainersPanel />
+
+        <AutoHealPanel />
 
         <BackupSettingsPanel />
       </div>

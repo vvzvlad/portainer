@@ -1211,6 +1211,15 @@ type (
 		// ForceSecureCookies forces the Secure attribute on auth cookies regardless of detected scheme.
 		// Enable when Portainer runs behind a TLS-terminating proxy.
 		ForceSecureCookies bool `json:"ForceSecureCookies" example:"false"`
+
+		// ContainerAutomation holds native container automation settings.
+		ContainerAutomation struct {
+			AutoHeal struct {
+				Enabled       bool   `json:"Enabled"`
+				CheckInterval string `json:"CheckInterval" example:"30s"`
+				Scope         string `json:"Scope" example:"labeled"` // "labeled" | "all"
+			} `json:"AutoHeal"`
+		} `json:"ContainerAutomation"`
 	}
 
 	// SnapshotJob represents a scheduled job that can create environment(endpoint) snapshots
