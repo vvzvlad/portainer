@@ -1,5 +1,5 @@
 import { UserX } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 
 import { Datatable } from '@@/datatables';
 import { createPersistedStore } from '@@/datatables/types';
@@ -29,7 +29,6 @@ export function AccessDatatable({
   const columns = useColumns({ inheritFrom });
   const [store] = useState(() => createPersistedStore(tableKey));
   const tableState = useTableState(store, tableKey);
-  const rolesState = useRolesState();
 
   return (
     <Datatable
@@ -44,7 +43,6 @@ export function AccessDatatable({
       extendTableOptions={mergeOptions(
         withMeta({
           table: 'access-table',
-          roles: rolesState,
         })
       )}
       isRowSelectable={({ original: item }) => !inheritFrom || !item.Inherited}
@@ -69,58 +67,4 @@ export function AccessDatatable({
       }
     />
   );
-}
-
-function useRolesState() {
-  const [teamRoles, setTeamRoles] = useState<
-    Record<number, number | undefined>
-  >({});
-  const [userRoles, setUserRoles] = useState<
-    Record<number, number | undefined>
-  >({});
-
-  const count = useMemo(
-    () => Object.keys(teamRoles).length + Object.keys(userRoles).length,
-    [teamRoles, userRoles]
-  );
-
-  return { getRoleValue, setRolesValue, getUpdate, count };
-
-  function getRoleValue(id: number, entity: 'user' | 'team') {
-    if (entity === 'team') {
-      return teamRoles[id];
-    }
-    return userRoles[id];
-  }
-
-  function setRolesValue(
-    id: number,
-    entity: 'user' | 'team',
-    value: number | undefined
-  ) {
-    if (entity === 'team') {
-      setTeamRoles(updater);
-
-      return;
-    }
-
-    setUserRoles(updater);
-
-    function updater(roles: Record<number, number | undefined>) {
-      const newRoles = { ...roles };
-      if (typeof value === 'undefined') {
-        delete newRoles[id];
-      } else {
-        newRoles[id] = value;
-      }
-      return newRoles;
-    }
-  }
-
-  function getUpdate() {
-    return {
-      users: userRoles,
-      teams: teamRoles,
-    };
-  }
 }

@@ -7,14 +7,6 @@ export type Access = UserAccessViewModel | TeamAccessViewModel;
 
 export interface TableMeta {
   table: 'access-table';
-  roles: {
-    getRoleValue(id: number, entity: 'user' | 'team'): number | undefined;
-    setRolesValue(
-      id: number,
-      entity: 'user' | 'team',
-      value: number | undefined
-    ): void;
-  };
 }
 
 function isTableMeta(meta?: unknown): meta is TableMeta {

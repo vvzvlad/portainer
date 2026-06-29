@@ -148,6 +148,7 @@ export function useIsEnvironmentAdmin({
  *
  * @private Please use `useAuthorizations` instead. Exported only for angular's authentication service app/portainer/services/authentication.js:154
  */
+/* eslint-disable @typescript-eslint/no-unused-vars -- signature kept for the AngularJS authentication.js caller; args are unused because CE has no per-endpoint authorization gating (that only existed in the Business Edition). */
 export function hasAuthorizations(
   user: User,
   authorizations: string | string[],
@@ -157,6 +158,7 @@ export function hasAuthorizations(
   // per-endpoint authorization gating only existed in the Business Edition.
   return true;
 }
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 interface AuthorizedProps {
   authorizations: string | string[];
