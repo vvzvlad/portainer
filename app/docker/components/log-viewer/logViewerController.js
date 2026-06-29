@@ -20,7 +20,6 @@ angular.module('portainer.docker').controller('LogViewerController', [
       wrapLines: true,
       search: '',
       filteredLogs: [],
-      selectedLines: [],
     };
 
     this.handleLogsWrapLinesChange = handleLogsWrapLinesChange.bind(this);
@@ -41,9 +40,7 @@ angular.module('portainer.docker').controller('LogViewerController', [
     function applyFilter() {
       const data = this.data || [];
       const search = (this.state.search || '').toLowerCase();
-      this.state.filteredLogs = search
-        ? data.filter((log) => log.line && log.line.toLowerCase().indexOf(search) > -1)
-        : data;
+      this.state.filteredLogs = search ? data.filter((log) => log.line && log.line.toLowerCase().indexOf(search) > -1) : data;
     }
 
     function handleLogsWrapLinesChange(enabled) {
@@ -62,25 +59,6 @@ angular.module('portainer.docker').controller('LogViewerController', [
       clipboard.copyText(this.state.filteredLogs.map((log) => log.line).join(NEW_LINE_BREAKER));
       $('#refreshRateChange').show();
       $('#refreshRateChange').fadeOut(2000);
-    };
-
-    this.copySelection = function () {
-      clipboard.copyText(this.state.selectedLines.join(NEW_LINE_BREAKER));
-      $('#refreshRateChange').show();
-      $('#refreshRateChange').fadeOut(2000);
-    };
-
-    this.clearSelection = function () {
-      this.state.selectedLines = [];
-    };
-
-    this.selectLine = function (line) {
-      var idx = this.state.selectedLines.indexOf(line);
-      if (idx === -1) {
-        this.state.selectedLines.push(line);
-      } else {
-        this.state.selectedLines.splice(idx, 1);
-      }
     };
 
     this.downloadLogs = function () {

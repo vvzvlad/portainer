@@ -124,7 +124,30 @@ func (proxy *dockerLocalProxy) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	w.WriteHeader(res.StatusCode)
 
-	if _, err := io.Copy(w, res.Body); err != nil {
-		log.Debug().Err(err).Msg("proxy error")
+	// Stream manually and flush after each chunk instead of io.Copy: io.Copy
+	// buffers into the http.ResponseWriter (~2KB) and only flushes when the
+	// buffer fills or the handler returns, so low-throughput streaming docker
+	// responses (container logs follow, events, stats, attach) would arrive in
+	// multi-second batches instead of live. Flushing per chunk delivers them
+	// as they are produced.
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := res.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				log.Debug().Err(writeErr).Msg("proxy error")
+				break
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				log.Debug().Err(readErr).Msg("proxy error")
+			}
+			break
+		}
 	}
 }

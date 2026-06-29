@@ -38,6 +38,9 @@ var allowedHeaders = map[string]struct{}{
 func NewSingleHostReverseProxyWithHostHeader(target *url.URL) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{Rewrite: createRewriteFn(target)}
 
+	// FlushInterval = -1 flushes each write immediately so streaming docker responses (logs follow, events, stats, attach) are delivered live; harmless for normal JSON responses (single write).
+	proxy.FlushInterval = -1
+
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		httperror.WriteError(w, http.StatusBadGateway, "Proxy failure", err)
 	}

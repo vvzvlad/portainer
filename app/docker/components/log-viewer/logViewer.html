@@ -1,12 +1,14 @@
 <div class="row">
   <div class="col-sm-12">
     <rd-widget>
-      <rd-widget-header icon="file" title-text="Log viewer settings"></rd-widget-header>
-      <rd-widget-body>
-        <form class="form-horizontal">
+      <!-- The controls bar is projected into the widget header (default transclude
+           slot) so the "Log viewer settings" title and the controls share one
+           horizontal line, freeing vertical space for the log pane below. -->
+      <rd-widget-header icon="file" title-text="Log viewer settings">
+        <form class="form-horizontal !m-0">
           <!-- Compact single-row settings bar: every control sits inline and
                wraps onto extra rows only on narrow widths. -->
-          <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div class="flex flex-wrap items-center justify-end gap-x-4 gap-y-2">
             <por-switch-field label-class="'!w-auto'" checked="$ctrl.state.wrapLines" label="'Wrap lines'" on-change="($ctrl.handleLogsWrapLinesChange)"></por-switch-field>
             <por-switch-field
               label-class="'!w-auto'"
@@ -15,19 +17,19 @@
               on-change="($ctrl.handleDisplayTimestampsChange)"
             ></por-switch-field>
             <div class="flex items-center gap-x-2">
-              <label for="logs_since" class="control-label !p-0 text-left !w-auto whitespace-nowrap"> Fetch </label>
+              <label for="logs_since" class="control-label !w-auto whitespace-nowrap !p-0 text-left"> Since </label>
               <select class="form-control !w-auto" ng-model="$ctrl.sinceTimestamp" id="logs_since">
                 <option selected value="">All logs</option>
                 <option ng-repeat="dt in $ctrl.state.availableSinceDatetime" ng-value="dt.value" title="{{ dt.value }}">{{ dt.desc }}</option>
               </select>
             </div>
             <div class="flex items-center gap-x-2">
-              <label for="lines_count" class="control-label !p-0 text-left !w-auto whitespace-nowrap"> Lines </label>
+              <label for="lines_count" class="control-label !w-auto whitespace-nowrap !p-0 text-left"> Lines </label>
               <input class="form-control !w-24" type="number" name="lines_count" ng-model="$ctrl.lineCount" placeholder="Lines..." />
             </div>
-            <div class="flex flex-1 items-center gap-x-2" style="min-width: 160px">
-              <label for="logs_search" class="control-label !p-0 text-left !w-auto whitespace-nowrap"> Search </label>
-              <input class="form-control flex-1" type="text" name="logs_search" ng-model="$ctrl.state.search" ng-change="$ctrl.state.selectedLines.length = 0;" placeholder="Filter..." />
+            <div class="flex items-center gap-x-2" style="min-width: 160px">
+              <label for="logs_search" class="control-label !w-auto whitespace-nowrap !p-0 text-left"> Search </label>
+              <input class="form-control flex-1" type="text" name="logs_search" ng-model="$ctrl.state.search" placeholder="Filter..." />
             </div>
             <div class="flex flex-wrap items-center gap-1" ng-if="$ctrl.state.copySupported">
               <button class="btn btn-primary btn-sm" type="button" ng-click="$ctrl.downloadLogs()" style="margin-left: 0" data-cy="download-logs-button"
@@ -39,22 +41,13 @@
                 ng-disabled="($ctrl.state.filteredLogs.length === 1 && !$ctrl.state.filteredLogs[0].line) || !$ctrl.state.filteredLogs.length"
                 ><pr-icon icon="'copy'" class-name="'space-right'"></pr-icon>Copy</button
               >
-              <button
-                class="btn btn-primary btn-sm"
-                ng-click="$ctrl.copySelection()"
-                ng-disabled="($ctrl.state.filteredLogs.length === 1 && !$ctrl.state.filteredLogs[0].line) || !$ctrl.state.filteredLogs.length || !$ctrl.state.selectedLines.length"
-                ><pr-icon icon="'copy'" class-name="'space-right'"></pr-icon>Copy selected lines</button
-              >
-              <button class="btn btn-primary btn-sm" ng-click="$ctrl.clearSelection()" ng-disabled="$ctrl.state.selectedLines.length === 0"
-                ><pr-icon icon="'x'" class-name="'space-right'"></pr-icon>Unselect</button
-              >
               <span>
                 <pr-icon id="refreshRateChange" icon="'check'" mode="'success'" style="display: none"></pr-icon>
               </span>
             </div>
           </div>
         </form>
-      </rd-widget-body>
+      </rd-widget-header>
     </rd-widget>
   </div>
 </div>
@@ -62,7 +55,7 @@
 <div class="row" style="height: 54%">
   <div class="col-sm-12" style="height: 100%">
     <pre ng-class="{ wrap_lines: $ctrl.state.wrapLines }" class="log_viewer" scroll-glue="$ctrl.state.autoScroll">
-      <div ng-repeat="log in $ctrl.state.filteredLogs track by log.id" class="line" ng-if="log.line"><p class="inner_line" ng-click="$ctrl.selectLine(log.line)" ng-class="{ 'line_selected': $ctrl.state.selectedLines.indexOf(log.line) > -1 }"><span ng-repeat="span in log.spans track by $index" ng-style="{ 'color': span.fgColor, 'background-color': span.bgColor, 'font-weight': span.fontWeight }">{{ span.text }}</span></p></div>
+      <div ng-repeat="log in $ctrl.state.filteredLogs track by log.id" class="line" ng-if="log.line"><p class="inner_line"><span ng-repeat="span in log.spans track by $index" ng-style="{ 'color': span.fgColor, 'background-color': span.bgColor, 'font-weight': span.fontWeight }">{{ span.text }}</span></p></div>
       <div ng-if="!$ctrl.state.filteredLogs.length && $ctrl.state.search" class="line"><p class="inner_line">No log line matching the '{{ $ctrl.state.search }}' filter</p></div>
       <div ng-if="!$ctrl.state.filteredLogs.length && !$ctrl.state.search" class="line"><p class="inner_line">No logs available</p></div>
     </pre>
