@@ -18,8 +18,12 @@ const (
 	// restartCooldown is the minimum delay between two restarts of the same container,
 	// giving its healthcheck time to recover before we try again.
 	restartCooldown = 60 * time.Second
-	// endpointTimeout bounds Docker API calls for a single endpoint.
+	// endpointTimeout bounds the container-list call for a single endpoint.
 	endpointTimeout = 30 * time.Second
+	// restartTimeoutBuffer is added on top of a container's stop-timeout to derive
+	// the deadline of its own restart context, leaving room for the engine to kill
+	// and start the container after the graceful stop window elapses.
+	restartTimeoutBuffer = 15 * time.Second
 )
 
 // retryState tracks restart accounting for a single container across ticks.
@@ -84,8 +88,6 @@ func (s *Service) heal() error {
 		return nil
 	}
 
-	seen := make(map[string]struct{})
-
 	for i := range endpoints {
 		endpoint := &endpoints[i]
 
@@ -95,18 +97,20 @@ func (s *Service) heal() error {
 			continue
 		}
 
-		s.healEndpoint(endpoint, scope, seen)
+		s.healEndpoint(endpoint, scope)
 	}
 
-	// Drop retry state for containers that are no longer unhealthy (healed or gone),
-	// resetting their counters for any future incidents.
-	s.pruneRetries(seen)
+	// Drop retry state only for containers whose retry window has fully elapsed
+	// since their last restart. A container that briefly leaves the unhealthy
+	// filter (e.g. while "starting" after a restart) keeps its accounting, so the
+	// cooldown / max-retries storm guard survives flapping.
+	s.pruneRetries(time.Now())
 
 	return nil
 }
 
 // healEndpoint restarts the in-scope unhealthy containers of a single endpoint.
-func (s *Service) healEndpoint(endpoint *portainer.Endpoint, scope string, seen map[string]struct{}) {
+func (s *Service) healEndpoint(endpoint *portainer.Endpoint, scope string) {
 	endpointID := int(endpoint.ID)
 
 	// Swarm note (M1 limitation): we connect to the endpoint's primary node only
@@ -120,20 +124,20 @@ func (s *Service) healEndpoint(endpoint *portainer.Endpoint, scope string, seen 
 	}
 	defer cli.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), endpointTimeout)
+	listCtx, cancel := context.WithTimeout(context.Background(), endpointTimeout)
 	defer cancel()
 
-	// Filter server-side for unhealthy containers (State.Health.Status == "unhealthy").
+	// List running unhealthy containers only (All:false). Docker keeps
+	// Health.Status=="unhealthy" on stopped containers, so listing with All:true
+	// would let us "restart" (i.e. start) an intentionally-stopped container.
 	listFilters := filters.NewArgs(filters.Arg("health", "unhealthy"))
-	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: listFilters})
+	containers, err := cli.ContainerList(listCtx, container.ListOptions{All: false, Filters: listFilters})
 	if err != nil {
 		log.Warn().Err(err).Int("endpoint_id", endpointID).Msg("auto-heal: unable to list containers")
 		return
 	}
 
 	for _, c := range containers {
-		seen[c.ID] = struct{}{}
-
 		if !InScope(scope, c.Labels) {
 			continue
 		}
@@ -153,7 +157,15 @@ func (s *Service) healEndpoint(endpoint *portainer.Endpoint, scope string, seen 
 		}
 
 		timeout := StopTimeout(c.Labels)
-		if err := cli.ContainerRestart(ctx, c.ID, container.StopOptions{Timeout: &timeout}); err != nil {
+
+		// Each restart gets its own context, bounded by the container's stop-timeout
+		// plus a buffer, so one slow restart cannot starve the others and a hung
+		// engine call is bounded independently of the list deadline.
+		restartTimeout := time.Duration(timeout)*time.Second + restartTimeoutBuffer
+		restartCtx, restartCancel := context.WithTimeout(context.Background(), restartTimeout)
+		err := cli.ContainerRestart(restartCtx, c.ID, container.StopOptions{Timeout: &timeout})
+		restartCancel()
+		if err != nil {
 			log.Warn().Err(err).Str("container_id", c.ID).Int("endpoint_id", endpointID).
 				Msg("auto-heal: failed to restart unhealthy container")
 			continue

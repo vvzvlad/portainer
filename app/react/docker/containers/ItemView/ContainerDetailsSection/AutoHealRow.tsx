@@ -16,7 +16,12 @@ function parseBool(value?: string) {
   if (value === undefined) {
     return undefined;
   }
-  return value === 'true' || value === '1';
+  // Mirror Go's strconv.ParseBool (used by the backend label parser): accept
+  // 1/t/true case-insensitively as truthy. Any other present-but-invalid value
+  // (including 0/f/false and garbage) counts as present & false, matching how
+  // the backend treats an unparseable enable label.
+  const normalized = value.toLowerCase();
+  return normalized === '1' || normalized === 't' || normalized === 'true';
 }
 
 /**

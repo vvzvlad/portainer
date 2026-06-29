@@ -68,8 +68,15 @@ func (s *Service) Reload() error {
 	return nil
 }
 
-// start (re)schedules the job from settings. Caller must hold s.mu.
+// start (re)schedules the job from settings. Caller must hold s.mu. It is a
+// no-op when a job is already scheduled, so calling Start more than once does
+// not leak an orphaned job; Reload first calls stop (clearing jobID) and so
+// always reschedules.
 func (s *Service) start() {
+	if s.jobID != "" {
+		return
+	}
+
 	settings, err := s.dataStore.Settings().Settings()
 	if err != nil {
 		log.Warn().Err(err).Msg("auto-heal: unable to read settings, job not scheduled")
@@ -135,14 +142,19 @@ func (s *Service) setRetry(containerID string, state retryState) {
 	s.retries[containerID] = state
 }
 
-// pruneRetries drops retry state for containers not seen unhealthy in the last
-// pass, so a recovered (or removed) container starts fresh next time.
-func (s *Service) pruneRetries(seen map[string]struct{}) {
+// pruneRetries drops retry state for containers whose retry window has fully
+// elapsed since their last restart. A container is kept regardless of whether it
+// appeared in the current tick: one that briefly leaves the unhealthy filter
+// (e.g. while "starting" right after a restart) must not lose its accounting, or
+// the cooldown / max-retries storm guard would be defeated. A container that has
+// recovered and stayed quiet for longer than the window is cleaned up (fresh
+// budget next incident, no unbounded growth).
+func (s *Service) pruneRetries(now time.Time) {
 	s.retryMu.Lock()
 	defer s.retryMu.Unlock()
 
-	for id := range s.retries {
-		if _, ok := seen[id]; !ok {
+	for id, state := range s.retries {
+		if now.Sub(state.lastRestart) >= retryWindow {
 			delete(s.retries, id)
 		}
 	}

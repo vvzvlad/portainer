@@ -23,6 +23,19 @@ describe('AutoHealRow', () => {
     expect(screen.getByText('Enabled')).toBeInTheDocument();
   });
 
+  it.each(['TRUE', 'True', 'T', 't', '1'])(
+    'parses the truthy value %s like strconv.ParseBool',
+    (value) => {
+      renderRow({ 'io.portainer.autoheal.enable': value });
+      expect(screen.getByText('Enabled')).toBeInTheDocument();
+    }
+  );
+
+  it('treats a present-but-invalid value as opted out', () => {
+    renderRow({ 'io.portainer.autoheal.enable': 'yepp' });
+    expect(screen.getByText('Disabled (opted out)')).toBeInTheDocument();
+  });
+
   it('shows opted out when the label is false', () => {
     renderRow({ 'io.portainer.autoheal.enable': 'false' });
     expect(screen.getByText('Disabled (opted out)')).toBeInTheDocument();
