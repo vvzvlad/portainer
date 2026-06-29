@@ -46,7 +46,7 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
       errorNotified: false,
     };
 
-    // Live toggle (the "Live logs" switch in the viewer).
+    // Live toggle (the "Auto-refresh logs" switch in the viewer).
     $scope.changeLogCollection = function (logCollectionStatus) {
       if (!logCollectionStatus) {
         pauseStream();

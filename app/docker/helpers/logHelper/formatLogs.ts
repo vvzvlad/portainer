@@ -139,7 +139,7 @@ export function formatLogs(
 // services for container/service/task logs) where every line starts on a frame
 // boundary. The live-stream path (logStream.ts) demuxes frames at the byte
 // level instead and calls formatLogs WITHOUT `stripHeaders`.
-export function stripHeadersFunc(logs: string) {
+function stripHeadersFunc(logs: string) {
   return logs.substring(8).replace(/\r?\n(.{8})/g, '\n');
 }
 

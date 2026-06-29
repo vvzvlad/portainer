@@ -35,7 +35,7 @@ export function formatJSONLine(
   // parses to a string, whose `Object.keys` is `['0','1',...]` — which used to
   // render as `0=h 1=e ...`. Fall back to the plain-text path in that case.
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    const plain = withTimestamps ? rawText : text;
+    const plain = rawText;
     return [{ line: plain, spans: [{ text: plain }] }];
   }
   const json = parsed as JSONLogs;
