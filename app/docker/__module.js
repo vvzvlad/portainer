@@ -418,7 +418,7 @@ angular.module('portainer.docker', ['portainer.app', reactModule]).config([
 
     var stack = {
       name: 'docker.stacks.stack',
-      url: '/:name?id&type&regular&external&orphaned&orphanedRunning&tab',
+      url: '/:name?stackId&type&regular&external&orphaned&orphanedRunning&tab',
       views: {
         'content@': {
           component: 'stackItemView',

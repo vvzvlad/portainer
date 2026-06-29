@@ -11,16 +11,23 @@ import { ContainerDetailsViewModel } from '@/docker/models/containerDetails';
 
 import { ItemView } from './ItemView';
 
+const { useCurrentStateAndParamsMock } = vi.hoisted(() => ({
+  useCurrentStateAndParamsMock: vi.fn(),
+}));
+
 vi.mock('@uirouter/react', async (importOriginal: () => Promise<object>) => ({
   ...(await importOriginal()),
-  useCurrentStateAndParams: vi.fn(() => ({
-    params: { id: 'container-id-123', endpointId: '1', nodeName: undefined },
-  })),
+  useCurrentStateAndParams: useCurrentStateAndParamsMock,
 }));
 
 describe('ItemView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: container opened from the global containers list.
+    useCurrentStateAndParamsMock.mockReturnValue({
+      state: { name: 'docker.containers.container' },
+      params: { id: 'container-id-123', endpointId: '1', nodeName: undefined },
+    });
   });
 
   it('renders page header with container details title', async () => {
@@ -39,6 +46,36 @@ describe('ItemView', () => {
 
     expect(await screen.findByText('test-container')).toBeVisible();
     expect(screen.queryByText('/test-container')).not.toBeInTheDocument();
+  });
+
+  it('keeps the stack trail when the container is opened from a stack', async () => {
+    useCurrentStateAndParamsMock.mockReturnValue({
+      state: { name: 'docker.stacks.stack.container' },
+      params: {
+        id: 'container-id-123',
+        endpointId: '1',
+        nodeName: undefined,
+        name: 'my-stack',
+        stackId: '7',
+        type: '2',
+        regular: 'true',
+      },
+    });
+
+    renderComponent();
+
+    // Stack trail is shown instead of the global Containers crumb.
+    const stacksCrumb = await screen.findByRole('link', { name: 'Stacks' });
+    expect(stacksCrumb).toBeVisible();
+
+    const stackCrumb = screen.getByRole('link', { name: 'my-stack' });
+    expect(stackCrumb).toBeVisible();
+    // Back-link carries the numeric stack id (stackId) so the stack can reload.
+    expect(stackCrumb.getAttribute('href')).toContain('stackId=7');
+
+    expect(
+      screen.queryByRole('link', { name: 'Containers' })
+    ).not.toBeInTheDocument();
   });
 
   it('renders health status section when container has health data', async () => {
@@ -79,7 +116,17 @@ function renderComponent({
   );
 
   const Wrapped = withTestQueryProvider(
-    withTestRouter(withUserProvider(ItemView, user))
+    withTestRouter(withUserProvider(ItemView, user), {
+      stateConfig: [
+        { name: 'docker', url: '/docker' },
+        { name: 'docker.stacks', url: '/stacks' },
+        {
+          name: 'docker.stacks.stack',
+          url: '/:name?stackId&type&regular&external&orphaned&orphanedRunning&tab',
+        },
+        { name: 'docker.containers', url: '/containers' },
+      ],
+    })
   );
 
   return render(<Wrapped />);
