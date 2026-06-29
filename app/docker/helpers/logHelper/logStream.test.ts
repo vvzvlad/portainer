@@ -100,7 +100,9 @@ describe('createLogStreamProcessor (non-TTY, byte-level frame demux)', () => {
     const proc = createLogStreamProcessor({ stripHeaders: true });
     const full = frame('aéb\n'); // é = 0xC3 0xA9
     const eIdx = full.indexOf(0xc3);
-    expect(proc.push(full.subarray(0, eIdx + 1)).map((l) => l.line)).toEqual([]);
+    expect(proc.push(full.subarray(0, eIdx + 1)).map((l) => l.line)).toEqual(
+      []
+    );
     const rest = proc.push(full.subarray(eIdx + 1));
     expect(rest.map((l) => l.line)).toEqual(['aéb']);
   });
@@ -184,6 +186,8 @@ describe('timestamps (always requested, optionally displayed)', () => {
       withTimestamps: false,
       streamHasTimestamps: true,
       skipUntilTimestamp: ts1,
+      // the boundary line we had already shown (Docker re-delivers it inclusively)
+      skipBoundaryContents: [`${ts1} old`],
     });
     // ts1 is the inclusive boundary Docker re-delivers -> dropped; ts2 is new
     const lines = proc.push(bytes(`${ts1} old\n${ts2} new\n`));
@@ -204,6 +208,9 @@ describe('timestamps (always requested, optionally displayed)', () => {
       withTimestamps: false,
       streamHasTimestamps: true,
       skipUntilTimestamp: tsB,
+      // dup-2 carries the resume timestamp and was already shown; dup-1 is before
+      // it and is dropped by the chronological compare.
+      skipBoundaryContents: [`${tsB} dup-2`],
     });
 
     // (1) only a redelivered boundary line (<= resume point) -> fully consumed
@@ -217,7 +224,66 @@ describe('timestamps (always requested, optionally displayed)', () => {
     ).toEqual(['new']);
 
     // (3) a later line passes through untouched (no skipping anymore).
-    expect(proc.push(bytes(`${tsD} after\n`)).map((l) => l.line)).toEqual(['after']);
+    expect(proc.push(bytes(`${tsD} after\n`)).map((l) => l.line)).toEqual([
+      'after',
+    ]);
+  });
+
+  // F1: two lines A and B share the exact same nanosecond timestamp; the
+  // connection drops after only A was shown. On reconnect `since=T` re-delivers
+  // BOTH. A `<= timestamp` dedup would drop both and LOSE B. Content-exact dedup
+  // (the boundary set is just [A]) drops A and keeps B.
+  it('does not lose a new line that shares the boundary timestamp with a duplicate', () => {
+    const tsShared = '2024-01-01T00:00:00.000000005Z';
+    const tsNext = '2024-01-01T00:00:00.000000006Z';
+
+    // First session: only line A (at tsShared) was delivered before the drop.
+    const first = createLogStreamProcessor({
+      stripHeaders: false,
+      withTimestamps: true,
+      streamHasTimestamps: true,
+    });
+    expect(first.push(bytes(`${tsShared} A\n`)).map((l) => l.line)).toEqual([
+      `${tsShared} A`,
+    ]);
+    expect(first.getLastTimestamp()).toBe(tsShared);
+    // the boundary set handed to the reconnecting processor is exactly [A]
+    expect(first.getBoundaryLines()).toEqual([`${tsShared} A`]);
+
+    // Reconnect: Docker re-delivers A (duplicate) AND B (new, same timestamp).
+    const second = createLogStreamProcessor({
+      stripHeaders: false,
+      withTimestamps: true,
+      streamHasTimestamps: true,
+      skipUntilTimestamp: first.getLastTimestamp(),
+      skipBoundaryContents: first.getBoundaryLines(),
+    });
+    const redelivered = second.push(
+      bytes(`${tsShared} A\n${tsShared} B\n${tsNext} C\n`)
+    );
+    // A (genuine duplicate) is dropped; B (new, shares the boundary ts) survives.
+    expect(redelivered.map((l) => l.line)).toEqual([
+      `${tsShared} B`,
+      `${tsNext} C`,
+    ]);
+    // and B is now part of the next boundary set alongside any A-twin.
+    expect(second.getBoundaryLines()).toEqual([`${tsNext} C`]);
+  });
+
+  // F1: a genuine duplicate at the boundary timestamp (nothing new shares it) is
+  // still dropped — the normal reconnect case is unchanged.
+  it('still drops a genuine duplicate at the boundary timestamp', () => {
+    const tsBoundary = '2024-01-01T00:00:00.000000007Z';
+    const tsAfter = '2024-01-01T00:00:00.000000008Z';
+    const proc = createLogStreamProcessor({
+      stripHeaders: false,
+      withTimestamps: false,
+      streamHasTimestamps: true,
+      skipUntilTimestamp: tsBoundary,
+      skipBoundaryContents: [`${tsBoundary} only`],
+    });
+    const lines = proc.push(bytes(`${tsBoundary} only\n${tsAfter} fresh\n`));
+    expect(lines.map((l) => l.line)).toEqual(['fresh']);
   });
 });
 

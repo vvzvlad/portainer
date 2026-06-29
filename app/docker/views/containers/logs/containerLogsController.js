@@ -11,6 +11,11 @@ const MAX_LOG_LINES = 5000;
 // Delay before reconnecting after the stream ends or errors (container stopped,
 // network blip, proxy hiccup). Avoids hammering a stopped container.
 const RECONNECT_DELAY_MS = 3000;
+// Default tail (historical-backfill) request used on the initial connect and
+// whenever the user clears/invalidates the "Lines" field — without it a cleared
+// number input becomes null, `tail` is dropped, and Docker re-downloads the
+// entire history of a chatty container on every parameter change.
+const DEFAULT_LINE_COUNT = 100;
 
 angular.module('portainer.docker').controller('ContainerLogsController', [
   '$scope',
@@ -24,7 +29,7 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
     $scope.state = {
       // No refreshRate here: container logs are delivered over a live stream now,
       // not a 3s poll, so there is nothing to refresh on an interval.
-      lineCount: 100,
+      lineCount: DEFAULT_LINE_COUNT,
       sinceTimestamp: '',
       displayTimestamps: false,
     };
@@ -37,6 +42,16 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
       // reconnect so we resume from the exact log position (not the client
       // wall-clock) and neither duplicate nor lose lines across a reconnect.
       lastTimestamp: '',
+      // Exact content of the line(s) at `lastTimestamp` we already rendered.
+      // Handed to the reconnecting processor so it drops only genuine duplicates
+      // Docker re-delivers, never a new line that shares the boundary nanosecond.
+      boundaryLines: [],
+      // The processor of the in-flight stream, so an intentional pause can flush
+      // its buffered partial last line for display.
+      processor: null,
+      // How many cosmetic lines an intentional-pause flush appended; removed on
+      // resume before Docker re-delivers them in full (see pauseStream/startStream).
+      pausedFlushCount: 0,
       // false while the stream is intentionally paused (Live toggle off) or the
       // view is being destroyed — suppresses auto-reconnect.
       active: false,
@@ -49,7 +64,7 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
     // Live toggle (the "Auto-refresh logs" switch in the viewer).
     $scope.changeLogCollection = function (logCollectionStatus) {
       if (!logCollectionStatus) {
-        pauseStream();
+        pauseStream(true);
       } else {
         // Resume without wiping the buffer (pause promises to keep it) and
         // continue from the last timestamp we saw.
@@ -76,15 +91,42 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
     }
 
     // Pause: stop streaming but keep the current buffer on screen.
-    function pauseStream() {
+    //
+    // `flushPartial` is set only on an intentional pause (Live -> off): with no
+    // reconnect to re-deliver it, the buffered unfinished last line would stay
+    // hidden until resume, so we flush it for display. We do NOT advance the
+    // resume point past it (it is incomplete); on resume Docker re-delivers that
+    // line in full from `since`, and startStream() first strips these cosmetic
+    // flushed lines so the buffer never shows a stale partial twin. On reconnect
+    // (flushPartial omitted) the partial is correctly discarded, unchanged.
+    function pauseStream(flushPartial) {
       stream.active = false;
       clearReconnectTimer();
       abortInFlight();
+      if (flushPartial && stream.processor) {
+        const tail = stream.processor.flush();
+        if (tail.length) {
+          appendLines(tail);
+          stream.pausedFlushCount += tail.length;
+        }
+      }
     }
 
-    // Full teardown on view destroy.
+    // Remove the last `count` lines from the buffer (the cosmetic lines an
+    // intentional-pause flush appended), about to be re-delivered in full.
+    function removeTailLines(count) {
+      if (count <= 0) {
+        return;
+      }
+      $scope.$applyAsync(function () {
+        const start = Math.max(0, $scope.logs.length - count);
+        $scope.logs.splice(start, count);
+      });
+    }
+
+    // Full teardown on view destroy: no flush (the view is going away).
     function stopStream() {
-      pauseStream();
+      pauseStream(false);
     }
 
     function appendLines(lines) {
@@ -107,20 +149,50 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
       const ts = processor.getLastTimestamp();
       if (ts) {
         stream.lastTimestamp = ts;
+        // Remember the exact boundary line(s) at this timestamp for content-exact
+        // reconnect dedup (so a new line sharing the nanosecond is not dropped).
+        stream.boundaryLines = processor.getBoundaryLines();
       }
+    }
+
+    // Build Docker's `since` param as a Unix timestamp with a nanosecond fraction
+    // ("<seconds>.<nanos>"). Both the initial connect and reconnect use this one
+    // form so we never mix unix-seconds and RFC3339 — some proxies / pinned API
+    // versions accept them inconsistently. The fraction needs string precision
+    // (a JS number cannot hold nanoseconds), hence `since` is sent as a string.
+    function rfc3339ToUnixNanoSince(rfc3339) {
+      // Docker emits a fixed-width RFC3339Nano prefix: "...:05.000000000Z".
+      const seconds = Math.floor(Date.parse(rfc3339.substring(0, 19) + 'Z') / 1000);
+      const dot = rfc3339.indexOf('.');
+      const nanos =
+        dot >= 0
+          ? rfc3339
+              .substring(dot + 1)
+              .replace(/[^0-9]/g, '')
+              .padEnd(9, '0')
+              .substring(0, 9)
+          : '000000000';
+      return `${seconds}.${nanos}`;
     }
 
     // Connect (or reconnect) the live stream.
     // `resetBuffer` clears the on-screen buffer (used on first connect / param
     // changes); reconnects after a drop keep the buffer and resume via `since`.
     function startStream(resetBuffer) {
-      pauseStream();
+      pauseStream(false);
       stream.active = true;
 
       if (resetBuffer) {
         $scope.logs.length = 0;
         stream.lastTimestamp = '';
+        stream.boundaryLines = [];
+        stream.pausedFlushCount = 0;
         stream.errorNotified = false;
+      } else if (stream.pausedFlushCount) {
+        // Resuming after an intentional pause: drop the cosmetic partial line(s)
+        // we flushed for display; Docker re-delivers them in full from `since`.
+        removeTailLines(stream.pausedFlushCount);
+        stream.pausedFlushCount = 0;
       }
 
       const resuming = !!stream.lastTimestamp;
@@ -133,17 +205,32 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
         // them and strips the prefix when the user has timestamps hidden.
         streamHasTimestamps: true,
         // On reconnect, drop lines Docker re-delivers at/before the resume point
-        // (its `since` filter is inclusive).
+        // (its `since` filter is inclusive); content-exact match on the boundary
+        // line(s) so a new line sharing the boundary timestamp is not lost.
         skipUntilTimestamp: resuming ? stream.lastTimestamp : undefined,
+        skipBoundaryContents: resuming ? stream.boundaryLines : undefined,
       });
+      stream.processor = processor;
 
       const abortController = new AbortController();
       stream.abortController = abortController;
 
       // On a reconnect resume from the exact timestamp of the last line we saw;
-      // on the initial connect honour the user's "Fetch since" selection.
-      const sinceFromUser = $scope.state.sinceTimestamp ? moment($scope.state.sinceTimestamp).unix() : 0;
-      const since = stream.lastTimestamp || sinceFromUser;
+      // on the initial connect honour the user's "Fetch since" selection. Both
+      // are sent as a single "<unix>.<nanos>" form (see rfc3339ToUnixNanoSince).
+      let since;
+      if (stream.lastTimestamp) {
+        since = rfc3339ToUnixNanoSince(stream.lastTimestamp);
+      } else if ($scope.state.sinceTimestamp) {
+        since = `${moment($scope.state.sinceTimestamp).unix()}.000000000`;
+      } else {
+        since = undefined; // omitted by the service -> Docker tails from now
+      }
+
+      // Substitute the default when the "Lines" field is cleared/invalid (a
+      // cleared number input is null), otherwise tail would be dropped and Docker
+      // would re-download the whole history.
+      const tailLineCount = $scope.state.lineCount > 0 ? $scope.state.lineCount : DEFAULT_LINE_COUNT;
 
       const params = {
         stdout: true,
@@ -155,7 +242,7 @@ angular.module('portainer.docker').controller('ContainerLogsController', [
         // tail is a historical-backfill request: apply it only on the initial
         // connect. On a reconnect we resume from `since`, so re-applying tail
         // would re-deliver the tail window. (0 is dropped by the service.)
-        tail: resuming ? 0 : $scope.state.lineCount,
+        tail: resuming ? 0 : tailLineCount,
         since,
       };
 

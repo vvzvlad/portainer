@@ -205,6 +205,24 @@ export type StreamLogsParams = ContainerLogsParams & {
   follow?: boolean;
 };
 
+// Memoize the Docker max-API-version pinning per proxy path for the session. The
+// pinning interceptor only rewrites the URL based on the environment's Docker API
+// version (cached and stable for the session), so resolving it once avoids an
+// extra `/version` round-trip on every reconnect. Caching the Promise also
+// dedupes concurrent reconnect attempts.
+const pinnedLogPathCache = new Map<string, Promise<string>>();
+
+function resolvePinnedLogPath(path: string): Promise<string> {
+  let cached = pinnedLogPathCache.get(path);
+  if (!cached) {
+    cached = dockerMaxAPIVersionInterceptor({
+      url: path,
+    } as InternalAxiosRequestConfig).then((config) => config.url ?? path);
+    pinnedLogPathCache.set(path, cached);
+  }
+  return cached;
+}
+
 /**
  * Live-tail a container's logs over HTTP.
  *
@@ -242,12 +260,11 @@ export async function streamContainerLogs(
   );
 
   // The fetch path bypasses the axios request interceptors, so apply the same
-  // Docker max-API-version pinning axios applies to getContainerLogs. Reuse the
-  // shared interceptor (it only reads/rewrites `config.url`).
-  const pinnedConfig = await dockerMaxAPIVersionInterceptor({
-    url: path,
-  } as InternalAxiosRequestConfig);
-  const effectivePath = pinnedConfig.url ?? path;
+  // Docker max-API-version pinning axios applies to getContainerLogs. Resolve it
+  // once per session (memoized below) instead of hitting `/version` on every 3s
+  // reconnect — the pinning only depends on the environment's Docker API version,
+  // which is stable for the session.
+  const effectivePath = await resolvePinnedLogPath(path);
 
   const query = new URLSearchParams();
   // _.pickBy drops undefined/0/'' the same way the axios path does
@@ -287,7 +304,6 @@ export async function streamContainerLogs(
 
   try {
     for (;;) {
-
       const { value, done } = await reader.read();
       if (done) {
         break;

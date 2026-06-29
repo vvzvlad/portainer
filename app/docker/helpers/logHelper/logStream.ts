@@ -15,10 +15,21 @@ type ProcessorOptions = {
   streamHasTimestamps?: boolean;
   /**
    * Reconnect dedup: Docker's `since` filter is inclusive, so on reconnect it
-   * re-delivers the boundary line(s). Drop re-delivered lines whose timestamp is
-   * `<=` this value (the resume point) until we pass it.
+   * re-delivers the boundary line(s) at the resume timestamp. This is the resume
+   * point (the RFC3339 timestamp of the last line we saw). Re-delivered lines
+   * before it are dropped; lines exactly at it are matched against
+   * `skipBoundaryContents` (see below).
    */
   skipUntilTimestamp?: string;
+  /**
+   * Reconnect dedup, exact-content matching. The lines we had already shown that
+   * carry the resume timestamp (`skipUntilTimestamp`). On reconnect Docker
+   * re-delivers every line at that timestamp; we drop only those whose exact
+   * content matches one of these (the genuine duplicates) and KEEP any line that
+   * merely shares the timestamp but is new (different content) — otherwise a
+   * second line sharing the boundary nanosecond would be lost.
+   */
+  skipBoundaryContents?: string[];
 };
 
 // Docker multiplexed-stream frame header: 1 byte stream-type, 3 zero bytes,
@@ -97,6 +108,7 @@ export function createLogStreamProcessor({
   withTimestamps,
   streamHasTimestamps,
   skipUntilTimestamp,
+  skipBoundaryContents,
 }: ProcessorOptions = {}) {
   // Unparsed bytes of the multiplexed frame stream (non-TTY only).
   let frameBuf: Bytes = new Uint8Array(0);
@@ -104,8 +116,16 @@ export function createLogStreamProcessor({
   let lineBuf: Bytes = new Uint8Array(0);
   // Reconnect dedup: while true, drop re-delivered lines up to the resume point.
   let skipping = !!skipUntilTimestamp;
+  // Copy of the boundary line contents still pending a duplicate match; each
+  // matched re-delivered line consumes (splices out) one entry.
+  const pendingBoundary: string[] = skipBoundaryContents
+    ? skipBoundaryContents.slice()
+    : [];
   // RFC3339 timestamp of the last complete line we saw (next resume point).
   let lastTimestamp: string | undefined;
+  // Exact content of the line(s) at `lastTimestamp` we have emitted so far — the
+  // boundary set handed to the next processor for content-exact reconnect dedup.
+  let boundaryLines: string[] = [];
 
   const decoder = new TextDecoder();
 
@@ -141,7 +161,12 @@ export function createLogStreamProcessor({
       }
       const payloadLength = readUint32BE(frameBuf, FRAME_LENGTH_OFFSET);
       if (payloadLength > MAX_FRAME_PAYLOAD) {
-        // Corrupt/desynced stream: drop everything buffered to avoid OOM.
+        // Corrupt/desynced stream: drop everything buffered to avoid OOM. Surface
+        // it so an unexpected reset is diagnosable rather than silently swallowed.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `logStream: frame payload length ${payloadLength} exceeds ${MAX_FRAME_PAYLOAD}; resetting desynced buffer`
+        );
         frameBuf = new Uint8Array(0);
         break;
       }
@@ -165,19 +190,31 @@ export function createLogStreamProcessor({
 
     if (streamHasTimestamps) {
       if (skipping && lines.length) {
-        // Drop re-delivered lines whose fixed-width RFC3339 timestamp is `<=`
-        // the resume point (lexical compare is chronological for the zero-padded
-        // UTC format). A genuinely new line sharing the exact same nanosecond
-        // timestamp is an accepted rare edge.
+        // Drop re-delivered lines up to the resume point. Lines strictly before
+        // it are duplicates (lexical compare is chronological for the zero-padded
+        // UTC format). Lines exactly at the resume timestamp are dropped ONLY
+        // when their exact content matches a boundary line we already showed —
+        // so a NEW line sharing the same nanosecond timestamp is not lost.
+        const boundary = skipUntilTimestamp as string;
         let dropTo = 0;
         while (dropTo < lines.length) {
           const line = lines[dropTo];
-          if (
-            TS_PREFIX.test(line) &&
-            line.substring(0, TS_WIDTH) <= (skipUntilTimestamp as string)
-          ) {
+          if (!TS_PREFIX.test(line)) {
+            break; // cannot classify without a timestamp; stop dropping
+          }
+          const ts = line.substring(0, TS_WIDTH);
+          const boundaryIdx =
+            ts === boundary ? pendingBoundary.indexOf(line) : -1;
+          if (ts < boundary) {
+            // re-delivered line before the resume point
+            dropTo += 1;
+          } else if (boundaryIdx !== -1) {
+            // exact duplicate of an already-shown boundary line
+            pendingBoundary.splice(boundaryIdx, 1);
             dropTo += 1;
           } else {
+            // ts > boundary, or a new line that merely shares the boundary
+            // timestamp -> keep it and everything after.
             break;
           }
         }
@@ -189,12 +226,20 @@ export function createLogStreamProcessor({
         }
       }
 
-      // Record the resume timestamp from the last timestamped line (still has
-      // its prefix at this point).
-      for (let i = lines.length - 1; i >= 0; i -= 1) {
-        if (TS_PREFIX.test(lines[i])) {
-          lastTimestamp = lines[i].substring(0, TS_WIDTH);
-          break;
+      // Track the resume timestamp and the exact content of the line(s) at it,
+      // walking the kept lines in order (each line still has its prefix here).
+      // Timestamps are monotonically non-decreasing, so the trailing run sharing
+      // the newest timestamp is the boundary set the next processor dedups on.
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (TS_PREFIX.test(line)) {
+          const ts = line.substring(0, TS_WIDTH);
+          if (ts !== lastTimestamp) {
+            lastTimestamp = ts;
+            boundaryLines = [line];
+          } else {
+            boundaryLines.push(line);
+          }
         }
       }
 
@@ -261,6 +306,16 @@ export function createLogStreamProcessor({
     /** RFC3339 timestamp of the last complete line seen, for reconnect resume. */
     getLastTimestamp(): string | undefined {
       return lastTimestamp;
+    },
+
+    /**
+     * Exact content of the line(s) carrying the last-seen timestamp. Pass to the
+     * next processor as `skipBoundaryContents` so reconnect dedup drops only the
+     * genuine duplicates Docker re-delivers, never a new line that happens to
+     * share the boundary nanosecond.
+     */
+    getBoundaryLines(): string[] {
+      return boundaryLines.slice();
     },
   };
 }
