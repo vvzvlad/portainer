@@ -1,16 +1,11 @@
 import { Download } from 'lucide-react';
-import { useState } from 'react';
 
 import { Widget, WidgetBody, WidgetTitle } from '@@/Widget';
 import { FormSection } from '@@/form-components/FormSection';
-import { BoxSelector } from '@@/BoxSelector';
 
-import { options } from './backup-options';
 import { BackupFileForm } from './BackupFileForm';
 
 export function BackupSettingsPanel() {
-  const [backupType, setBackupType] = useState(options[0].value);
-
   return (
     <Widget>
       <WidgetTitle icon={Download} title="Back up Portainer" />
@@ -21,13 +16,6 @@ export function BackupSettingsPanel() {
               This will back up your Portainer server configuration and does not
               include containers.
             </div>
-            <BoxSelector
-              slim
-              options={options}
-              value={backupType}
-              onChange={(v) => setBackupType(v)}
-              radioName="backup-type"
-            />
 
             <BackupFileForm />
           </FormSection>

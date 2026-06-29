@@ -137,49 +137,45 @@
             </div>
             <!-- !note -->
 
-            <box-selector slim="true" options="restoreOptions" value="formValues.restoreFormType" on-change="(onChangeRestoreType)" radio-name="'restore-type'"></box-selector>
-
-            <div ng-if="formValues.restoreFormType === RESTORE_FORM_TYPES.FILE">
-              <!-- note -->
-              <div class="form-group">
-                <div class="col-sm-12">
-                  <span class="small text-muted"> You can upload a backup file from your computer. </span>
-                </div>
+            <!-- note -->
+            <div class="form-group">
+              <div class="col-sm-12">
+                <span class="small text-muted"> You can upload a backup file from your computer. </span>
               </div>
-              <!-- !note -->
-              <!-- select-file-input -->
-              <div class="form-group">
-                <div class="col-sm-12 vertical-center">
-                  <button
-                    class="btn btn-sm btn-primary"
-                    ngf-select
-                    accept=".gz,.encrypted"
-                    ngf-accept="'application/x-tar,application/x-gzip'"
-                    ng-model="formValues.BackupFile"
-                    auto-focus
-                    data-cy="init-selectBackupFileButton"
-                    >Select file</button
-                  >
-                  <span class="space-left vertical-center">
-                    {{ formValues.BackupFile.name }}
-                    <pr-icon icon="'x-circle'" class-name="'icon-danger'" ng-if="!formValues.BackupFile"></pr-icon>
-                  </span>
-                </div>
-              </div>
-              <!-- password-input -->
-              <div class="form-group">
-                <label for="password" class="col-sm-3 control-label text-left">
-                  Password
-                  <portainer-tooltip
-                    message="'If the backup is password protected, provide the password in order to extract the backup file, otherwise this field can be left empty.'"
-                  ></portainer-tooltip>
-                </label>
-                <div class="col-sm-4">
-                  <input type="password" class="form-control" ng-model="formValues.Password" id="password" data-cy="init-backupPasswordInput" />
-                </div>
-              </div>
-              <!-- !password-input -->
             </div>
+            <!-- !note -->
+            <!-- select-file-input -->
+            <div class="form-group">
+              <div class="col-sm-12 vertical-center">
+                <button
+                  class="btn btn-sm btn-primary"
+                  ngf-select
+                  accept=".gz,.encrypted"
+                  ngf-accept="'application/x-tar,application/x-gzip'"
+                  ng-model="formValues.BackupFile"
+                  auto-focus
+                  data-cy="init-selectBackupFileButton"
+                  >Select file</button
+                >
+                <span class="space-left vertical-center">
+                  {{ formValues.BackupFile.name }}
+                  <pr-icon icon="'x-circle'" class-name="'icon-danger'" ng-if="!formValues.BackupFile"></pr-icon>
+                </span>
+              </div>
+            </div>
+            <!-- password-input -->
+            <div class="form-group">
+              <label for="password" class="col-sm-3 control-label text-left">
+                Password
+                <portainer-tooltip
+                  message="'If the backup is password protected, provide the password in order to extract the backup file, otherwise this field can be left empty.'"
+                ></portainer-tooltip>
+              </label>
+              <div class="col-sm-4">
+                <input type="password" class="form-control" ng-model="formValues.Password" id="password" data-cy="init-backupPasswordInput" />
+              </div>
+            </div>
+            <!-- !password-input -->
             <!-- !select-file-input -->
             <!-- note -->
             <div class="form-group">

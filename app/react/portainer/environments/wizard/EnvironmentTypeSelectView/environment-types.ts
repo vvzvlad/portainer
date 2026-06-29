@@ -61,11 +61,8 @@ export const existingEnvironmentTypes: EnvironmentOption[] = [
   },
 ];
 
-export const newEnvironmentTypes: EnvironmentOption[] = [];
-
 export const environmentTypes: EnvironmentOption[] = [
   ...existingEnvironmentTypes,
-  ...newEnvironmentTypes,
 ];
 
 export const formTitles: Record<EnvironmentOptionValue, string> = {

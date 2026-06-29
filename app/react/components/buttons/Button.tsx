@@ -22,7 +22,6 @@ type Color =
   | 'link'
   | 'light'
   | 'dangerlight'
-  | 'warninglight'
   | 'warning'
   | 'success'
   | 'blue'
