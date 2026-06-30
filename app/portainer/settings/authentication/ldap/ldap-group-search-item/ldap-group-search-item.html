@@ -5,8 +5,6 @@
       class="btn btn-sm btn-danger"
       type="button"
       ng-click="$ctrl.onRemoveClick($ctrl.index)"
-      limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-      limited-feature-tabindex="-1"
     >
       <pr-icon icon="'trash-2'"></pr-icon>
     </button>
@@ -17,7 +15,6 @@
     suffix="$ctrl.domainSuffix"
     value="$ctrl.config.GroupBaseDN"
     on-change="($ctrl.onChangeBaseDN)"
-    limited-feature-id="$ctrl.limitedFeatureId"
   ></ldap-settings-dn-builder>
 
   <div class="form-group">
@@ -42,8 +39,6 @@
               data-cy="ldap-group-search-item-select"
               ng-model="entry.type"
               ng-change="$ctrl.onGroupsChange()"
-              limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-              limited-feature-tabindex="-1"
             >
               <option value="ou">OU Name</option>
               <option value="cn">Folder Name</option>
@@ -54,8 +49,6 @@
               class="form-control"
               ng-model="entry.value"
               ng-change="$ctrl.onGroupsChange()"
-              limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-              limited-feature-tabindex="-1"
             />
           </div>
           <div class="col-sm-3 text-right">
@@ -63,8 +56,6 @@
               class="btn btn-md btn-danger"
               type="button"
               ng-click="$ctrl.removeGroup($index)"
-              limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-              limited-feature-tabindex="-1"
             >
               <pr-icon icon="'trash-2'" size="'md'"></pr-icon>
             </button>

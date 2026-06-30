@@ -4,21 +4,15 @@ import clsx from 'clsx';
 import { useState } from 'react';
 import _ from 'lodash';
 
-import UpdatesAvailable from '@/assets/ico/icon_updates-available.svg?c';
-import UpToDate from '@/assets/ico/icon_up-to-date.svg?c';
 import { isoDateFromTimestamp } from '@/portainer/filters/filters';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 import { getDashboardRoute } from '@/react/portainer/environments/utils';
-import { GitCommitLink } from '@/react/portainer/gitops/GitCommitLink';
 
 import { Button } from '@@/buttons';
 import { Icon } from '@@/Icon';
 import { Link } from '@@/Link';
 
-import { DeploymentStatus, EdgeStackStatus, StatusType } from '../../types';
+import { DeploymentStatus, StatusType } from '../../types';
 
-import { EnvironmentActions } from './EnvironmentActions';
-import { ActionStatus } from './ActionStatus';
 import { EdgeStackEnvironment } from './types';
 
 const columnHelper = createColumnHelper<EdgeStackEnvironment>();
@@ -70,23 +64,6 @@ export const columns = _.compact([
       );
     },
   }),
-  ...(isBE
-    ? [
-        columnHelper.accessor((env) => endpointTargetVersionLabel(env), {
-          id: 'targetVersion',
-          header: 'Target version',
-          cell: TargetVersionCell,
-        }),
-        columnHelper.accessor(
-          (env) => endpointDeployedVersionLabel(env.StackStatus),
-          {
-            id: 'deployedVersion',
-            header: 'Deployed version',
-            cell: DeployedVersionCell,
-          }
-        ),
-      ]
-    : []),
   columnHelper.accessor(
     (env) =>
       env.StackStatus.Status.find((s) => s.Type === StatusType.Error)?.Error,
@@ -96,24 +73,6 @@ export const columns = _.compact([
       cell: ErrorCell,
     }
   ),
-  ...(isBE
-    ? [
-        columnHelper.display({
-          id: 'actions',
-          header: 'Actions',
-          cell({ row: { original: env } }) {
-            return <EnvironmentActions environment={env} />;
-          },
-        }),
-        columnHelper.display({
-          id: 'actionStatus',
-          header: 'Action Status',
-          cell({ row: { original: env } }) {
-            return <ActionStatus environmentId={env.Id} />;
-          },
-        }),
-      ]
-    : []),
 ]);
 
 function ErrorCell({
@@ -181,87 +140,6 @@ function endpointStatusLabel(statusArray: Array<DeploymentStatus>) {
   }
 
   return _.uniq(labels).join(', ');
-}
-
-function TargetVersionCell({
-  row,
-  getValue,
-}: CellContext<EdgeStackEnvironment, string>) {
-  const value = getValue();
-  if (!value) {
-    return '';
-  }
-
-  return (
-    <>
-      {row.original.TargetCommitHash ? (
-        <div>
-          <GitCommitLink
-            baseURL={row.original.GitConfigURL}
-            commitHash={row.original.TargetCommitHash}
-          />
-        </div>
-      ) : (
-        <div>{value}</div>
-      )}
-    </>
-  );
-}
-
-function endpointTargetVersionLabel(env: EdgeStackEnvironment) {
-  if (env.TargetCommitHash) {
-    return env.TargetCommitHash.slice(0, 7).toString();
-  }
-  return env.TargetFileVersion.toString() || '';
-}
-
-function DeployedVersionCell({
-  row,
-  getValue,
-}: CellContext<EdgeStackEnvironment, string>) {
-  const value = getValue();
-  if (!value || value === '0') {
-    return (
-      <div>
-        <Icon icon={UpdatesAvailable} className="!mr-2" />
-      </div>
-    );
-  }
-
-  let statusIcon = <Icon icon={UpToDate} className="!mr-2" />;
-  if (
-    (row.original.TargetCommitHash &&
-      row.original.TargetCommitHash.slice(0, 7) !== value) ||
-    (!row.original.TargetCommitHash && row.original.TargetFileVersion !== value)
-  ) {
-    statusIcon = <Icon icon={UpdatesAvailable} className="!mr-2" />;
-  }
-
-  return (
-    <>
-      {row.original.TargetCommitHash ? (
-        <div>
-          {statusIcon}
-          <GitCommitLink
-            baseURL={row.original.GitConfigURL}
-            commitHash={row.original.TargetCommitHash}
-          />
-        </div>
-      ) : (
-        <div>
-          {statusIcon}
-          {value}
-        </div>
-      )}
-    </>
-  );
-}
-
-function endpointDeployedVersionLabel(status: EdgeStackStatus) {
-  if (status.DeploymentInfo?.ConfigHash) {
-    return status.DeploymentInfo?.ConfigHash.slice(0, 7).toString();
-  }
-  return status.DeploymentInfo?.FileVersion.toString() || '';
 }
 
 function Status({ value }: { value: StatusType }) {

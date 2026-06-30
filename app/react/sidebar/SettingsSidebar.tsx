@@ -1,6 +1,5 @@
 import {
   Users,
-  Award,
   Settings,
   HardDrive,
   Radio,
@@ -9,7 +8,6 @@ import {
 } from 'lucide-react';
 
 import { usePublicSettings } from '@/react/portainer/settings/queries';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 
 import { SidebarItem } from './SidebarItem';
 import { SidebarSection } from './SidebarSection';
@@ -87,7 +85,6 @@ export function SettingsSidebar({
             <SidebarItem
               label="Environments"
               to="portainer.endpoints"
-              ignorePaths={['portainer.endpoints.updateSchedules']}
               includePaths={['portainer.wizard.endpoints']}
               isSubMenu
               data-cy="portainerSidebar-environments"
@@ -104,7 +101,6 @@ export function SettingsSidebar({
               isSubMenu
               data-cy="portainerSidebar-environmentTags"
             />
-            <EdgeUpdatesSidebarItem />
           </SidebarParent>
 
           <SidebarItem
@@ -114,31 +110,13 @@ export function SettingsSidebar({
             data-cy="portainerSidebar-registries"
           />
 
-          {isBE && (
-            <SidebarItem
-              to="portainer.licenses"
-              label="Licenses"
-              icon={Award}
-              data-cy="portainerSidebar-licenses"
-            />
-          )}
-
           <SidebarParent
             label="Logs"
-            to="portainer.authLogs"
+            to="portainer.activityLogs"
             icon={FileText}
-            pathOptions={{
-              includePaths: ['portainer.activityLogs'],
-            }}
             data-cy="k8sSidebar-logs"
             listId="k8sSidebar-logs"
           >
-            <SidebarItem
-              label="Authentication"
-              to="portainer.authLogs"
-              isSubMenu
-              data-cy="portainerSidebar-authLogs"
-            />
             <SidebarItem
               to="portainer.activityLogs"
               label="Activity"
@@ -147,17 +125,6 @@ export function SettingsSidebar({
             />
           </SidebarParent>
         </>
-      )}
-      {isBE && !isPureAdmin && isAdmin && (
-        <SidebarParent
-          label="Environment-related"
-          icon={HardDrive}
-          to="portainer.endpoints.updateSchedules"
-          data-cy="portainerSidebar-environments-area"
-          listId="portainer-environments-area"
-        >
-          <EdgeUpdatesSidebarItem />
-        </SidebarParent>
       )}
 
       <SidebarItem
@@ -193,15 +160,6 @@ export function SettingsSidebar({
               data-cy="portainerSidebar-authentication"
             />
           )}
-          {isBE && (
-            <SidebarItem
-              to="portainer.settings.sharedcredentials"
-              label="Shared Credentials"
-              isSubMenu
-              data-cy="portainerSidebar-cloud"
-            />
-          )}
-
           <SidebarItem
             to="portainer.settings.edgeCompute"
             label="Edge Compute"
@@ -211,11 +169,7 @@ export function SettingsSidebar({
 
           <SidebarItem.Wrapper label="Get Help">
             <a
-              href={
-                isBE
-                  ? 'https://documentation.portainer.io/r/business-support'
-                  : 'https://www.portainer.io/community_help'
-              }
+              href="https://www.portainer.io/community_help"
               target="_blank"
               rel="noreferrer"
               className="flex h-8 w-full items-center rounded px-3 text-sm !text-inherit transition-colors duration-200 hover:bg-blue-5/20 hover:!underline focus:no-underline be:hover:bg-gray-5/20 th-dark:hover:bg-gray-true-5/20"
@@ -226,22 +180,5 @@ export function SettingsSidebar({
         </SidebarParent>
       )}
     </SidebarSection>
-  );
-}
-
-function EdgeUpdatesSidebarItem() {
-  const settingsQuery = usePublicSettings();
-
-  if (!isBE || !settingsQuery.data?.EnableEdgeComputeFeatures) {
-    return null;
-  }
-
-  return (
-    <SidebarItem
-      to="portainer.endpoints.updateSchedules"
-      label="Update & Rollback"
-      isSubMenu
-      data-cy="portainerSidebar-updateSchedules"
-    />
   );
 }

@@ -4,6 +4,5 @@ export const ldapConnectivityCheck = {
     settings: '<',
     state: '<',
     connectivityCheck: '<',
-    limitedFeatureId: '<',
   },
 };

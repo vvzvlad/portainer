@@ -11,7 +11,6 @@ import {
 
 import { EnvironmentId } from '@/react/portainer/environments/types';
 import { Authorized } from '@/react/hooks/useUser';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 
 import { DashboardLink } from '../items/DashboardLink';
 import { SidebarItem } from '../SidebarItem';
@@ -202,22 +201,6 @@ export function KubernetesSidebar({ environmentId }: Props) {
             data-cy="k8sSidebar-securityConstraints"
           />
         </Authorized>
-
-        {isBE && (
-          <Authorized
-            authorizations="K8sClusterSetupRW"
-            adminOnlyCE
-            environmentId={environmentId}
-          >
-            <SidebarItem
-              to="kubernetes.cluster.securityConstraint"
-              params={{ endpointId: environmentId }}
-              label="Security Constraints"
-              isSubMenu
-              data-cy="k8sSidebar-securityConstraints"
-            />
-          </Authorized>
-        )}
 
         <SidebarItem
           to="kubernetes.registries"

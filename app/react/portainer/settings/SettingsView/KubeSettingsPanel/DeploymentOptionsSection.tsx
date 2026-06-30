@@ -1,8 +1,5 @@
 import { useFormikContext } from 'formik';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-import { isLimitedToBE } from '@/react/portainer/feature-flags/feature-flags.service';
-
 import { FormSection } from '@@/form-components/FormSection';
 import { SwitchField } from '@@/form-components/SwitchField';
 
@@ -15,7 +12,6 @@ export function DeploymentOptionsSection() {
     setFieldValue,
   } = useFormikContext<FormValues>();
 
-  const limitedFeature = isLimitedToBE(FeatureId.ENFORCE_DEPLOYMENT_OPTIONS);
   return (
     <FormSection title="Deployment options">
       <div className="form-group">
@@ -25,7 +21,6 @@ export function DeploymentOptionsSection() {
             data-cy="kube-settings-enforce-code-based-deployment"
             checked={values.hideAddWithForm}
             name="toggle_hideAddWithForm"
-            featureId={FeatureId.ENFORCE_DEPLOYMENT_OPTIONS}
             onChange={(value) => handleToggleAddWithForm(value)}
             labelClass="col-sm-3 col-lg-2"
             tooltip="Hides the 'Add with form' buttons and prevents adding/editing of resources via forms"
@@ -60,23 +55,21 @@ export function DeploymentOptionsSection() {
           </div>
         </div>
       )}
-      {!limitedFeature && (
-        <div className="form-group">
-          <div className="col-sm-12">
-            <SwitchField
-              label="Allow per environment override"
-              data-cy="kube-settings-allow-per-environment-override"
-              checked={values.perEnvOverride}
-              onChange={(value) =>
-                setFieldValue('globalDeploymentOptions.perEnvOverride', value)
-              }
-              name="toggle_perEnvOverride"
-              labelClass="col-sm-3 col-lg-2"
-              tooltip="Allows overriding of deployment options in the Cluster setup screen of each environment"
-            />
-          </div>
+      <div className="form-group">
+        <div className="col-sm-12">
+          <SwitchField
+            label="Allow per environment override"
+            data-cy="kube-settings-allow-per-environment-override"
+            checked={values.perEnvOverride}
+            onChange={(value) =>
+              setFieldValue('globalDeploymentOptions.perEnvOverride', value)
+            }
+            name="toggle_perEnvOverride"
+            labelClass="col-sm-3 col-lg-2"
+            tooltip="Allows overriding of deployment options in the Cluster setup screen of each environment"
+          />
         </div>
-      )}
+      </div>
 
       <KubeNoteMinimumCharacters />
 

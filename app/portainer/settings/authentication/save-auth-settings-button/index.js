@@ -4,8 +4,6 @@ export const saveAuthSettingsButton = {
     onSaveSettings: '<',
     saveButtonDisabled: '<',
     saveButtonState: '<',
-    limitedFeatureId: '<',
-    limitedFeatureClass: '<',
     className: '<',
   },
 };

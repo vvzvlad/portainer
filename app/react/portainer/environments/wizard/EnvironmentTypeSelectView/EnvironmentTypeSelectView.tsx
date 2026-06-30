@@ -11,7 +11,6 @@ import { EnvironmentSelector } from './EnvironmentSelector';
 import {
   EnvironmentOptionValue,
   existingEnvironmentTypes,
-  newEnvironmentTypes,
 } from './environment-types';
 
 export function EnvironmentTypeSelectView() {
@@ -44,16 +43,6 @@ export function EnvironmentTypeSelectView() {
                     value={types}
                     onChange={setTypes}
                     options={existingEnvironmentTypes}
-                  />
-                  <p className="control-label !mb-2">Set up new environments</p>
-                  <EnvironmentSelector
-                    value={types}
-                    onChange={setTypes}
-                    options={newEnvironmentTypes}
-                    hiddenSpacingCount={
-                      existingEnvironmentTypes.length -
-                      newEnvironmentTypes.length
-                    }
                   />
                 </FormSection>
               </div>

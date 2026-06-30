@@ -9,7 +9,6 @@ import {
   Environment,
   EnvironmentId,
 } from '@/react/portainer/environments/types';
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
 
 import { FormSection } from '@@/form-components/FormSection';
 import { TextTip } from '@@/Tip/TextTip';
@@ -226,7 +225,6 @@ function InnerForm({
                 name="restrictStandardUserIngressW"
                 data-cy="kubeSetup-restrictStandardUserIngressWToggle"
                 label="Only allow admins to deploy ingresses"
-                featureId={FeatureId.K8S_ADM_ONLY_USR_INGRESS_DEPLY}
                 tooltip="Enforces only allowing admins to deploy ingresses (and disallows standard users from doing so)."
                 labelClass="col-sm-5 col-lg-4"
                 checked={values.restrictStandardUserIngressW}
@@ -243,22 +241,6 @@ function InnerForm({
                 Create/Edit ingress. Users may then select them via the hostname
                 dropdown in Create/Edit application.
               </TextTip>
-            </div>
-          </div>
-        </FormSection>
-        <FormSection title="Change Window Settings">
-          <div className="form-group">
-            <div className="col-sm-12">
-              <SwitchField
-                name="changeWindow.Enabled"
-                data-cy="kubeSetup-changeWindowEnabledToggle"
-                label="Enable Change Window"
-                tooltip="GitOps updates to stacks or applications outside the defined change window will not occur."
-                labelClass="col-sm-5 col-lg-4"
-                checked={false}
-                featureId={FeatureId.HIDE_AUTO_UPDATE_WINDOW}
-                onChange={() => {}}
-              />
             </div>
           </div>
         </FormSection>
@@ -290,20 +272,6 @@ function InnerForm({
                 onChange={(checked) =>
                   setFieldValue('restrictDefaultNamespace', checked)
                 }
-              />
-            </div>
-          </div>
-          <div className="form-group">
-            <div className="col-sm-12">
-              <SwitchField
-                name="restrictSecrets"
-                data-cy="kubeSetup-restrictSecretsToggle"
-                label="Restrict secret contents access for non-admins (UI only)"
-                tooltip="This hides the ability to view or edit in the UI the contents of secrets that a non-admin user did not create themselves but does not prevent it via the command line."
-                labelClass="col-sm-5 col-lg-4"
-                checked={false}
-                featureId={FeatureId.K8S_ADM_ONLY_SECRETS}
-                onChange={() => {}}
               />
             </div>
           </div>
@@ -346,7 +314,6 @@ function InnerForm({
                 labelClass="col-sm-5 col-lg-4"
                 name="resourceOverCommitPercentage"
                 checked
-                featureId={FeatureId.K8S_SETUP_DEFAULT}
                 onChange={(checked: boolean) => {
                   setFieldValue('enableResourceOverCommit', checked);
                   // set 20% as the default resourceOverCommitPercentage value

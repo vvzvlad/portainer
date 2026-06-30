@@ -4,7 +4,6 @@ import { vi } from 'vitest';
 import { UserViewModel } from '@/portainer/models/user';
 import { withUserProvider } from '@/react/test-utils/withUserProvider';
 import { withTestRouter } from '@/react/test-utils/withRouter';
-import * as featureFlags from '@/react/portainer/feature-flags/feature-flags.service';
 import { usePublicSettings } from '@/react/portainer/settings/queries';
 import { PublicSettingsResponse } from '@/react/portainer/settings/types';
 
@@ -17,7 +16,6 @@ vi.mock('@/react/portainer/settings/queries', () => ({
 
 describe('SettingsSidebar', () => {
   beforeEach(() => {
-    vi.spyOn(featureFlags, 'isBE', 'get').mockReturnValue(false);
     // Default mock for usePublicSettings - returns data based on selector
     vi.mocked(usePublicSettings).mockImplementation(((options?: {
       select?: (settings: PublicSettingsResponse) => PublicSettingsResponse;
@@ -87,9 +85,6 @@ describe('SettingsSidebar', () => {
     it('should render logs submenu items', () => {
       renderComponent({ isPureAdmin: true, isAdmin: true });
 
-      expect(
-        screen.getByTestId('portainerSidebar-authLogs')
-      ).toBeInTheDocument();
       expect(
         screen.getByTestId('portainerSidebar-activityLogs')
       ).toBeInTheDocument();

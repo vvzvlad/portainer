@@ -1,7 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 
 import axios from '@/portainer/services/axios/axios';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 import { withError } from '@/react-tools/react-query';
 
 interface RefsPayload {
@@ -12,7 +11,6 @@ interface RefsPayload {
 export function useGitRefs<T = string[]>(
   payload: RefsPayload,
   {
-    enabled,
     select,
     onSuccess,
     onSettled,
@@ -30,7 +28,7 @@ export function useGitRefs<T = string[]>(
   return useQuery({
     queryKey: ['gitops', 'refs', payload],
     queryFn: () => listRefs(payload),
-    enabled: isBE && enabled,
+    enabled: false,
     retry: false,
     cacheTime,
     select,

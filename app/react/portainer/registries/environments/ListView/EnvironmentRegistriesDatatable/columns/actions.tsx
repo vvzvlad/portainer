@@ -6,7 +6,6 @@ import { useEnvironmentId } from '@/react/hooks/useEnvironmentId';
 import { DecoratedRegistry } from '@/react/portainer/registries/ListView/RegistriesDatatable/types';
 import { RegistryTypes } from '@/react/portainer/registries/types/registry';
 import { columnHelper } from '@/react/portainer/registries/ListView/RegistriesDatatable/columns/helper';
-import { BrowseButton } from '@/react/portainer/registries/ListView/RegistriesDatatable/columns/actions';
 
 import { Button } from '@@/buttons';
 import { Link } from '@@/Link';
@@ -50,7 +49,6 @@ function Cell({
           </Button>
         </Authorized>
       )}
-      <BrowseButton registry={item} environmentId={environmentId} />
     </>
   );
 }

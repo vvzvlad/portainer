@@ -61,5 +61,5 @@ test('should render with the initial value selected and call onChange when click
   expect(item2.checked).toBeFalsy();
 
   fireEvent.click(item2);
-  expect(onChange).toHaveBeenCalledWith(options[1].value, false);
+  expect(onChange).toHaveBeenCalledWith(options[1].value);
 });

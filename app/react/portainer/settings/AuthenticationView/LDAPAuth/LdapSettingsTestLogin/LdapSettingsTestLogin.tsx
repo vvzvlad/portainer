@@ -1,11 +1,8 @@
 import { Field, Form, Formik } from 'formik';
 import { Check, X } from 'lucide-react';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-import { isLimitedToBE } from '@/react/portainer/feature-flags/feature-flags.service';
 import { LDAPSettings } from '@/react/portainer/settings/types';
 
-import { BEFeatureIndicator } from '@@/BEFeatureIndicator';
 import { FormSection } from '@@/form-components/FormSection';
 import { FormControl } from '@@/form-components/FormControl';
 import { Input } from '@@/form-components/Input';
@@ -15,21 +12,11 @@ import { useTestLdapMutation } from '../../../queries/auth/useTestLdap';
 
 interface Props {
   settings: LDAPSettings;
-  limitedFeatureId?: FeatureId;
-  showBeIndicatorIfNeeded?: boolean;
-  isLimitedFeatureSelfContained?: boolean;
 }
 
 const initialValues = { username: '', password: '' };
 
-export function LdapSettingsTestLogin({
-  settings,
-  limitedFeatureId,
-  showBeIndicatorIfNeeded = false,
-  isLimitedFeatureSelfContained = false,
-}: Props) {
-  const isDisabled =
-    isLimitedFeatureSelfContained || isLimitedToBE(limitedFeatureId);
+export function LdapSettingsTestLogin({ settings }: Props) {
   const mutation = useTestLdapMutation();
 
   return (
@@ -52,10 +39,6 @@ export function LdapSettingsTestLogin({
                   as={Input}
                   id="ldap_test_username"
                   name="username"
-                  disabled={isDisabled}
-                  className={
-                    isLimitedFeatureSelfContained ? 'limited-be' : undefined
-                  }
                   data-cy="ldap-test-username"
                 />
               </FormControl>
@@ -71,10 +54,6 @@ export function LdapSettingsTestLogin({
                   name="password"
                   type="password"
                   autoComplete="new-password"
-                  disabled={isDisabled}
-                  className={
-                    isLimitedFeatureSelfContained ? 'limited-be' : undefined
-                  }
                   data-cy="ldap-test-password"
                 />
               </FormControl>
@@ -82,12 +61,9 @@ export function LdapSettingsTestLogin({
               <div className="vertical-center">
                 <LoadingButton
                   isLoading={mutation.isLoading}
-                  disabled={isDisabled || !values.username || !values.password}
+                  disabled={!values.username || !values.password}
                   loadingText="Testing"
                   data-cy="ldap-test-button"
-                  className={
-                    isLimitedFeatureSelfContained ? 'limited-be' : undefined
-                  }
                 >
                   Test
                 </LoadingButton>
@@ -99,10 +75,6 @@ export function LdapSettingsTestLogin({
                 {(mutation.isError ||
                   (mutation.isSuccess && !mutation.data?.valid)) && (
                   <X className="icon-danger" aria-hidden="true" />
-                )}
-
-                {showBeIndicatorIfNeeded && limitedFeatureId && (
-                  <BEFeatureIndicator featureId={limitedFeatureId} />
                 )}
               </div>
             </div>

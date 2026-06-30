@@ -6,24 +6,6 @@ import { GitFormModel } from '../types';
 
 import { ComposePathField } from './ComposePathField';
 
-// Mock the feature flags
-vi.mock('../../feature-flags/feature-flags.service', () => ({
-  isBE: false,
-}));
-
-// Mock the PathSelector component
-vi.mock('./PathSelector', () => ({
-  PathSelector: vi.fn(({ value, onChange, placeholder, inputId }) => (
-    <input
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      id={inputId}
-      data-testid="path-selector"
-    />
-  )),
-}));
-
 const defaultProps = {
   value: '',
   onChange: vi.fn(),
@@ -136,31 +118,5 @@ describe('ComposePathField', () => {
 
     const input = screen.getByRole('textbox');
     expect(input).toHaveValue(testValue);
-  });
-});
-
-describe('ComposePathField with Business Edition features', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('should render PathSelector when isBE is true', () => {
-    // Mock isBE to return true for this test
-    vi.doMock('../../feature-flags/feature-flags.service', () => ({
-      isBE: true,
-    }));
-
-    // Since we can't use dynamic imports in this test environment,
-    // we'll test the BE functionality by mocking the feature flag
-    // and verifying the PathSelector is called with correct props
-    const mockPathSelector = vi.fn(() => <div data-testid="path-selector" />);
-    vi.doMock('./PathSelector', () => ({
-      PathSelector: mockPathSelector,
-    }));
-
-    // Note: In a real scenario with BE features enabled,
-    // the PathSelector component would be rendered instead of the Input
-    // This test verifies the conditional rendering logic works correctly
-    expect(mockPathSelector).toBeDefined();
   });
 });

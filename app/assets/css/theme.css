@@ -99,8 +99,6 @@
 
   --orange-1: #e86925;
 
-  --BE-only: var(--ui-gray-6);
-
   --text-log-viewer-color-json-grey: var(--text-log-viewer-color);
   --text-log-viewer-color-json-magenta: var(--text-log-viewer-color);
   --text-log-viewer-color-json-yellow: var(--text-log-viewer-color);
@@ -269,8 +267,6 @@
 
 /* Dark Theme */
 [theme='dark'] {
-  --BE-only: var(--ui-gray-6);
-
   --text-log-viewer-color-json-grey: var(--text-log-viewer-color);
   --text-log-viewer-color-json-magenta: var(--text-log-viewer-color);
   --text-log-viewer-color-json-yellow: var(--text-log-viewer-color);
@@ -440,7 +436,6 @@
 
 /* High Contrast Theme */
 [theme='highcontrast'] {
-  --BE-only: var(--ui-gray-6);
   --text-log-viewer-color-json-grey: var(--text-log-viewer-color);
   --text-log-viewer-color-json-magenta: var(--text-log-viewer-color);
   --text-log-viewer-color-json-yellow: var(--text-log-viewer-color);

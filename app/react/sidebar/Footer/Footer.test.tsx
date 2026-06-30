@@ -1,7 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { vi } from 'vitest';
 
-import * as featureFlags from '@/react/portainer/feature-flags/feature-flags.service';
 import { withTestQueryProvider } from '@/react/test-utils/withTestQuery';
 import { withUserProvider } from '@/react/test-utils/withUserProvider';
 
@@ -29,10 +28,6 @@ describe('Footer', () => {
   });
 
   describe('CE Footer', () => {
-    beforeEach(() => {
-      vi.spyOn(featureFlags, 'isBE', 'get').mockReturnValue(false);
-    });
-
     test('should render CE footer with copyright symbol', () => {
       renderComponent();
 
@@ -60,48 +55,12 @@ describe('Footer', () => {
     });
   });
 
-  describe('BE Footer', () => {
-    beforeEach(() => {
-      vi.spyOn(featureFlags, 'isBE', 'get').mockReturnValue(true);
-    });
-
-    test('should render BE footer with copyright symbol', () => {
-      renderComponent();
-
-      expect(screen.getByText('©')).toBeInTheDocument();
-    });
-
-    test('should render Portainer Business Edition text', () => {
-      renderComponent();
-
-      expect(
-        screen.getByText('Portainer Business Edition')
-      ).toBeInTheDocument();
-    });
-
-    test('should NOT render UpdateNotification component in BE', () => {
-      renderComponent();
-
-      expect(
-        screen.queryByTestId('update-notification')
-      ).not.toBeInTheDocument();
-    });
-
-    test('should render BuildInfoModalButton component', () => {
-      renderComponent();
-
-      expect(screen.getByTestId('build-info-modal-button')).toBeInTheDocument();
-    });
-  });
-
   describe('FooterContent', () => {
     test('should render all child elements in correct order', () => {
       renderComponent();
 
       const copyrightSymbol = screen.getByText('©');
-      const editionText = screen.getByText(
-        /Portainer (Community|Business) Edition/
-      );
+      const editionText = screen.getByText('Portainer Community Edition');
       const buildInfoButton = screen.getByTestId('build-info-modal-button');
 
       expect(copyrightSymbol).toBeInTheDocument();

@@ -6,10 +6,6 @@ import { withTestRouter } from '@/react/test-utils/withRouter';
 import { Context } from './useSidebarState';
 import { Header } from './Header';
 
-vi.mock('@/react/portainer/feature-flags/feature-flags.service', () => ({
-  isBE: false,
-}));
-
 function renderComponent(
   props = {},
   sidebarState = { isOpen: true, toggle: vi.fn() }

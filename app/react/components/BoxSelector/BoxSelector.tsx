@@ -9,13 +9,13 @@ import { BoxSelectorOption, Value } from './types';
 interface IsMultiProps<T extends Value> {
   isMulti: true;
   value: T[];
-  onChange(value: T[], limitedToBE: boolean): void;
+  onChange(value: T[]): void;
 }
 
 interface SingleProps<T extends Value> {
   isMulti?: never;
   value: T;
-  onChange(value: T, limitedToBE: boolean): void;
+  onChange(value: T): void;
 }
 
 type Union<T extends Value> = IsMultiProps<T> | SingleProps<T>;
@@ -87,12 +87,12 @@ export function BoxSelector<T extends Value>({
     </>
   );
 
-  function handleSelect(optionValue: T, limitedToBE: boolean) {
+  function handleSelect(optionValue: T) {
     if (props.isMulti) {
       const newValue = isSelected(optionValue)
         ? props.value.filter((v) => v !== optionValue)
         : [...props.value, optionValue];
-      props.onChange(newValue, limitedToBE);
+      props.onChange(newValue);
       return;
     }
 
@@ -100,7 +100,7 @@ export function BoxSelector<T extends Value>({
       return;
     }
 
-    props.onChange(optionValue, limitedToBE);
+    props.onChange(optionValue);
   }
 
   function isSelected(optionValue: T) {

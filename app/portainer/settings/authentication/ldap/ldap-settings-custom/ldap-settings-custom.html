@@ -35,15 +35,6 @@
       </button>
     </div>
   </div>
-  <div class="col-sm-12">
-    <be-teaser-button
-      feature-id="$ctrl.limitedFeatureId"
-      heading="'Add additional server'"
-      message="'Allows you to add an additional LDAP server.'"
-      button-text="'Add additional server'"
-      button-class-name="'!ml-0'"
-    ></be-teaser-button>
-  </div>
 </div>
 
 <div class="form-group">
@@ -57,8 +48,6 @@
         type="checkbox"
         id="anonymous_mode"
         ng-model="$ctrl.settings.AnonymousMode"
-        limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-        limited-feature-tabindex="-1"
         data-cy="anonymous-mode-checkbox"
       />
       <span class="slider round"></span>
@@ -115,14 +104,12 @@
     class="block"
     settings="$ctrl.settings.SearchSettings"
     on-search-click="($ctrl.onSearchUsersClick)"
-    limited-feature-id="$ctrl.limitedFeatureId"
   ></ldap-custom-user-search>
 
   <ldap-custom-group-search
     class="block"
     settings="$ctrl.settings.GroupSearchSettings"
     on-search-click="($ctrl.onSearchGroupsClick)"
-    limited-feature-id="$ctrl.limitedFeatureId"
   ></ldap-custom-group-search>
 
   <ldap-custom-admin-group
@@ -134,22 +121,13 @@
     on-auto-populate-change="($ctrl.onAutoPopulateChange)"
     selected-admin-groups="$ctrl.selectedAdminGroups"
     on-selected-admin-groups-change="($ctrl.onSelectedAdminGroupsChange)"
-    limited-feature-id="$ctrl.limitedFeatureId"
-    is-limited-feature-self-contained="true"
   ></ldap-custom-admin-group>
 
-  <ldap-settings-test-login
-    class="block"
-    settings="$ctrl.settings"
-    limited-feature-id="$ctrl.limitedFeatureId"
-    show-be-indicator-if-needed="true"
-    is-limited-feature-self-contained="true"
-  ></ldap-settings-test-login>
+  <ldap-settings-test-login class="block" settings="$ctrl.settings"></ldap-settings-test-login>
 </div>
 
 <save-auth-settings-button
   on-save-settings="($ctrl.onSaveSettings)"
   save-button-state="($ctrl.saveButtonState)"
   save-button-disabled="!$ctrl.saveButtonDisabled()"
-  limited-feature-dir="{{ $ctrl.limitedFeatureId }}"
 ></save-auth-settings-button>

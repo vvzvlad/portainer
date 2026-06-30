@@ -1,12 +1,10 @@
 import _ from 'lodash';
 import Mustache from 'mustache';
 
-import { isBE } from '../../feature-flags/feature-flags.service';
-
 import { VariableDefinition } from './CustomTemplatesVariablesDefinitionField/CustomTemplatesVariablesDefinitionField';
 import { VariablesFieldValue } from './CustomTemplatesVariablesField';
 
-export const isTemplateVariablesEnabled = isBE;
+export const isTemplateVariablesEnabled = false;
 
 export function getTemplateVariables(templateStr: string) {
   const [template, error] = validateAndParse(templateStr);

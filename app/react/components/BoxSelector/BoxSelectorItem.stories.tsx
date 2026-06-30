@@ -2,8 +2,6 @@ import { Meta } from '@storybook/react-webpack5';
 import { ReactNode } from 'react';
 import { Briefcase } from 'lucide-react';
 
-import { init as initFeatureService } from '@/react/portainer/feature-flags/feature-flags.service';
-import { Edition, FeatureId } from '@/react/portainer/feature-flags/enums';
 import Docker from '@/assets/ico/vendor/docker.svg?c';
 
 import { IconProps } from '@@/Icon';
@@ -28,7 +26,6 @@ interface ExampleProps {
   description?: string;
   icon?: IconProps['icon'];
   label?: string;
-  feature?: FeatureId;
 }
 
 function Template({
@@ -36,7 +33,6 @@ function Template({
   description = 'description',
   icon,
   label = 'label',
-  feature,
 }: ExampleProps) {
   const option: BoxSelectorOption<number> = {
     description,
@@ -44,7 +40,6 @@ function Template({
     id: 'id',
     label,
     value: 1,
-    feature,
   };
 
   return (
@@ -68,18 +63,6 @@ export function SelectedItem() {
 SelectedItem.args = {
   selected: true,
 };
-
-export function LimitedFeatureItem() {
-  initFeatureService(Edition.CE);
-
-  return <Template feature={FeatureId.ACTIVITY_AUDIT} />;
-}
-
-export function SelectedLimitedFeatureItem() {
-  initFeatureService(Edition.CE);
-
-  return <Template feature={FeatureId.ACTIVITY_AUDIT} selected />;
-}
 
 function IconTemplate({
   icon,

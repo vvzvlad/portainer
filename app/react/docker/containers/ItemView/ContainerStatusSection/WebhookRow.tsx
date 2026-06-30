@@ -4,7 +4,6 @@ import { useAuthorizations } from '@/react/hooks/useUser';
 import { dockerWebhookUrl } from '@/portainer/helpers/webhookHelper';
 import { notifySuccess } from '@/portainer/services/notifications';
 import { truncateLeftRight } from '@/portainer/filters/filters';
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
 import { useWebhooks } from '@/react/portainer/webhooks/useWebhooks';
 import { useCreateWebhook } from '@/react/portainer/webhooks/useCreateWebhook';
 import { useDeleteWebhook } from '@/react/portainer/webhooks/useDeleteWebhook';
@@ -111,7 +110,6 @@ export function WebhookRow({
           data-cy="container-webhook-switch"
           fieldClass="flex items-center gap-2"
           labelClass="!m-0"
-          featureId={FeatureId.CONTAINER_WEBHOOK}
         />
       </td>
       <td>

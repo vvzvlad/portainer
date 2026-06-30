@@ -7,8 +7,6 @@
       ng-click="$ctrl.onSaveSettings()"
       ng-disabled="$ctrl.saveButtonDisabled || $ctrl.saveButtonState"
       button-spinner="$ctrl.saveButtonState"
-      limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-      limited-feature-class="{{::$ctrl.limitedFeatureClass}}"
     >
       <span ng-hide="$ctrl.saveButtonState">Save settings</span>
       <span ng-show="$ctrl.saveButtonState">Saving...</span>

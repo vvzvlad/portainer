@@ -1,14 +1,8 @@
-import _ from 'lodash';
-
-import { notifyError } from '@/portainer/services/notifications';
 import {
   PrivateRegistryFieldset,
   REGISTRY_CREDENTIALS_ENABLED,
 } from '@/react/edge/edge-stacks/components/PrivateRegistryFieldset';
 import { useRegistries } from '@/react/portainer/registries/queries/useRegistries';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
-
-import { useParseRegistries } from '../../queries/useParseRegistries';
 
 import { FormValues } from './types';
 
@@ -16,7 +10,6 @@ export function PrivateRegistryFieldsetWrapper({
   value,
   error,
   onChange,
-  onFieldError,
   values,
   isGit,
 }: {
@@ -27,11 +20,8 @@ export function PrivateRegistryFieldsetWrapper({
     fileContent?: string;
     file?: File;
   };
-  onFieldError: (message: string) => void;
   isGit?: boolean;
 }) {
-  const dryRunMutation = useParseRegistries();
-
   const registriesQuery = useRegistries({ hideDefault: true });
 
   if (!registriesQuery.data) {
@@ -44,49 +34,23 @@ export function PrivateRegistryFieldsetWrapper({
       formInvalid={!values.file && !values.fileContent && !isGit}
       errorMessage={error}
       registries={registriesQuery.data}
-      onReload={() => matchRegistry(values)}
+      onReload={() => matchRegistry()}
       onChange={(value) => {
         onChange(value);
         if (value === REGISTRY_CREDENTIALS_ENABLED) {
           // Enabled, need to match registry
-          matchRegistry(values);
+          matchRegistry();
         }
       }}
       method={isGit ? 'repository' : 'file'}
     />
   );
 
-  async function matchRegistry(values: { fileContent?: string; file?: File }) {
+  function matchRegistry() {
     if (isGit) {
       return;
     }
 
-    try {
-      if (!isBE) {
-        return;
-      }
-
-      const registries = await dryRunMutation.mutateAsync(values);
-
-      if (registries.length === 0) {
-        return;
-      }
-
-      const validRegistry = onlyOne(registries);
-      if (validRegistry) {
-        onChange(registries[0]);
-      } else {
-        onChange(undefined);
-        onFieldError(
-          'Images need to be from a single registry, please edit and reload'
-        );
-      }
-    } catch (err) {
-      notifyError('Failure', err as Error, 'Unable to retrieve registries');
-    }
-  }
-
-  function onlyOne<T extends string | number>(arr: Array<T>) {
-    return _.uniq(arr).length === 1;
+    // Registry auto-matching is a BE-only feature and is a no-op in CE.
   }
 }

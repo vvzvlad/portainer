@@ -1,6 +1,5 @@
 import { CellContext } from '@tanstack/react-table';
 
-import { ImageUpToDateTooltip } from '@/react/docker/components/datatable/TableColumnHeaderImageUpToDate';
 import { useEnvironmentId } from '@/react/hooks/useEnvironmentId';
 import { isRegularStack } from '@/react/docker/stacks/view-models/utils';
 
@@ -12,12 +11,7 @@ import { columnHelper } from './helper';
 export const imageNotificationColumn = columnHelper.display({
   id: 'imageNotification',
   enableHiding: false,
-  header: () => (
-    <>
-      Images up to date
-      <ImageUpToDateTooltip />
-    </>
-  ),
+  header: 'Images up to date',
   cell: Cell,
 });
 

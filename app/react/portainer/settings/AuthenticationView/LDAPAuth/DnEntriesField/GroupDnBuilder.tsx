@@ -1,8 +1,5 @@
 import { useEffect, useState } from 'react';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-import { isLimitedToBE } from '@/react/portainer/feature-flags/feature-flags.service';
-
 import { DnEntriesField } from './DnEntriesField';
 import { GroupNameField } from './GroupNameField';
 import { DnEntry, parseDN, buildDN } from './ldap-dn-utils';
@@ -13,7 +10,6 @@ interface Props {
   suffix: string;
   index: number;
   onRemoveClick?: (index: number) => void;
-  limitedFeatureId?: FeatureId;
 }
 
 export function GroupDnBuilder({
@@ -22,9 +18,7 @@ export function GroupDnBuilder({
   suffix,
   index,
   onRemoveClick,
-  limitedFeatureId,
 }: Props) {
-  const isLimited = isLimitedToBE(limitedFeatureId);
   const [groupName, setGroupName] = useState(() =>
     parseGroupName(value, suffix)
   );
@@ -52,7 +46,6 @@ export function GroupDnBuilder({
           setGroupName(newGroupName);
           onChange(index, buildGroupDN(newGroupName, entries, suffix));
         }}
-        disabled={isLimited}
         onRemoveClick={onRemoveClick ? () => onRemoveClick(index) : undefined}
       />
       <DnEntriesField
@@ -64,7 +57,6 @@ export function GroupDnBuilder({
           }
         }}
         label="Path to group"
-        limitedFeatureId={limitedFeatureId}
       />
     </>
   );

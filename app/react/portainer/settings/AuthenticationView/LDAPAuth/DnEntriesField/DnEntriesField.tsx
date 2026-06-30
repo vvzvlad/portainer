@@ -1,8 +1,5 @@
 import { Plus } from 'lucide-react';
 
-import { isLimitedToBE } from '@/react/portainer/feature-flags/feature-flags.service';
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-
 import { Select, Input } from '@@/form-components/Input';
 import { Widget, WidgetBody } from '@@/Widget';
 import { Button } from '@@/buttons';
@@ -20,15 +17,11 @@ export function DnEntriesField({
   value,
   onChange,
   label = 'DN entries',
-  limitedFeatureId,
 }: {
   value: DnEntry[];
   onChange: (entries: DnEntry[]) => void;
   label?: string;
-  limitedFeatureId?: FeatureId;
 }) {
-  const isLimited = isLimitedToBE(limitedFeatureId);
-
   const {
     handleMoveUp,
     handleMoveDown,
@@ -53,7 +46,6 @@ export function DnEntriesField({
           icon={Plus}
           className="ml-2 !border-0"
           data-cy="ldap-dn-builder-add-button"
-          disabled={isLimited}
         >
           add another entry
         </Button>
@@ -67,8 +59,6 @@ export function DnEntriesField({
                   <DnEntryItem
                     item={entry}
                     onChange={(newEntry) => handleChangeItem(index, newEntry)}
-                    disabled={isLimited}
-                    readOnly={isLimited}
                   />
                   <InputListActionButtons
                     index={index}
@@ -78,7 +68,6 @@ export function DnEntriesField({
                     onMoveDown={() => handleMoveDown(index)}
                     onDelete={() => handleRemoveItem(index, entry)}
                     data-cy="ldap-dn-builder"
-                    disabled={isLimited}
                   />
                 </div>
               ))}

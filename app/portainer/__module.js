@@ -1,5 +1,3 @@
-import featureFlagModule from '@/react/portainer/feature-flags';
-
 import './rbac';
 
 import componentsModule from './components';
@@ -24,7 +22,6 @@ angular
     'portainer.registrymanagement',
     componentsModule,
     settingsModule,
-    featureFlagModule,
     userActivityModule,
     servicesModule,
     reactModule,
@@ -198,19 +195,6 @@ angular
           'content@': {
             component: 'environmentsItemView',
           },
-        },
-      };
-
-      const edgeAutoCreateScript = {
-        name: 'portainer.endpoints.edgeAutoCreateScript',
-        url: '/aeec',
-        views: {
-          'content@': {
-            component: 'edgeAutoCreateScriptView',
-          },
-        },
-        data: {
-          docs: '/admin/environments/aeec',
         },
       };
 
@@ -471,7 +455,6 @@ angular
       $stateRegistryProvider.register(endpoints);
       $stateRegistryProvider.register(endpoint);
       $stateRegistryProvider.register(endpointAccess);
-      $stateRegistryProvider.register(edgeAutoCreateScript);
       $stateRegistryProvider.register(groups);
       $stateRegistryProvider.register(group);
       $stateRegistryProvider.register(groupCreation);

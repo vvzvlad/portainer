@@ -2,7 +2,6 @@ import { useState } from 'react';
 
 import { baseStackWebhookUrl } from '@/portainer/helpers/webhookHelper';
 import { Authorized, useAuthorizations } from '@/react/hooks/useUser';
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
 import { WebhookSettings } from '@/react/portainer/gitops/AutoUpdateFieldset/WebhookSettings';
 
 import { FormSection } from '@@/form-components/FormSection';
@@ -61,7 +60,6 @@ export function AuthorizedWebhook({
         labelClass="col-sm-2"
         tooltip="Create a webhook (or callback URI) to automate the update of this stack. Sending a POST request to this callback URI (without requiring any authentication) will pull the most up-to-date version of the associated image and re-deploy this stack."
         label="Create a Stack webhook"
-        featureId={FeatureId.STACK_WEBHOOK}
         data-cy="stack-webhook-switch"
         disabled={disabled}
       />

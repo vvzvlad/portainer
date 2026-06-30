@@ -1,15 +1,12 @@
 import { useState } from 'react';
 import { Zap, Network, Plug2 } from 'lucide-react';
-import _ from 'lodash';
 
 import {
   ContainerEngine,
   Environment,
 } from '@/react/portainer/environments/types';
 import { commandsTabs } from '@/react/edge/components/EdgeScriptForm/scripts';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 import EdgeAgentStandardIcon from '@/react/edge/components/edge-agent-standard.svg?c';
-import EdgeAgentAsyncIcon from '@/react/edge/components/edge-agent-async.svg?c';
 
 import { BoxSelector, type BoxSelectorOption } from '@@/BoxSelector';
 import { BadgeIcon } from '@@/BadgeIcon';
@@ -31,14 +28,9 @@ interface Props {
   isDockerStandalone?: boolean;
 }
 
-type CreationType =
-  | 'agent'
-  | 'api'
-  | 'socket'
-  | 'edgeAgentStandard'
-  | 'edgeAgentAsync';
+type CreationType = 'agent' | 'api' | 'socket' | 'edgeAgentStandard';
 
-const primaryOptions: BoxSelectorOption<CreationType>[] = _.compact([
+const primaryOptions: BoxSelectorOption<CreationType>[] = [
   {
     id: 'edgeAgentStandard',
     icon: <BadgeIcon icon={EdgeAgentStandardIcon} size="3xl" />,
@@ -59,15 +51,7 @@ const primaryOptions: BoxSelectorOption<CreationType>[] = _.compact([
     ),
     value: 'edgeAgentStandard',
   },
-  isBE && {
-    id: 'edgeAgentAsync',
-    icon: <BadgeIcon icon={EdgeAgentAsyncIcon} size="3xl" />,
-    label: 'Edge Agent Async',
-    description:
-      'The remote environment will initiate connections to the Portainer server, without the ability to open a real-time tunnel. The Portainer server must be accessible from the Edge Agent environment.',
-    value: 'edgeAgentAsync' as CreationType,
-  },
-]);
+];
 
 const legacyOptions: BoxSelectorOption<CreationType>[] = [
   {
@@ -183,24 +167,6 @@ export function WizardDocker({ onCreate, isDockerStandalone }: Props) {
           <EdgeAgentTab
             onCreate={(environment) =>
               onCreate(environment, 'dockerEdgeAgentStandard')
-            }
-            commands={{
-              linux: isDockerStandalone
-                ? [commandsTabs.standaloneLinux]
-                : [commandsTabs.swarmLinux],
-              win: isDockerStandalone
-                ? [commandsTabs.standaloneWindow]
-                : [commandsTabs.swarmWindows],
-            }}
-            containerEngine={containerEngine}
-          />
-        );
-      case 'edgeAgentAsync':
-        return (
-          <EdgeAgentTab
-            asyncMode
-            onCreate={(environment) =>
-              onCreate(environment, 'dockerEdgeAgentAsync')
             }
             commands={{
               linux: isDockerStandalone
