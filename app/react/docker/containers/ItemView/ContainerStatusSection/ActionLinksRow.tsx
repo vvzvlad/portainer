@@ -1,4 +1,5 @@
 import { FileText, Info, BarChart2, Terminal, Paperclip } from 'lucide-react';
+import { useCurrentStateAndParams } from '@uirouter/react';
 
 import { ContainerId } from '@/react/docker/containers/types';
 import { useAuthorizations } from '@/react/hooks/useUser';
@@ -7,11 +8,31 @@ import { Icon } from '@@/Icon';
 import { Button, ButtonGroup } from '@@/buttons';
 import { Link } from '@@/Link';
 
+import {
+  STACK_CONTAINER_STATE_NAME,
+  buildStackContainerLinkParams,
+  isStackContainerState,
+} from '../containerBreadcrumbs';
+
 interface Props {
   containerId: ContainerId;
 }
 
 export function ActionLinksRow({ containerId }: Props) {
+  const { state, params } = useCurrentStateAndParams();
+
+  // When the container was opened from a stack, keep the sub-tab links inside
+  // the stack tree (docker.stacks.stack.container.*) so the stack params are
+  // preserved and the breadcrumb keeps the stack trail. Otherwise use the
+  // global container states.
+  const fromStack = isStackContainerState(state?.name);
+  const baseState = fromStack
+    ? STACK_CONTAINER_STATE_NAME
+    : 'docker.containers.container';
+  const linkParams = fromStack
+    ? buildStackContainerLinkParams(params, containerId)
+    : { id: containerId };
+
   const { authorized: canLogs } = useAuthorizations(['DockerContainerLogs']);
   const { authorized: canInspect } = useAuthorizations([
     'DockerContainerInspect',
@@ -37,10 +58,8 @@ export function ActionLinksRow({ containerId }: Props) {
             <Button
               as={Link}
               props={{
-                to: 'docker.containers.container.logs',
-                params: {
-                  id: containerId,
-                },
+                to: `${baseState}.logs`,
+                params: linkParams,
               }}
               data-cy="container-logs-link"
               color="link"
@@ -53,10 +72,8 @@ export function ActionLinksRow({ containerId }: Props) {
             <Button
               as={Link}
               props={{
-                to: 'docker.containers.container.inspect',
-                params: {
-                  id: containerId,
-                },
+                to: `${baseState}.inspect`,
+                params: linkParams,
               }}
               data-cy="container-inspect-link"
               color="link"
@@ -69,10 +86,8 @@ export function ActionLinksRow({ containerId }: Props) {
             <Button
               as={Link}
               props={{
-                to: 'docker.containers.container.stats',
-                params: {
-                  id: containerId,
-                },
+                to: `${baseState}.stats`,
+                params: linkParams,
               }}
               data-cy="container-stats-link"
               color="link"
@@ -85,10 +100,8 @@ export function ActionLinksRow({ containerId }: Props) {
             <Button
               as={Link}
               props={{
-                to: 'docker.containers.container.exec',
-                params: {
-                  id: containerId,
-                },
+                to: `${baseState}.exec`,
+                params: linkParams,
               }}
               data-cy="container-console-link"
               color="link"
@@ -101,10 +114,8 @@ export function ActionLinksRow({ containerId }: Props) {
             <Button
               as={Link}
               props={{
-                to: 'docker.containers.container.attach',
-                params: {
-                  id: containerId,
-                },
+                to: `${baseState}.attach`,
+                params: linkParams,
               }}
               data-cy="container-attach-link"
               color="link"

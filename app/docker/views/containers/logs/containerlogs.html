@@ -1,14 +1,4 @@
-<page-header
-  title="'Container logs'"
-  breadcrumbs="[
-    { label:'Containers', link:'docker.containers' },
-    { 
-      label:(container.Name | trimcontainername),
-      link: 'docker.containers.container', 
-      linkParams: { id: container.Id }
-    }, 'Logs']"
->
-</page-header>
+<page-header title="'Container logs'" breadcrumbs="breadcrumbs"> </page-header>
 
 <container-log-view ng-if="!logsEnabled"></container-log-view>
 

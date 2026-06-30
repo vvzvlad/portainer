@@ -116,7 +116,7 @@ function NameLink({ item }: { item: DecoratedStack }) {
       to="docker.stacks.stack"
       params={{
         name: item.Name,
-        id: item.Id,
+        stackId: item.Id,
         type: item.Type,
         regular: item.Regular,
         orphaned: item.Orphaned,

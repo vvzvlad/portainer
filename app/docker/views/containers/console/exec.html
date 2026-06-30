@@ -1,14 +1,4 @@
-<page-header
-  title="'Container console'"
-  breadcrumbs="[
-    { label:'Containers', link:'docker.containers' },
-    {
-      label:(container.Name | trimcontainername),
-      link: 'docker.containers.container',
-      linkParams: { id: container.Id },
-    }, 'Console']"
->
-</page-header>
+<page-header title="'Container console'" breadcrumbs="breadcrumbs"> </page-header>
 
 <div class="row" ng-init="initView()" ng-show="loaded">
   <div class="col-lg-12 col-md-12 col-xs-12">

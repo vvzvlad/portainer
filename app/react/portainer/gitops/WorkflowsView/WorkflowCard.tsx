@@ -91,7 +91,7 @@ function getStackLink(item: Workflow): { to: string; params: object } {
     params: {
       endpointId: item.target.endpointId,
       name: item.name,
-      id: item.id,
+      stackId: item.id,
       type,
       regular: true,
     },
