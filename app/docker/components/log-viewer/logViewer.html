@@ -1,21 +1,39 @@
 <div class="row">
   <div class="col-sm-12">
     <rd-widget>
-      <!-- The controls bar is projected into the widget header (default transclude
-           slot) so the "Log viewer settings" title and the controls share one
-           horizontal line, freeing vertical space for the log pane below. -->
-      <rd-widget-header icon="file" title-text="Log viewer settings">
+      <!-- Top bar: the "Logs" title sits on the left while the Search input and
+           the Copy / Download buttons are projected into the header's default
+           transclude slot, where they render right-aligned. -->
+      <rd-widget-header icon="file" title-text="Logs">
         <form class="form-horizontal !m-0">
-          <!-- Compact single-row settings bar: every control sits inline and
-               wraps onto extra rows only on narrow widths. -->
           <div class="flex flex-wrap items-center justify-end gap-x-4 gap-y-2">
-            <por-switch-field label-class="'!w-auto'" checked="$ctrl.state.wrapLines" label="'Wrap lines'" on-change="($ctrl.handleLogsWrapLinesChange)"></por-switch-field>
-            <por-switch-field
-              label-class="'!w-auto'"
-              checked="$ctrl.displayTimestamps"
-              label="'Display timestamps'"
-              on-change="($ctrl.handleDisplayTimestampsChange)"
-            ></por-switch-field>
+            <div class="flex items-center gap-x-2" style="min-width: 160px">
+              <label for="logs_search" class="control-label !w-auto whitespace-nowrap !p-0 text-left"> Search </label>
+              <input class="form-control flex-1" type="text" name="logs_search" ng-model="$ctrl.state.search" placeholder="Filter..." />
+            </div>
+            <div class="flex flex-wrap items-center gap-1" ng-if="$ctrl.state.copySupported">
+              <button
+                class="btn btn-primary btn-sm"
+                ng-click="$ctrl.copy()"
+                ng-disabled="($ctrl.state.filteredLogs.length === 1 && !$ctrl.state.filteredLogs[0].line) || !$ctrl.state.filteredLogs.length"
+                ><pr-icon icon="'copy'" class-name="'space-right'"></pr-icon>Copy</button
+              >
+              <button class="btn btn-primary btn-sm" type="button" ng-click="$ctrl.downloadLogs()" style="margin-left: 0" data-cy="download-logs-button"
+                ><pr-icon icon="'download'"></pr-icon> Download logs</button
+              >
+              <span>
+                <pr-icon id="refreshRateChange" icon="'check'" mode="'success'" style="display: none"></pr-icon>
+              </span>
+            </div>
+          </div>
+        </form>
+      </rd-widget-header>
+      <rd-widget-body>
+        <!-- Toolbar row: a single clean, left-aligned horizontal row holding the
+             remaining controls (Since / Lines / Wrap lines / Display timestamps),
+             instead of stacked form-groups. -->
+        <form class="form-horizontal !m-0">
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
             <div class="flex items-center gap-x-2">
               <label for="logs_since" class="control-label !w-auto whitespace-nowrap !p-0 text-left"> Since </label>
               <select class="form-control !w-auto" ng-model="$ctrl.sinceTimestamp" id="logs_since">
@@ -27,27 +45,16 @@
               <label for="lines_count" class="control-label !w-auto whitespace-nowrap !p-0 text-left"> Lines </label>
               <input class="form-control !w-24" type="number" name="lines_count" ng-model="$ctrl.lineCount" placeholder="Lines..." />
             </div>
-            <div class="flex items-center gap-x-2" style="min-width: 160px">
-              <label for="logs_search" class="control-label !w-auto whitespace-nowrap !p-0 text-left"> Search </label>
-              <input class="form-control flex-1" type="text" name="logs_search" ng-model="$ctrl.state.search" placeholder="Filter..." />
-            </div>
-            <div class="flex flex-wrap items-center gap-1" ng-if="$ctrl.state.copySupported">
-              <button class="btn btn-primary btn-sm" type="button" ng-click="$ctrl.downloadLogs()" style="margin-left: 0" data-cy="download-logs-button"
-                ><pr-icon icon="'download'"></pr-icon> Download logs</button
-              >
-              <button
-                class="btn btn-primary btn-sm"
-                ng-click="$ctrl.copy()"
-                ng-disabled="($ctrl.state.filteredLogs.length === 1 && !$ctrl.state.filteredLogs[0].line) || !$ctrl.state.filteredLogs.length"
-                ><pr-icon icon="'copy'" class-name="'space-right'"></pr-icon>Copy</button
-              >
-              <span>
-                <pr-icon id="refreshRateChange" icon="'check'" mode="'success'" style="display: none"></pr-icon>
-              </span>
-            </div>
+            <por-switch-field label-class="'!w-auto'" checked="$ctrl.state.wrapLines" label="'Wrap lines'" on-change="($ctrl.handleLogsWrapLinesChange)"></por-switch-field>
+            <por-switch-field
+              label-class="'!w-auto'"
+              checked="$ctrl.displayTimestamps"
+              label="'Display timestamps'"
+              on-change="($ctrl.handleDisplayTimestampsChange)"
+            ></por-switch-field>
           </div>
         </form>
-      </rd-widget-header>
+      </rd-widget-body>
     </rd-widget>
   </div>
 </div>
