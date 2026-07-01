@@ -87,21 +87,46 @@ describe('LogViewer', () => {
     expect(screen.getByText('ana')).toBeVisible();
   });
 
-  it('shows the line-number gutter only when the toggle is on', async () => {
+  it('shows the line-number gutter by default and hides it when toggled off', async () => {
     const user = userEvent.setup();
     const { container } = renderViewer(['one\ntwo\n']);
 
     await screen.findByText('one');
-    expect(container.querySelector('.log-viewer-gutter')).toBeNull();
+
+    // Line numbers default on: the gutter is present immediately.
+    const gutters = container.querySelectorAll('.log-viewer-gutter');
+    expect(gutters[0]).toHaveTextContent('1');
+    expect(gutters[1]).toHaveTextContent('2');
 
     await user.click(screen.getByTestId('log-viewer-line-numbers'));
 
     await waitFor(() => {
-      expect(container.querySelector('.log-viewer-gutter')).not.toBeNull();
+      expect(container.querySelector('.log-viewer-gutter')).toBeNull();
     });
-    const gutters = container.querySelectorAll('.log-viewer-gutter');
-    expect(gutters[0]).toHaveTextContent('1');
-    expect(gutters[1]).toHaveTextContent('2');
+  });
+
+  it('renders the combined datetime range picker (single from – to control)', async () => {
+    renderViewer(['ready\n']);
+    await screen.findByText('ready');
+
+    // A single combined control replaces the former separate From/To fields.
+    const picker = screen.getByTestId('log-viewer-datetime-range');
+    expect(picker).toBeInTheDocument();
+    // It is the datetime range variant (includes time), not date-only.
+    expect(
+      picker.querySelector('.react-datetimerange-picker')
+    ).not.toBeNull();
+  });
+
+  it('renders an icon on the line-number, timestamp and wrap toggles', async () => {
+    renderViewer(['x\n']);
+    await screen.findByText('x');
+
+    ['log-viewer-line-numbers', 'log-viewer-timestamps', 'log-viewer-wrap'].forEach(
+      (dataCy) => {
+        expect(screen.getByTestId(dataCy).querySelector('svg')).not.toBeNull();
+      }
+    );
   });
 
   it('toggles line wrapping via the Wrap lines button', async () => {

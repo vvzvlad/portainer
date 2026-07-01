@@ -1,13 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { saveAs } from 'file-saver';
+import DateTimeRangePicker from '@wojtekmaj/react-datetimerange-picker';
 import {
+  Calendar,
+  Clock,
   Download,
   File,
+  List,
   Maximize2,
   Minimize2,
   RefreshCw,
+  WrapText,
+  X,
 } from 'lucide-react';
+
+import '@wojtekmaj/react-datetimerange-picker/dist/DateTimeRangePicker.css';
+import 'react-calendar/dist/Calendar.css';
+import 'react-datetime-picker/dist/DateTimePicker.css';
 
 import { concatLogsToString } from '@/docker/helpers/logHelper';
 import { FormattedLine } from '@/docker/helpers/logHelper/types';
@@ -17,7 +27,6 @@ import { Button, CopyButton } from '@@/buttons';
 import { Icon } from '@@/Icon';
 import { Input } from '@@/form-components/Input';
 import { Checkbox } from '@@/form-components/Checkbox';
-import { DateTimeField } from '@@/DateTimeField';
 
 import { StreamLogsFn } from './types';
 import { useLogViewer } from './useLogViewer';
@@ -52,7 +61,7 @@ export function LogViewer({
   // Presentation state (the hook owns only the line buffer + network lifecycle).
   const [search, setSearch] = useState('');
   const [filterResults, setFilterResults] = useState(false);
-  const [lineNumbers, setLineNumbers] = useState(false);
+  const [lineNumbers, setLineNumbers] = useState(true);
   const [timestamps, setTimestamps] = useState(false);
   const [wrapLines, setWrapLines] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -210,21 +219,31 @@ export function LogViewer({
 
               {/* Toolbar row: range picker / lines / toggles / auto refresh */}
               <div className="flex flex-wrap items-end gap-x-4 gap-y-2 px-4 py-2">
-                <div className="flex items-end gap-x-2">
-                  <DateTimeField
-                    name="log-viewer-since"
-                    label="From"
-                    value={since}
-                    onChange={setSince}
-                    data-cy="log-viewer-since"
-                  />
-                  <DateTimeField
-                    name="log-viewer-until"
-                    label="To"
-                    value={until}
-                    onChange={setUntil}
-                    data-cy="log-viewer-until"
-                  />
+                <div className="flex items-center gap-x-2">
+                  <span className="control-label !w-auto whitespace-nowrap !p-0 text-left">
+                    Time range
+                  </span>
+                  {/* One combined "from – to" datetime range control (with
+                      time), matching the reference. Clearing it (null) drops
+                      the closed time window. */}
+                  <div data-cy="log-viewer-datetime-range">
+                    <DateTimeRangePicker
+                      format="y-MM-dd HH:mm"
+                      className="form-control [&>div]:border-0"
+                      value={since || until ? [since, until] : null}
+                      onChange={(value) => {
+                        if (Array.isArray(value)) {
+                          setSince(value[0]);
+                          setUntil(value[1]);
+                          return;
+                        }
+                        setSince(value);
+                        setUntil(null);
+                      }}
+                      calendarIcon={<Calendar />}
+                      clearIcon={<X />}
+                    />
+                  </div>
                 </div>
                 <div className="flex items-center gap-x-2">
                   <label
@@ -255,6 +274,7 @@ export function LogViewer({
                     active={lineNumbers}
                     onChange={setLineNumbers}
                     label="Line numbers"
+                    icon={List}
                     title="Toggle line numbers"
                     data-cy="log-viewer-line-numbers"
                   />
@@ -262,6 +282,7 @@ export function LogViewer({
                     active={timestamps}
                     onChange={setTimestamps}
                     label="Timestamp"
+                    icon={Clock}
                     title="Toggle timestamps"
                     data-cy="log-viewer-timestamps"
                   />
@@ -269,6 +290,7 @@ export function LogViewer({
                     active={wrapLines}
                     onChange={setWrapLines}
                     label="Wrap lines"
+                    icon={WrapText}
                     title="Toggle line wrapping"
                     data-cy="log-viewer-wrap"
                   />
