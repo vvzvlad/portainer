@@ -25,16 +25,6 @@
   box-shadow: 0 3px 10px -2px rgb(161 170 166 / 80%);
 }
 
-.teaser {
-  @apply border-2;
-  border-color: var(--BE-only);
-  color: var(--text-muted-color);
-}
-
-.teaser:hover {
-  box-shadow: 0 3px 10px -2px rgb(161 170 166 / 80%);
-}
-
 .active {
   @apply border-blue-6 bg-blue-3;
   @apply th-dark:border-blue-7 th-dark:bg-blue-10;

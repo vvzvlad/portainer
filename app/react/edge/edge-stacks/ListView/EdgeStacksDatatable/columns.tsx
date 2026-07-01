@@ -2,8 +2,6 @@ import { createColumnHelper } from '@tanstack/react-table';
 import _ from 'lodash';
 
 import { isoDateFromTimestamp } from '@/portainer/filters/filters';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
-import { GitCommitLink } from '@/react/portainer/gitops/GitCommitLink';
 
 import { buildNameColumnFromObject } from '@@/datatables/buildNameColumn';
 import { Link } from '@@/Link';
@@ -43,32 +41,6 @@ export const columns = _.compact([
       },
     }
   ),
-  isBE &&
-    columnHelper.accessor(
-      (item) =>
-        item.StatusSummary?.AggregatedStatus?.[StatusType.ImagesPulled] || 0,
-      {
-        header: 'Images pre-pulled',
-        cell: ({ getValue, row: { original: item } }) => {
-          if (!item.PrePullImage) {
-            return <div className="text-center">-</div>;
-          }
-
-          return (
-            <DeploymentCounter
-              count={getValue()}
-              type={StatusType.ImagesPulled}
-              total={item.NumDeployments}
-            />
-          );
-        },
-        enableSorting: false,
-        enableHiding: false,
-        meta: {
-          className: '[&>*]:justify-center',
-        },
-      }
-    ),
   columnHelper.accessor(
     (item) =>
       item.StatusSummary?.AggregatedStatus?.[StatusType.DeploymentReceived] ||
@@ -147,32 +119,6 @@ export const columns = _.compact([
     cell: ({ getValue }) => isoDateFromTimestamp(getValue()),
     enableHiding: false,
   }),
-  isBE &&
-    columnHelper.accessor(
-      (item) =>
-        item.GitConfig ? item.GitConfig.ConfigHash : item.StackFileVersion,
-      {
-        header: 'Target Version',
-        enableSorting: false,
-        cell: ({ row: { original: item } }) => {
-          if (item.GitConfig) {
-            return (
-              <div className="text-center">
-                <GitCommitLink
-                  baseURL={item.GitConfig.URL}
-                  commitHash={item.GitConfig.ConfigHash}
-                />
-              </div>
-            );
-          }
-
-          return <div className="text-center">{item.StackFileVersion}</div>;
-        },
-        meta: {
-          className: '[&>*]:justify-center',
-        },
-      }
-    ),
 ]);
 
 function StatusHeader() {

@@ -1,7 +1,5 @@
 import { useField, Field } from 'formik';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-
 import { FormControl } from '@@/form-components/FormControl';
 import { TextArea } from '@@/form-components/Input/Textarea';
 import { SwitchField } from '@@/form-components/SwitchField';
@@ -23,7 +21,6 @@ export function ScreenBannerFieldset() {
             checked={isEnabled}
             name="toggle_login_banner"
             onChange={(checked) => setIsEnabled(checked)}
-            featureId={FeatureId.CUSTOM_LOGIN_BANNER}
           />
         </div>
 

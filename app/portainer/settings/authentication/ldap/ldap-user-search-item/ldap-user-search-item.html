@@ -6,8 +6,6 @@
       class="btn btn-sm btn-danger"
       type="button"
       ng-click="$ctrl.onRemoveClick($ctrl.index)"
-      limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-      limited-feature-tabindex="-1"
     >
       <pr-icon icon="'trash-2'"></pr-icon>
     </button>
@@ -25,16 +23,12 @@
             ng-model="$ctrl.config.UserNameAttribute"
             uib-btn-radio="'sAMAccountName'"
             style="margin-left: 0px"
-            limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-            limited-feature-tabindex="-1"
             >username</button
           >
           <button
             class="btn btn-primary"
             ng-model="$ctrl.config.UserNameAttribute"
             uib-btn-radio="'userPrincipalName'"
-            limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-            limited-feature-tabindex="-1"
             >user@domainname</button
           >
         </div>
@@ -54,7 +48,6 @@
     label="'User Search Path (optional)'"
     suffix="$ctrl.domainSuffix"
     on-change="($ctrl.onBaseDNChange)"
-    limited-feature-id="$ctrl.limitedFeatureId"
   ></ldap-settings-dn-builder>
 
   <div class="form-group no-margin-last-child">
@@ -65,8 +58,6 @@
         class="label label-default interactive vertical-center"
         style="margin-left: 10px; border: 0"
         ng-click="$ctrl.addGroup()"
-        limited-feature-dir="{{::$ctrl.limitedFeatureId}}"
-        limited-feature-tabindex="-1"
       >
         <pr-icon icon="'plus-circle'"></pr-icon>
         add another group
@@ -82,7 +73,6 @@
               suffix="$ctrl.domainSuffix"
               on-change="($ctrl.onGroupChange)"
               on-remove-click="($ctrl.removeGroup)"
-              limited-feature-id="$ctrl.limitedFeatureId"
             ></ldap-settings-group-dn-builder>
           </rd-widget-body>
         </rd-widget>

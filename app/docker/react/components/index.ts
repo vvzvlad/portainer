@@ -9,7 +9,6 @@ import { DockerfileDetails } from '@/react/docker/images/ItemView/DockerfileDeta
 import { HealthStatus } from '@/react/docker/containers/ItemView/HealthStatus';
 import { GpusList } from '@/react/docker/host/SetupView/GpusList';
 import { InsightsBox } from '@/react/components/InsightsBox';
-import { BetaAlert } from '@/react/portainer/environments/update-schedules/common/BetaAlert';
 import { EventsDatatable } from '@/react/docker/events/EventsDatatables';
 import { AgentHostBrowser } from '@/react/docker/host/BrowseView/AgentHostBrowser';
 import { AgentVolumeBrowser } from '@/react/docker/volumes/BrowseView/AgentVolumeBrowser';
@@ -59,7 +58,6 @@ const ngModule = angular
       'className',
     ])
   )
-  .component('betaAlert', r2a(BetaAlert, ['className', 'message', 'isHtml']))
   .component(
     'agentHostBrowserReact',
     r2a(withUIRouter(withCurrentUser(AgentHostBrowser)), [

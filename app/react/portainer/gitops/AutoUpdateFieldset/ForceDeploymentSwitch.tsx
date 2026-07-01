@@ -1,7 +1,5 @@
 import { ReactNode } from 'react';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-
 import { SwitchField } from '@@/form-components/SwitchField';
 
 export function ForceDeploymentSwitch({
@@ -21,7 +19,6 @@ export function ForceDeploymentSwitch({
         <SwitchField
           name="forceUpdate"
           data-cy="gitops-force-redeployment-switch"
-          featureId={FeatureId.FORCE_REDEPLOYMENT}
           checked={checked}
           label={label}
           tooltip={tooltip}

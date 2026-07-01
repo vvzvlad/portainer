@@ -2,7 +2,6 @@ import { Layers } from 'lucide-react';
 import { Row } from '@tanstack/react-table';
 
 import { useAuthorizations, useIsEdgeAdmin } from '@/react/hooks/useUser';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 
 import { Datatable } from '@@/datatables';
 import { useRepeater } from '@@/datatables/useRepeater';
@@ -82,10 +81,6 @@ function allowSelection(
   canManageStacks: boolean
 ) {
   if (isExternalStack(item)) {
-    return false;
-  }
-
-  if (isBE && isOrphanedStack(item) && !isAdmin) {
     return false;
   }
 

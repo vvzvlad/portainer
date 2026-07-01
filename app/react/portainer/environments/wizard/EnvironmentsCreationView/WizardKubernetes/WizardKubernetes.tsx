@@ -1,20 +1,15 @@
 import { useState } from 'react';
-import { Zap, UploadCloud } from 'lucide-react';
-import _ from 'lodash';
+import { Zap } from 'lucide-react';
 
 import {
   ContainerEngine,
   Environment,
 } from '@/react/portainer/environments/types';
 import { commandsTabs } from '@/react/edge/components/EdgeScriptForm/scripts';
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 import EdgeAgentStandardIcon from '@/react/edge/components/edge-agent-standard.svg?c';
-import EdgeAgentAsyncIcon from '@/react/edge/components/edge-agent-async.svg?c';
 
 import { BoxSelectorOption } from '@@/BoxSelector/types';
 import { BoxSelector } from '@@/BoxSelector';
-import { BEOverlay } from '@@/BEFeatureIndicator/BEOverlay';
 import { FormSection } from '@@/form-components/FormSection';
 import { Badge } from '@@/Badge';
 import { ExternalLink } from '@@/ExternalLink';
@@ -24,19 +19,14 @@ import { AnalyticsStateKey } from '../types';
 import { EdgeAgentTab } from '../shared/EdgeAgentTab';
 
 import { AgentPanel } from './AgentPanel';
-import { KubeConfigTeaserForm } from './KubeConfigTeaserForm';
 
 interface Props {
   onCreate(environment: Environment, analytics: AnalyticsStateKey): void;
 }
 
-type CreationType =
-  | 'edgeAgentStandard'
-  | 'edgeAgentAsync'
-  | 'agent'
-  | 'kubeconfig';
+type CreationType = 'edgeAgentStandard' | 'agent';
 
-const primaryOptions: BoxSelectorOption<CreationType>[] = _.compact([
+const primaryOptions: BoxSelectorOption<CreationType>[] = [
   {
     id: 'edgeAgentStandard',
     icon: EdgeAgentStandardIcon,
@@ -58,16 +48,7 @@ const primaryOptions: BoxSelectorOption<CreationType>[] = _.compact([
     ),
     value: 'edgeAgentStandard',
   },
-  isBE && {
-    id: 'edgeAgentAsync',
-    icon: EdgeAgentAsyncIcon,
-    iconType: 'badge',
-    label: 'Edge Agent Async',
-    description:
-      'The remote environment will initiate connections to the Portainer server, without the ability to open a real-time tunnel. The Portainer server must be accessible from the Edge Agent environment.',
-    value: 'edgeAgentAsync',
-  },
-]);
+];
 
 const legacyOptions: BoxSelectorOption<CreationType>[] = [
   {
@@ -78,15 +59,6 @@ const legacyOptions: BoxSelectorOption<CreationType>[] = [
     value: 'agent',
     description:
       'The Portainer Server will initiate connections to the remote environment. The agent on the remote environment must be accessible from the Portainer server environment.',
-  },
-  {
-    id: 'kubeconfig_endpoint',
-    icon: UploadCloud,
-    iconType: 'badge',
-    label: 'Import',
-    value: 'kubeconfig',
-    description: 'Import an existing Kubernetes config.',
-    feature: FeatureId.K8S_CREATE_FROM_KUBECONFIG,
   },
 ];
 
@@ -157,25 +129,6 @@ export function WizardKubernetes({ onCreate }: Props) {
             commands={[{ ...commandsTabs.k8sLinux, label: 'Linux' }]}
             containerEngine={ContainerEngine.Kubernetes}
           />
-        );
-      case 'edgeAgentAsync':
-        return (
-          <EdgeAgentTab
-            asyncMode
-            onCreate={(environment) =>
-              onCreate(environment, 'kubernetesEdgeAgentAsync')
-            }
-            commands={[{ ...commandsTabs.k8sLinux, label: 'Linux' }]}
-            containerEngine={ContainerEngine.Kubernetes}
-          />
-        );
-      case 'kubeconfig':
-        return (
-          <div className="mb-3">
-            <BEOverlay featureId={FeatureId.K8S_CREATE_FROM_KUBECONFIG}>
-              <KubeConfigTeaserForm />
-            </BEOverlay>
-          </div>
         );
       default:
         throw new Error('Creation type not supported');

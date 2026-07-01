@@ -13,7 +13,6 @@ import { User } from '@/portainer/users/types';
 import { useLoadCurrentUser } from '@/portainer/users/queries/useLoadCurrentUser';
 
 import { useEnvironment } from '../portainer/environments/queries';
-import { isBE } from '../portainer/feature-flags/feature-flags.service';
 
 interface State {
   user?: User;
@@ -120,7 +119,7 @@ export function useAuthorizations(
     return { authorized: true, isLoading: false };
   }
 
-  if (!isBE && adminOnlyCE) {
+  if (adminOnlyCE) {
     return { authorized: false, isLoading: false };
   }
 
@@ -149,33 +148,17 @@ export function useIsEnvironmentAdmin({
  *
  * @private Please use `useAuthorizations` instead. Exported only for angular's authentication service app/portainer/services/authentication.js:154
  */
+/* eslint-disable @typescript-eslint/no-unused-vars -- signature kept for the AngularJS authentication.js caller; args are unused because CE has no per-endpoint authorization gating (that only existed in the Business Edition). */
 export function hasAuthorizations(
   user: User,
   authorizations: string | string[],
   environmentId?: EnvironmentId
 ) {
-  if (!isBE) {
-    return true;
-  }
-
-  const authorizationsArray =
-    typeof authorizations === 'string' ? [authorizations] : authorizations;
-
-  if (authorizationsArray.length === 0) {
-    return true;
-  }
-
-  if (!environmentId) {
-    return false;
-  }
-
-  const userEndpointAuthorizations =
-    user.EndpointAuthorizations?.[environmentId] || [];
-
-  return authorizationsArray.some(
-    (authorization) => userEndpointAuthorizations[authorization]
-  );
+  // In CE every authenticated user passes endpoint authorization checks here;
+  // per-endpoint authorization gating only existed in the Business Edition.
+  return true;
 }
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 interface AuthorizedProps {
   authorizations: string | string[];

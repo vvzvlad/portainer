@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-
 import { DnEntriesField } from './DnEntriesField';
 import { parseDN, buildDN, DnEntry } from './ldap-dn-utils';
 
@@ -10,16 +8,9 @@ interface Props {
   suffix: string;
   onChange: (dn: string) => void;
   label?: string;
-  limitedFeatureId?: FeatureId;
 }
 
-export function DnBuilder({
-  value,
-  suffix,
-  onChange,
-  label,
-  limitedFeatureId,
-}: Props) {
+export function DnBuilder({ value, suffix, onChange, label }: Props) {
   const [entries, setEntries] = useState<DnEntry[]>([]);
 
   const handleEntriesChange = useCallback(
@@ -38,11 +29,6 @@ export function DnBuilder({
   }, [value, suffix, handleEntriesChange]);
 
   return (
-    <DnEntriesField
-      value={entries}
-      onChange={handleEntriesChange}
-      label={label}
-      limitedFeatureId={limitedFeatureId}
-    />
+    <DnEntriesField value={entries} onChange={handleEntriesChange} label={label} />
   );
 }

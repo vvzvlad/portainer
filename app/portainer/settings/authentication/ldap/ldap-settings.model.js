@@ -46,16 +46,3 @@ export function buildAdSettingsModel() {
 
   return settings;
 }
-
-export function buildOpenLDAPSettingsModel() {
-  const settings = buildLdapSettingsModel();
-
-  settings.ServerType = 1;
-  settings.AnonymousMode = false;
-  settings.SearchSettings[0].UserNameAttribute = 'uid';
-  settings.SearchSettings[0].Filter = '(objectClass=inetOrgPerson)';
-  settings.GroupSearchSettings[0].GroupAttribute = 'member';
-  settings.GroupSearchSettings[0].GroupFilter = '(objectClass=groupOfNames)';
-
-  return settings;
-}

@@ -9,7 +9,6 @@ import { createPersistedStore } from '@@/datatables/types';
 import { AddButton, Button } from '@@/buttons';
 import { useTableState } from '@@/datatables/useTableState';
 
-import { isBE } from '../../feature-flags/feature-flags.service';
 import { isSortType } from '../queries/useEnvironmentList';
 import { EnvironmentStatus } from '../types';
 
@@ -81,16 +80,6 @@ export function EnvironmentsDatatable({
           >
             Remove
           </Button>
-
-          {isBE && (
-            <AddButton
-              color="secondary"
-              data-cy="environments-auto-onboarding-button"
-              to="portainer.endpoints.edgeAutoCreateScript"
-            >
-              Auto onboarding
-            </AddButton>
-          )}
 
           <AddButton
             to="portainer.wizard.endpoints"

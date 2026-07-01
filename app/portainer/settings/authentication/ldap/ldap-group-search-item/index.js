@@ -10,6 +10,5 @@ export const ldapGroupSearchItem = {
     baseFilter: '@',
 
     onRemoveClick: '<',
-    limitedFeatureId: '<',
   },
 };

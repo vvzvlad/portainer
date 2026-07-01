@@ -1,13 +1,9 @@
 import { FormikErrors } from 'formik';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-import { isLimitedToBE } from '@/react/portainer/feature-flags/feature-flags.service';
-
 import { FileUploadField } from '@@/form-components/FileUpload';
 import { FormControl } from '@@/form-components/FormControl';
 import { FormSection } from '@@/form-components/FormSection';
 import { SwitchField } from '@@/form-components/SwitchField';
-import { BEFeatureIndicator } from '@@/BEFeatureIndicator';
 
 export interface LdapSecurityConfig {
   startTLS: boolean;
@@ -22,7 +18,6 @@ interface Props {
   errors?: FormikErrors<LdapSecurityConfig>;
   title?: string;
   uploadState?: 'uploading' | 'success';
-  limitedFeatureId?: FeatureId;
 }
 
 export function LdapSecurityFieldset({
@@ -31,10 +26,8 @@ export function LdapSecurityFieldset({
   errors,
   title = 'LDAP security',
   uploadState,
-  limitedFeatureId,
 }: Props) {
   const showCaCert = values.tls || (values.startTLS && !values.tlsSkipVerify);
-  const isCaCertLimited = isLimitedToBE(limitedFeatureId);
 
   return (
     <FormSection title={title}>
@@ -47,7 +40,6 @@ export function LdapSecurityFieldset({
               onChange={(checked) => onChange({ startTLS: checked })}
               tooltip="Enable this option if you want to use StartTLS to secure the connection to the server. Ignored if Use TLS is selected."
               labelClass="col-sm-3 col-lg-2"
-              featureId={limitedFeatureId}
               data-cy="starttls-toggle"
             />
           </div>
@@ -63,7 +55,6 @@ export function LdapSecurityFieldset({
               onChange={(checked) => onChange({ tls: checked })}
               tooltip="Enable this option if you need to specify TLS certificates to connect to the LDAP server."
               labelClass="col-sm-3 col-lg-2"
-              featureId={limitedFeatureId}
               data-cy="tls-toggle"
             />
           </div>
@@ -78,7 +69,6 @@ export function LdapSecurityFieldset({
             onChange={(checked) => onChange({ tlsSkipVerify: checked })}
             tooltip="Skip the verification of the server TLS certificate. Not recommended on unsecured networks."
             labelClass="col-sm-3 col-lg-2"
-            featureId={limitedFeatureId}
             data-cy="tls-skip-verify-toggle"
           />
         </div>
@@ -98,11 +88,7 @@ export function LdapSecurityFieldset({
             required
             data-cy="tls-ca-cert-upload"
             state={uploadState}
-            disabled={isCaCertLimited}
           />
-          {limitedFeatureId && (
-            <BEFeatureIndicator featureId={limitedFeatureId} />
-          )}
         </FormControl>
       )}
     </FormSection>

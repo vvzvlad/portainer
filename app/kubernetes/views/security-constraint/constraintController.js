@@ -1,12 +1,10 @@
 import angular from 'angular';
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
 
 angular.module('portainer.kubernetes').controller('KubernetesSecurityConstraintController', [
   '$scope',
   'EndpointProvider',
   'EndpointService',
   function ($scope, EndpointProvider, EndpointService) {
-    $scope.limitedFeaturePodSecurityPolicy = FeatureId.POD_SECURITY_POLICY_CONSTRAINT;
     $scope.state = {
       viewReady: false,
       actionInProgress: false,

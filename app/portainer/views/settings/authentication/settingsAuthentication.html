@@ -38,17 +38,6 @@
             is-ldap-form-valid="isLDAPFormValid"
           ></ldap-settings>
 
-          <ad-settings
-            ng-if="authenticationMethodSelected(4)"
-            settings="formValues.ldap.adSettings"
-            tlsca-cert="formValues.TLSCACert"
-            state="state"
-            connectivity-check="LDAPConnectivityCheck"
-            on-save-settings="(saveSettings)"
-            save-button-state="state.actionInProgress"
-            is-ldap-form-valid="isLDAPFormValid()"
-          ></ad-settings>
-
           <oauth-settings
             ng-if="authenticationMethodSelected(3)"
             settings="OAuthSettings"

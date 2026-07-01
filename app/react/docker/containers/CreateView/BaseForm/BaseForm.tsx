@@ -9,7 +9,6 @@ import { NodeSelector } from '@/react/docker/agent/NodeSelector';
 import { useIsSwarm } from '@/react/docker/proxy/queries/useInfo';
 import { useEnvironmentId } from '@/react/hooks/useEnvironmentId';
 import { isAgentEnvironment } from '@/react/portainer/environments/utils';
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
 
 import { FormSection } from '@@/form-components/FormSection';
 import { SwitchField } from '@@/form-components/SwitchField';
@@ -123,7 +122,6 @@ export function BaseForm({
                     onChange={(enableWebhook) =>
                       setFieldValue('enableWebhook', enableWebhook)
                     }
-                    featureId={FeatureId.CONTAINER_WEBHOOK}
                     labelClass="col-sm-3 col-lg-2"
                   />
                 </div>

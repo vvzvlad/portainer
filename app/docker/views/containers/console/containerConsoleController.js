@@ -1,5 +1,7 @@
 import { baseHref } from '@/portainer/helpers/pathHelper';
 import { commandStringToArray } from '@/docker/helpers/containers';
+import { trimContainerName } from '@/docker/filters/utils';
+import { getContainerSubTabBreadcrumbs } from '@/react/docker/containers/ItemView/containerBreadcrumbs';
 import { isLinuxTerminalCommand, LINUX_SHELL_INIT_COMMANDS } from '@@/Terminal/Terminal';
 
 angular.module('portainer.docker').controller('ContainerConsoleController', [
@@ -126,9 +128,15 @@ angular.module('portainer.docker').controller('ContainerConsoleController', [
 
     $scope.initView = function () {
       HttpRequestHelper.setPortainerAgentTargetHeader($transition$.params().nodeName);
+      // Set the trail up-front (without the container name) so it survives the
+      // load window and a load error; the success path fills in the name.
+      $scope.breadcrumbs = getContainerSubTabBreadcrumbs($transition$.to().name, $transition$.params(), '', 'Console');
       return ContainerService.container(endpoint.Id, $transition$.params().id)
         .then(function (data) {
           $scope.container = data;
+          // Stack-aware breadcrumb: keeps the stack trail when the container was
+          // opened from a stack, falls back to the global Containers trail otherwise.
+          $scope.breadcrumbs = getContainerSubTabBreadcrumbs($transition$.to().name, $transition$.params(), trimContainerName(data.Name), 'Console');
           return ImageService.image(data.Image);
         })
         .then(function (data) {

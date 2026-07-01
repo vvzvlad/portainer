@@ -15,7 +15,6 @@ import { SystemBadge } from '@@/Badge/SystemBadge';
 import { IngressClassDatatable } from '../../../cluster/ingressClass/IngressClassDatatable';
 import { useIngressControllerClassMapQuery } from '../../../cluster/ingressClass/useIngressControllerClassMap';
 import { CreateNamespaceFormValues } from '../../CreateView/types';
-import { AnnotationsBeTeaser } from '../../../annotations/AnnotationsBeTeaser';
 import { isDefaultNamespace } from '../../isDefaultNamespace';
 import { useIsSystemNamespace } from '../../queries/useIsSystemNamespace';
 
@@ -24,7 +23,6 @@ import { StorageQuotaFormSection } from './StorageQuotaFormSection/StorageQuotaF
 import { RegistriesFormSection } from './RegistriesFormSection';
 import { ResourceQuotaFormValues } from './ResourceQuotaFormSection/types';
 import { ResourceQuotaFormSection } from './ResourceQuotaFormSection';
-import { LoadBalancerFormSection } from './LoadBalancerFormSection';
 import { ToggleSystemNamespaceButton } from './ToggleSystemNamespaceButton';
 
 const namespaceWriteAuth = 'K8sResourcePoolDetailsW';
@@ -64,8 +62,6 @@ export function NamespaceInnerForm({
     return null;
   }
 
-  const useLoadBalancer =
-    environmentQuery.data?.Kubernetes.Configuration.UseLoadBalancer;
   const enableResourceOverCommit =
     environmentQuery.data?.Kubernetes.Configuration.EnableResourceOverCommit;
   const enableIngressControllersPerNamespace =
@@ -98,7 +94,6 @@ export function NamespaceInnerForm({
           />
         )}
       </FormControl>
-      <AnnotationsBeTeaser />
       {(values.resourceQuota.enabled || !isEditingDisabled) && (
         <ResourceQuotaFormSection
           isEdit={isEdit}
@@ -112,7 +107,6 @@ export function NamespaceInnerForm({
           isEditingDisabled={isEditingDisabled}
         />
       )}
-      {useLoadBalancer && <LoadBalancerFormSection />}
       {enableIngressControllersPerNamespace && (
         <Authorized authorizations={[namespaceWriteAuth]}>
           <FormSection title="Networking">

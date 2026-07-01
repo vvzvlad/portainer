@@ -1,12 +1,10 @@
 import { useMemo } from 'react';
 
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
-
 export function useBaseApiQueryParams(searchTerm: string) {
   return useMemo(
     () => ({
       provisioned: true,
-      updateInformation: isBE,
+      updateInformation: false,
       k8sEnvAdmin: true,
       search: searchTerm || undefined,
     }),

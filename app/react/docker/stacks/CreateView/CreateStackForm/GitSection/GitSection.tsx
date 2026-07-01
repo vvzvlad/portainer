@@ -1,12 +1,9 @@
 import { useFormikContext } from 'formik';
 
 import { GitForm } from '@/react/portainer/gitops/GitForm';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 import { baseStackWebhookUrl } from '@/portainer/helpers/webhookHelper';
 
 import { FormValues } from '../types';
-
-import { StackRelativePathFieldset } from './StackRelativePathFieldset';
 
 interface Props {
   isDockerStandalone?: boolean;
@@ -17,8 +14,7 @@ export function GitSection({ webhookId, isDockerStandalone = false }: Props) {
   const { values, errors, setValues } = useFormikContext<FormValues>();
 
   return (
-    <>
-      <GitForm
+    <GitForm
         value={values.git}
         onChange={(gitValues) =>
           setValues((values) => ({
@@ -38,9 +34,5 @@ export function GitSection({ webhookId, isDockerStandalone = false }: Props) {
         baseWebhookUrl={baseStackWebhookUrl()}
         webhookId={webhookId}
       />
-      {isBE && (
-        <StackRelativePathFieldset isDockerStandalone={isDockerStandalone} />
-      )}
-    </>
   );
 }

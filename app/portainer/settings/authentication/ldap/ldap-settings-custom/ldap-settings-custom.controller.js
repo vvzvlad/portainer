@@ -1,10 +1,7 @@
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
-
 export default class LdapSettingsCustomController {
   /* @ngInject */
   constructor($scope) {
     this.$scope = $scope;
-    this.limitedFeatureId = FeatureId.EXTERNAL_AUTH_LDAP;
 
     this.onAdminGroupSearchSettingsChange = this.onAdminGroupSearchSettingsChange.bind(this);
     this.onAutoPopulateChange = this.onAutoPopulateChange.bind(this);

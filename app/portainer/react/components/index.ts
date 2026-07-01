@@ -4,7 +4,6 @@ import { r2a } from '@/react-tools/react2angular';
 import { withCurrentUser } from '@/react-tools/withCurrentUser';
 import { withReactQuery } from '@/react-tools/withReactQuery';
 import { withUIRouter } from '@/react-tools/withUIRouter';
-import { AnnotationsBeTeaser } from '@/react/kubernetes/annotations/AnnotationsBeTeaser';
 import { withFormValidation } from '@/react-tools/withFormValidation';
 import { withControlledInput } from '@/react-tools/withControlledInput';
 
@@ -32,7 +31,6 @@ import { Terminal } from '@@/Terminal/Terminal';
 import { PortainerSelect } from '@@/form-components/PortainerSelect';
 import { Slider } from '@@/form-components/Slider';
 import { TagButton } from '@@/TagButton';
-import { BETeaserButton } from '@@/BETeaserButton';
 import { CodeEditor } from '@@/CodeEditor';
 import { HelpLink } from '@@/HelpLink';
 import { TextTip } from '@@/Tip/TextTip';
@@ -75,18 +73,6 @@ export const ngModule = angular
       'onChange',
       'value',
       'errors',
-    ])
-  )
-  .component(
-    'beTeaserButton',
-    r2a(BETeaserButton, [
-      'featureId',
-      'heading',
-      'message',
-      'buttonText',
-      'className',
-      'buttonClassName',
-      'data-cy',
     ])
   )
   .component(
@@ -261,7 +247,6 @@ export const ngModule = angular
     'inlineLoader',
     r2a(InlineLoader, ['children', 'className', 'size'])
   )
-  .component('annotationsBeTeaser', r2a(AnnotationsBeTeaser, []))
   .component(
     'shellTerminal',
     r2a(Terminal, [

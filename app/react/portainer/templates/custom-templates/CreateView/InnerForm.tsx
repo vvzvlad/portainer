@@ -40,7 +40,6 @@ export function InnerForm({
     setFieldValue,
     errors,
     isValid,
-    setFieldError,
     setValues,
     isSubmitting,
   } = useFormikContext<FormValues>();
@@ -171,7 +170,6 @@ export function InnerForm({
           }}
           values={values.EdgeSettings}
           errors={errors.EdgeSettings as FormikErrors<EdgeTemplateSettings>}
-          setFieldError={setFieldError}
         />
       )}
 

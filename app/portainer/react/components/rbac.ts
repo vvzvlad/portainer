@@ -12,13 +12,8 @@ export const rbacModule = angular
     r2a(withUIRouter(withReactQuery(AccessDatatable)), [
       'dataset',
       'inheritFrom',
-      'isUpdateEnabled',
       'onRemove',
-      'onUpdate',
-      'showRoles',
-      'showWarning',
       'tableKey',
-      'isUpdatingAccess',
       'isLoading',
     ])
   ).name;

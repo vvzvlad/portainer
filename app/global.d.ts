@@ -76,13 +76,3 @@ interface Window {
     };
   };
 }
-
-declare module 'process' {
-  global {
-    namespace NodeJS {
-      interface ProcessEnv {
-        PORTAINER_EDITION: 'BE' | 'CE';
-      }
-    }
-  }
-}

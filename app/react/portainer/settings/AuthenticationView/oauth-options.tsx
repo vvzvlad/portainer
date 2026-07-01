@@ -1,6 +1,5 @@
 import { Edit } from 'lucide-react';
 
-import { FeatureId } from '@/react/portainer/feature-flags/enums';
 import Microsoft from '@/assets/ico/vendor/microsoft.svg?c';
 import Google from '@/assets/ico/vendor/google.svg?c';
 import Github from '@/assets/ico/vendor/github.svg?c';
@@ -13,7 +12,6 @@ export const options = [
     description: 'Microsoft OAuth provider',
     value: 'microsoft',
     iconType: 'logo',
-    feature: FeatureId.HIDE_INTERNAL_AUTH,
   },
   {
     id: 'google',
@@ -22,7 +20,6 @@ export const options = [
     description: 'Google OAuth provider',
     value: 'google',
     iconType: 'logo',
-    feature: FeatureId.HIDE_INTERNAL_AUTH,
   },
   {
     id: 'github',
@@ -31,7 +28,6 @@ export const options = [
     description: 'Github OAuth provider',
     value: 'github',
     iconType: 'logo',
-    feature: FeatureId.HIDE_INTERNAL_AUTH,
   },
   {
     id: 'custom',

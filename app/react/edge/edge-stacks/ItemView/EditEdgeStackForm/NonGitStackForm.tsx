@@ -6,48 +6,27 @@ import _ from 'lodash';
 
 import { EdgeGroupsSelector } from '@/react/edge/edge-stacks/components/EdgeGroupsSelector';
 import { EdgeStackDeploymentTypeSelector } from '@/react/edge/edge-stacks/components/EdgeStackDeploymentTypeSelector';
-import {
-  DeploymentType,
-  EdgeStack,
-  StaggerOption,
-} from '@/react/edge/edge-stacks/types';
+import { DeploymentType, EdgeStack } from '@/react/edge/edge-stacks/types';
 import { EnvironmentType } from '@/react/portainer/environments/types';
-import { WebhookSettings } from '@/react/portainer/gitops/AutoUpdateFieldset/WebhookSettings';
-import {
-  baseEdgeStackWebhookUrl,
-  createWebhookId,
-} from '@/portainer/helpers/webhookHelper';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
+import { createWebhookId } from '@/portainer/helpers/webhookHelper';
 import { notifySuccess } from '@/portainer/services/notifications';
-import { confirmStackUpdate } from '@/react/common/stacks/common/confirm-stack-update';
 
 import { FormSection } from '@@/form-components/FormSection';
 import { TextTip } from '@@/Tip/TextTip';
-import { SwitchField } from '@@/form-components/SwitchField';
 import { LoadingButton } from '@@/buttons';
 import { FormError } from '@@/form-components/FormError';
-import {
-  EnvironmentVariablesPanel,
-  envVarValidation,
-} from '@@/form-components/EnvironmentVariablesFieldset';
+import { envVarValidation } from '@@/form-components/EnvironmentVariablesFieldset';
 import { usePreventExit } from '@@/WebEditorForm';
 
 import {
   getEdgeStackFile,
   useEdgeStackFile,
 } from '../../queries/useEdgeStackFile';
-import {
-  StaggerFieldset,
-  staggerConfigValidation,
-} from '../../components/StaggerFieldset';
-import { RetryDeployToggle } from '../../components/RetryDeployToggle';
-import { PrePullToggle } from '../../components/PrePullToggle';
+import { staggerConfigValidation } from '../../components/StaggerFieldset';
 import { getDefaultStaggerConfig } from '../../components/StaggerFieldset.types';
 
-import { PrivateRegistryFieldsetWrapper } from './PrivateRegistryFieldsetWrapper';
 import { FormValues } from './types';
 import { useEdgeGroupHasType } from './useEdgeGroupHasType';
-import { useStaggerUpdateStatus } from './useStaggerUpdateStatus';
 import { useUpdateEdgeStackMutation } from './useUpdateEdgeStackMutation';
 import { ComposeForm } from './ComposeForm';
 import { KubernetesForm } from './KubernetesForm';
@@ -85,7 +64,7 @@ export function NonGitStackForm({ edgeStack }: { edgeStack: EdgeStack }) {
     staggerConfig: edgeStack.StaggerConfig || getDefaultStaggerConfig(),
   };
 
-  const versionOptions = getVersions(edgeStack);
+  const versionOptions = undefined;
 
   return (
     <Formik
@@ -104,19 +83,7 @@ export function NonGitStackForm({ edgeStack }: { edgeStack: EdgeStack }) {
   );
 
   async function handleSubmit(values: FormValues) {
-    let rePullImage = false;
-    if (isBE && values.deploymentType === DeploymentType.Compose) {
-      const defaultToggle = values.prePullImage;
-      const result = await confirmStackUpdate(
-        'Do you want to force an update of the stack?',
-        defaultToggle
-      );
-      if (!result) {
-        return;
-      }
-
-      rePullImage = result.repullImageAndRedeploy;
-    }
+    const rePullImage = false;
 
     const updateVersion = !!(
       fileContent !== values.content ||
@@ -156,16 +123,6 @@ export function NonGitStackForm({ edgeStack }: { edgeStack: EdgeStack }) {
     );
   }
 }
-function getVersions(edgeStack: EdgeStack): Array<number> | undefined {
-  if (!isBE) {
-    return undefined;
-  }
-
-  return _.compact([
-    edgeStack.StackFileVersion,
-    edgeStack.PreviousDeploymentInfo?.FileVersion,
-  ]);
-}
 
 function InnerForm({
   edgeStack,
@@ -180,24 +137,14 @@ function InnerForm({
   versionOptions: number[] | undefined;
   isSaved: boolean;
 }) {
-  const {
-    values,
-    setFieldValue,
-    isValid,
-    errors,
-    setValues,
-    setFieldError,
-    initialValues,
-  } = useFormikContext<FormValues>();
+  const { values, setFieldValue, isValid, errors, initialValues } =
+    useFormikContext<FormValues>();
 
   usePreventExit(initialValues.content, values.content, !isSaved);
 
   const { getCachedContent, setContentCache } = useCachedContent();
   const { hasType } = useEdgeGroupHasType(values.edgeGroups);
-  const staggerUpdateStatus = useStaggerUpdateStatus(edgeStack.Id);
   const [selectedVersion, setSelectedVersion] = useState(versionOptions?.[0]);
-  const selectedParallelOption =
-    values.staggerConfig.StaggerOption === StaggerOption.Parallel;
 
   useEffect(() => {
     if (versionOptions && selectedVersion !== versionOptions[0]) {
@@ -209,13 +156,6 @@ function InnerForm({
 
   const hasKubeEndpoint = hasType(EnvironmentType.EdgeAgentOnKubernetes);
   const hasDockerEndpoint = hasType(EnvironmentType.EdgeAgentOnDocker);
-
-  if (isBE && !staggerUpdateStatus.isSuccess) {
-    return null;
-  }
-
-  const staggerUpdating =
-    staggerUpdateStatus.data === 'updating' && selectedParallelOption;
 
   const DeploymentForm = forms[values.deploymentType];
 
@@ -262,85 +202,6 @@ function InnerForm({
         handleVersionChange={handleVersionChange}
       />
 
-      {isBE && (
-        <>
-          <FormSection title="Webhooks">
-            <div className="form-group">
-              <div className="col-sm-12">
-                <SwitchField
-                  label="Create an Edge stack webhook"
-                  data-cy="edge-stack-enable-webhook-switch"
-                  checked={values.webhookEnabled}
-                  labelClass="col-sm-3 col-lg-2"
-                  onChange={(value) => setFieldValue('webhookEnabled', value)}
-                  tooltip="Create a webhook (or callback URI) to automate the update of this stack. Sending a POST request to this callback URI (without requiring any authentication) will pull the most up-to-date version of the associated image and re-deploy this stack."
-                />
-              </div>
-            </div>
-
-            {edgeStack.Webhook && (
-              <>
-                <WebhookSettings
-                  baseUrl={baseEdgeStackWebhookUrl()}
-                  value={edgeStack.Webhook}
-                  docsLink=""
-                />
-
-                <TextTip color="orange">
-                  Sending environment variables to the webhook is updating the
-                  stack with the new values. New variables names will be added
-                  to the stack and existing variables will be updated.
-                </TextTip>
-              </>
-            )}
-          </FormSection>
-
-          <PrivateRegistryFieldsetWrapper
-            value={values.privateRegistryId}
-            onChange={(value) => setFieldValue('privateRegistryId', value)}
-            values={{
-              fileContent: values.content,
-            }}
-            onFieldError={(error) => setFieldError('privateRegistryId', error)}
-            error={errors.privateRegistryId}
-          />
-
-          {values.deploymentType === DeploymentType.Compose && (
-            <>
-              <EnvironmentVariablesPanel
-                onChange={(value) => setFieldValue('envVars', value)}
-                values={values.envVars}
-                errors={errors.envVars}
-              />
-
-              <PrePullToggle
-                onChange={(value) => setFieldValue('prePullImage', value)}
-                value={values.prePullImage}
-              />
-
-              <RetryDeployToggle
-                onChange={(value) => setFieldValue('retryDeploy', value)}
-                value={values.retryDeploy}
-              />
-            </>
-          )}
-
-          <StaggerFieldset
-            values={values.staggerConfig}
-            onChange={(newStaggerValues) =>
-              setValues((values) => ({
-                ...values,
-                staggerConfig: {
-                  ...values.staggerConfig,
-                  ...newStaggerValues,
-                },
-              }))
-            }
-            errors={errors.staggerConfig}
-          />
-        </>
-      )}
-
       <FormSection title="Actions">
         <div className="form-group">
           <div className="col-sm-12">
@@ -348,7 +209,7 @@ function InnerForm({
               className="!ml-0"
               data-cy="update-stack-button"
               size="small"
-              disabled={!isValid || staggerUpdating}
+              disabled={!isValid}
               isLoading={isLoading}
               button-spinner="$ctrl.actionInProgress"
               loadingText="Update in progress..."
@@ -356,14 +217,6 @@ function InnerForm({
               Update the stack
             </LoadingButton>
           </div>
-          {staggerUpdating && (
-            <div className="col-sm-12">
-              <FormError>
-                Concurrent updates in progress, stack update temporarily
-                unavailable
-              </FormError>
-            </div>
-          )}
         </div>
       </FormSection>
     </Form>

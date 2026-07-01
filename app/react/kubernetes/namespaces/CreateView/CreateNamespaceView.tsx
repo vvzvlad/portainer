@@ -1,5 +1,4 @@
 import { useEnvironmentId } from '@/react/hooks/useEnvironmentId';
-import { isBE } from '@/react/portainer/feature-flags/feature-flags.service';
 import { useUnauthorizedRedirect } from '@/react/hooks/useUnauthorizedRedirect';
 
 import { PageHeader } from '@@/PageHeader';
@@ -12,7 +11,7 @@ export function CreateNamespaceView() {
   useUnauthorizedRedirect(
     {
       authorizations: 'K8sResourcePoolsW',
-      adminOnlyCE: !isBE,
+      adminOnlyCE: true,
     },
     {
       to: 'kubernetes.resourcePools',

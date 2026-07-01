@@ -20,12 +20,16 @@ import { ContainerDetailsSection } from './ContainerDetailsSection/ContainerDeta
 import { VolumesSection } from './VolumesSection/VolumesSection';
 import { ContainerNetworksDatatable } from './ContainerNetworksDatatable';
 import { HealthStatus } from './HealthStatus';
+import { getContainerBreadcrumbs } from './containerBreadcrumbs';
+
+// Re-exported for backwards compatibility: the breadcrumb source of truth now
+// lives in ./containerBreadcrumbs (shared with the container sub-tab views).
+export { STACK_CONTAINER_STATE_NAME } from './containerBreadcrumbs';
 
 export function ItemView() {
   const environmentId = useEnvironmentId();
-  const {
-    params: { id: containerId, nodeName },
-  } = useCurrentStateAndParams();
+  const { state, params } = useCurrentStateAndParams();
+  const { id: containerId, nodeName } = params;
 
   const containerQuery = useContainer(
     { environmentId, containerId, nodeName },
@@ -56,10 +60,11 @@ export function ItemView() {
     <>
       <PageHeader
         title="Container details"
-        breadcrumbs={[
-          { label: 'Containers', link: 'docker.containers' },
-          containerName,
-        ]}
+        breadcrumbs={getContainerBreadcrumbs(
+          state?.name,
+          params,
+          containerName
+        )}
       />
 
       <div className="mx-4 mb-4 space-y-4 [&>*]:block">

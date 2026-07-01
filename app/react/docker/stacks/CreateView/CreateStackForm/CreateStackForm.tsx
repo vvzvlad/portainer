@@ -91,7 +91,7 @@ export function CreateStackForm({ environmentId, isSwarm, swarmId }: Props) {
         notifySuccess('Success', 'Stack successfully created');
         router.stateService.go('docker.stacks.stack', {
           name: stack.Name,
-          id: stack.Id,
+          stackId: stack.Id,
           type: stack.Type,
           regular: 'true',
         });
