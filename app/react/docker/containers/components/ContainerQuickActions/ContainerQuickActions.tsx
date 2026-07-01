@@ -2,6 +2,10 @@ import clsx from 'clsx';
 import { BarChart, FileText, Info, Paperclip, Terminal } from 'lucide-react';
 
 import { ContainerStatus } from '@/react/docker/containers/types';
+import {
+  STACK_CONTAINER_STATE_NAME,
+  StackContainerLinkParams,
+} from '@/react/docker/containers/ItemView/containerBreadcrumbs';
 import { Authorized } from '@/react/hooks/useUser';
 
 import { Icon } from '@@/Icon';
@@ -22,11 +26,16 @@ export function ContainerQuickActions({
   containerId,
   nodeName,
   state,
+  stackLinkParams,
 }: {
   containerId: string;
   nodeName: string;
   status: ContainerStatus;
   state: QuickActionsState;
+  // When provided (container opened from a stack), the quick actions link to
+  // the stack-scoped container sub-tab states with these params so the stack
+  // breadcrumb trail is preserved. Otherwise they link to the global states.
+  stackLinkParams?: StackContainerLinkParams;
 }) {
   const isActive =
     !!status &&
@@ -37,13 +46,23 @@ export function ContainerQuickActions({
       ContainerStatus.Unhealthy,
     ].includes(status);
 
+  // Build the target ui-router state for a given sub-tab: the stack-scoped
+  // state when inside a stack, the global container state otherwise. Both share
+  // the same tab suffix (logs/inspect/stats/exec/attach).
+  function linkTo(tab: string) {
+    return stackLinkParams
+      ? `${STACK_CONTAINER_STATE_NAME}.${tab}`
+      : `docker.containers.container.${tab}`;
+  }
+  const linkParams = stackLinkParams ?? { id: containerId, nodeName };
+
   return (
     <div className={clsx('space-x-1', styles.root)}>
       {state.showQuickActionLogs && (
         <Authorized authorizations="DockerContainerLogs">
           <Link
-            to="docker.containers.container.logs"
-            params={{ id: containerId, nodeName }}
+            to={linkTo('logs')}
+            params={linkParams}
             title="Logs"
             data-cy={`container-logs-${containerId}`}
           >
@@ -55,8 +74,8 @@ export function ContainerQuickActions({
       {state.showQuickActionInspect && (
         <Authorized authorizations="DockerContainerInspect">
           <Link
-            to="docker.containers.container.inspect"
-            params={{ id: containerId, nodeName }}
+            to={linkTo('inspect')}
+            params={linkParams}
             title="Inspect"
             data-cy={`container-inspect-${containerId}`}
           >
@@ -68,8 +87,8 @@ export function ContainerQuickActions({
       {state.showQuickActionStats && isActive && (
         <Authorized authorizations="DockerContainerStats">
           <Link
-            to="docker.containers.container.stats"
-            params={{ id: containerId, nodeName }}
+            to={linkTo('stats')}
+            params={linkParams}
             title="Stats"
             data-cy={`container-stats-${containerId}`}
           >
@@ -81,8 +100,8 @@ export function ContainerQuickActions({
       {state.showQuickActionExec && isActive && (
         <Authorized authorizations="DockerExecStart">
           <Link
-            to="docker.containers.container.exec"
-            params={{ id: containerId, nodeName }}
+            to={linkTo('exec')}
+            params={linkParams}
             title="Exec Console"
             data-cy={`container-exec-${containerId}`}
           >
@@ -94,8 +113,8 @@ export function ContainerQuickActions({
       {state.showQuickActionAttach && isActive && (
         <Authorized authorizations="DockerContainerAttach">
           <Link
-            to="docker.containers.container.attach"
-            params={{ id: containerId, nodeName }}
+            to={linkTo('attach')}
+            params={linkParams}
             title="Attach Console"
             data-cy={`container-attach-${containerId}`}
           >
