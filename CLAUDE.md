@@ -57,3 +57,12 @@ make format             # Format code
 
 - Frontend: http://localhost:8999
 - Backend: http://localhost:9000 (HTTP) / https://localhost:9443 (HTTPS)
+
+## Local demo stand
+
+To build an image from one or more feature branches and run it (e.g. to demo open
+PRs together), see [docs/dev-stand.md](docs/dev-stand.md). **Read its Gotchas
+first** — most importantly, build the image with `make build-image ENV=production`
+(without it, `build-image` ships a development client bundle that the CSP blocks,
+leaving the UI stuck forever on "Loading Portainer…"), and note that the admin
+password must be simple/special-char-free but at least 12 characters long.
