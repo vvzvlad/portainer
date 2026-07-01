@@ -44,6 +44,9 @@ export function resolveContainerUpdatePath(
   return {
     kind: 'stack',
     stackId: stack.Id,
-    isGitStack: !!stack.GitConfig,
+    // Git-backed iff a Workflow owns the stack's Source (canonical, mirrors the
+    // Go daemon's `IsGit: st.WorkflowID != 0`). `GitConfig` is deprecated and can
+    // diverge from the Workflow/Source model, so it must not drive this flag.
+    isGitStack: (stack.WorkflowID ?? 0) !== 0,
   };
 }

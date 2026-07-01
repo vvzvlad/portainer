@@ -241,7 +241,10 @@ function SettingsAuthenticationController($q, $scope, $state, Notifications, Set
         } else {
           $scope.formValues.ldap.ldapSettings = Object.assign($scope.formValues.ldap.ldapSettings, settings.LDAPSettings);
         }
-        $scope.state.isEditLDAP = settings.LDAPSettings.ServerType === SERVER_TYPES.AD || settings.LDAPSettings.ServerType === SERVER_TYPES.LDAP;
+        // OpenLDAP was retired in #5; SERVER_TYPES has only CUSTOM and AD, so the
+        // former `|| ServerType === SERVER_TYPES.LDAP` clause referenced a
+        // non-existent key and was always false. AD is now the only edit-LDAP type.
+        $scope.state.isEditLDAP = settings.LDAPSettings.ServerType === SERVER_TYPES.AD;
         $scope.state.initialServerType = settings.LDAPSettings.ServerType;
       })
       .catch(function error(err) {

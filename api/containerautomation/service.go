@@ -45,8 +45,11 @@ type Service struct {
 	clientFactory *dockerclient.ClientFactory
 
 	// Dependencies used by the auto-update job (M4).
-	digestClient     *images.DigestClient
-	containerService *docker.ContainerService
+	digestClient *images.DigestClient
+	// containerService is the recreate seam (satisfied by *docker.ContainerService);
+	// an interface so the standalone update/rollback recreate step can be faked in
+	// tests. See containerRecreator.
+	containerService containerRecreator
 	stackDeployer    deployments.StackDeployer
 
 	// notifier receives automation events (update/rollback/failure/heal). The

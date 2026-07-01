@@ -146,6 +146,17 @@ func (s *Service) healEndpoint(endpoint *portainer.Endpoint, scope string) {
 		return
 	}
 
+	s.healContainers(cli, endpoint, scope, containers)
+}
+
+// healContainers applies the restart decision + heal-restart to each listed
+// unhealthy container of an endpoint. It is split out from healEndpoint (which
+// creates the client and lists the containers) so the restart loop can be
+// exercised with a fake dockerClient in tests. cli is typed as the interface;
+// the concrete *dockerclient.Client returned by CreateClient satisfies it.
+func (s *Service) healContainers(cli dockerClient, endpoint *portainer.Endpoint, scope string, containers []container.Summary) {
+	endpointID := int(endpoint.ID)
+
 	for _, c := range containers {
 		if !InScope(scope, c.Labels) {
 			continue
