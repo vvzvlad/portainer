@@ -2,6 +2,7 @@ import { EnvironmentId } from '@/react/portainer/environments/types';
 import { useAuthorizations } from '@/react/hooks/useUser';
 import { ContainerDetailsViewModel } from '@/docker/models/containerDetails';
 import { isPartOfSwarmService } from '@/docker/helpers/containers';
+import { trimContainerName } from '@/docker/filters/utils';
 
 import { Widget, WidgetBody } from '@@/Widget';
 
@@ -57,6 +58,8 @@ export function ContainerActionsSection({
             environmentId={environmentId}
             containerId={container.Id}
             containerImage={container.Config?.Image || ''}
+            containerName={trimContainerName(container.Name) || container.Id}
+            containerLabels={container.Config?.Labels ?? undefined}
             containerAutoRemove={container.HostConfig?.AutoRemove}
             nodeName={nodeName}
             partOfSwarmService={isPartOfSwarmService(container)}

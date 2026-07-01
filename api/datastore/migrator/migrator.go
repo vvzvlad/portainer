@@ -275,6 +275,7 @@ func (m *Migrator) initMigrations() {
 	m.addMigrations("2.43.0",
 		m.migrateGitConfigToSources_2_43_0,
 		m.migrateCustomTemplateGitConfigToSources_2_43_0,
+		m.migrateContainerAutomationSettings_2_43_0,
 	)
 
 	// WARNING: do not change migrations that have already been released!

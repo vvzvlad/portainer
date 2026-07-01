@@ -1,8 +1,17 @@
 import { useRouter } from '@uirouter/react';
-import { Pause, Play, RefreshCw, Slash, Square, Trash2 } from 'lucide-react';
+import {
+  Download,
+  Pause,
+  Play,
+  RefreshCw,
+  Slash,
+  Square,
+  Trash2,
+} from 'lucide-react';
 
 import * as notifications from '@/portainer/services/notifications';
 import { useAuthorizations, Authorized } from '@/react/hooks/useUser';
+import { trimContainerName } from '@/docker/filters/utils';
 import { confirmContainerDeletion } from '@/react/docker/containers/common/confirm-container-delete-modal';
 import { setPortainerAgentTargetHeader } from '@/portainer/services/http-request.helper';
 import {
@@ -20,8 +29,13 @@ import {
   stopContainer,
 } from '@/react/docker/containers/containers.service';
 import type { EnvironmentId } from '@/react/portainer/environments/types';
+import { useStacks } from '@/react/common/stacks/queries/useStacks';
+import {
+  ContainerUpdateContext,
+  useBulkUpdateContainerImages,
+} from '@/react/docker/containers/update';
 
-import { ButtonGroup, Button, AddButton } from '@@/buttons';
+import { ButtonGroup, Button, LoadingButton, AddButton } from '@@/buttons';
 
 type ContainerServiceAction = (
   endpointId: EnvironmentId,
@@ -70,7 +84,15 @@ export function ContainersDatatableActions({
     'DockerContainerCreate',
   ]);
 
+  // Stack redeploys triggered by "Update" need stack-update rights, gated
+  // separately so we never fire a redeploy the user would get a 403 on.
+  const { authorized: canUpdateStack } = useAuthorizations(
+    'PortainerStackUpdate'
+  );
+
   const router = useRouter();
+  const stacksQuery = useStacks();
+  const bulkUpdateMutation = useBulkUpdateContainerImages();
 
   if (!authorized) {
     return null;
@@ -162,6 +184,20 @@ export function ContainersDatatableActions({
             Remove
           </Button>
         </Authorized>
+
+        <Authorized authorizations="DockerContainerCreate">
+          <LoadingButton
+            color="light"
+            data-cy="update-selected-docker-container-button"
+            onClick={() => onUpdateClick(selectedItems)}
+            disabled={selectedItemCount === 0 || stacksQuery.isLoading}
+            isLoading={bulkUpdateMutation.isLoading}
+            loadingText="Updating..."
+            icon={Download}
+          >
+            Update
+          </LoadingButton>
+        </Authorized>
       </ButtonGroup>
       {isAddActionVisible && (
         <div className="space-left">
@@ -238,6 +274,31 @@ export function ContainersDatatableActions({
       resumeContainer,
       successMessage,
       errorMessage
+    );
+  }
+
+  function onUpdateClick(selectedItems: ContainerListViewModel[]) {
+    // Apply the shared image-update primitive to every outdated container,
+    // skipping up-to-date/unknown ones and redeploying each owning stack once.
+    const contexts: ContainerUpdateContext[] = selectedItems.map(
+      (container) => ({
+        id: container.Id,
+        // Strip Docker's leading "/" so toast names match the single-container path.
+        name: trimContainerName(container.Names[0]),
+        image: container.Image,
+        labels: container.Labels,
+        environmentId: endpointId,
+        nodeName: container.NodeName,
+      })
+    );
+
+    bulkUpdateMutation.mutate(
+      { contexts, stacks: stacksQuery.data ?? [], canUpdateStack },
+      {
+        onSettled: () => {
+          router.stateService.reload();
+        },
+      }
     );
   }
 

@@ -3,6 +3,7 @@ package settings
 import (
 	"cmp"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -18,8 +19,27 @@ import (
 	"github.com/portainer/portainer/pkg/validate"
 
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/oauth2"
 )
+
+// minAutoHealCheckInterval is the lower bound for the auto-heal check interval.
+// A near-zero interval (e.g. 1ms) is valid as a positive duration but would hammer
+// Docker with list/inspect calls for no benefit; keep a sane floor, mirroring the
+// auto-update poll-interval validation.
+const minAutoHealCheckInterval = time.Second
+
+// minAutoUpdatePollInterval is the lower bound for the auto-update poll interval.
+// Polling more often than this hammers registries (rate limits) for no benefit:
+// the image-status cache (~5m) bounds detection latency, so a sub-minute interval
+// only adds registry load without resolving new images any faster.
+const minAutoUpdatePollInterval = time.Minute
+
+// minAutoUpdateRollbackTimeout is the lower bound for the health-gate rollback
+// timeout. A near-zero timeout (e.g. 1ms) would roll back almost immediately,
+// before any container can pass its healthcheck, defeating the gate; keep a sane
+// floor so the gate has a realistic chance to observe health.
+const minAutoUpdateRollbackTimeout = 10 * time.Second
 
 type settingsUpdatePayload struct {
 	// URL to a logo that will be displayed on the login page as well as on top of the sidebar. Will use default Portainer logo when value is empty string
@@ -56,6 +76,34 @@ type settingsUpdatePayload struct {
 	EdgePortainerURL *string `json:"EdgePortainerURL"`
 	// ForceSecureCookies forces the Secure attribute on auth cookies regardless of the detected scheme
 	ForceSecureCookies *bool `example:"false"`
+	// Native container automation settings (auto-heal / auto-update)
+	ContainerAutomation *containerAutomationSettingsPayload
+}
+
+type containerAutomationSettingsPayload struct {
+	AutoHeal     *autoHealSettingsPayload
+	AutoUpdate   *autoUpdateSettingsPayload
+	Notification *notificationSettingsPayload
+}
+
+type notificationSettingsPayload struct {
+	UpdateWebhookURL *string `example:"https://example.com/notify?msg={{message}}"`
+	HealWebhookURL   *string `example:"https://example.com/notify?msg={{message}}"`
+}
+
+type autoHealSettingsPayload struct {
+	Enabled       *bool   `example:"false"`
+	CheckInterval *string `example:"30s"`
+	Scope         *string `example:"labeled"`
+}
+
+type autoUpdateSettingsPayload struct {
+	Enabled           *bool   `example:"false"`
+	PollInterval      *string `example:"6h"`
+	Scope             *string `example:"labeled"`
+	Cleanup           *bool   `example:"false"`
+	RollbackOnFailure *bool   `example:"false"`
+	RollbackTimeout   *string `example:"120s"`
 }
 
 func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
@@ -105,6 +153,69 @@ func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
 		}
 	}
 
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoHeal != nil {
+		autoHeal := payload.ContainerAutomation.AutoHeal
+		if autoHeal.CheckInterval != nil {
+			if d, err := time.ParseDuration(*autoHeal.CheckInterval); err != nil || d < minAutoHealCheckInterval {
+				return errors.New("Invalid auto-heal check interval. Must be a duration of at least 1s (e.g. 30s)")
+			}
+		}
+
+		if autoHeal.Scope != nil && *autoHeal.Scope != "labeled" && *autoHeal.Scope != "all" {
+			return errors.New("Invalid auto-heal scope. Value must be one of: labeled, all")
+		}
+	}
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoUpdate != nil {
+		autoUpdate := payload.ContainerAutomation.AutoUpdate
+		if autoUpdate.PollInterval != nil {
+			if d, err := time.ParseDuration(*autoUpdate.PollInterval); err != nil || d < minAutoUpdatePollInterval {
+				return errors.New("Invalid auto-update poll interval. Must be a duration of at least 1m (e.g. 6h)")
+			}
+		}
+
+		if autoUpdate.Scope != nil && *autoUpdate.Scope != "labeled" && *autoUpdate.Scope != "all" {
+			return errors.New("Invalid auto-update scope. Value must be one of: labeled, all")
+		}
+
+		if autoUpdate.RollbackTimeout != nil {
+			if d, err := time.ParseDuration(*autoUpdate.RollbackTimeout); err != nil || d < minAutoUpdateRollbackTimeout {
+				return errors.New("Invalid auto-update rollback timeout. Must be a duration of at least 10s (e.g. 120s)")
+			}
+		}
+	}
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.Notification != nil {
+		notification := payload.ContainerAutomation.Notification
+		// Each mechanism's webhook URL is independently optional: validate a URL only
+		// when it is provided and non-empty. The URL may carry the "{{message}}"
+		// placeholder, so we accept any http(s) URL with a host rather than a strict
+		// format check.
+		if err := validateNotificationWebhookURL(notification.UpdateWebhookURL, "auto-update"); err != nil {
+			return err
+		}
+		if err := validateNotificationWebhookURL(notification.HealWebhookURL, "auto-heal"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateNotificationWebhookURL validates an optional container-automation
+// notification webhook URL: nil or empty is accepted (the mechanism's webhook is
+// disabled); otherwise it must be a valid http(s) URL with a host. mechanism
+// names the automation the URL belongs to for the error message.
+func validateNotificationWebhookURL(webhookURL *string, mechanism string) error {
+	if webhookURL == nil || *webhookURL == "" {
+		return nil
+	}
+
+	u, err := url.Parse(*webhookURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("Invalid " + mechanism + " notification webhook URL. Must be a valid http(s) URL")
+	}
+
 	return nil
 }
 
@@ -136,6 +247,15 @@ func (handler *Handler) settingsUpdate(w http.ResponseWriter, r *http.Request) *
 		return err
 	}); err != nil {
 		return response.TxErrorResponse(err)
+	}
+
+	// Re-apply container automation settings so the auto-heal and auto-update jobs
+	// are rescheduled (or stopped) with the new interval/scope after a successful
+	// save.
+	if handler.ContainerAutomationService != nil {
+		if err := handler.ContainerAutomationService.Reload(); err != nil {
+			log.Warn().Err(err).Msg("unable to reload container automation settings")
+		}
 	}
 
 	hideFields(settings)
@@ -235,6 +355,32 @@ func (handler *Handler) updateSettings(tx dataservices.DataStoreTx, payload sett
 	}
 
 	settings.KubectlShellImage = *cmp.Or(payload.KubectlShellImage, &settings.KubectlShellImage)
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoHeal != nil {
+		autoHeal := payload.ContainerAutomation.AutoHeal
+		current := &settings.ContainerAutomation.AutoHeal
+		current.Enabled = *cmp.Or(autoHeal.Enabled, &current.Enabled)
+		current.CheckInterval = *cmp.Or(autoHeal.CheckInterval, &current.CheckInterval)
+		current.Scope = *cmp.Or(autoHeal.Scope, &current.Scope)
+	}
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.AutoUpdate != nil {
+		autoUpdate := payload.ContainerAutomation.AutoUpdate
+		current := &settings.ContainerAutomation.AutoUpdate
+		current.Enabled = *cmp.Or(autoUpdate.Enabled, &current.Enabled)
+		current.PollInterval = *cmp.Or(autoUpdate.PollInterval, &current.PollInterval)
+		current.Scope = *cmp.Or(autoUpdate.Scope, &current.Scope)
+		current.Cleanup = *cmp.Or(autoUpdate.Cleanup, &current.Cleanup)
+		current.RollbackOnFailure = *cmp.Or(autoUpdate.RollbackOnFailure, &current.RollbackOnFailure)
+		current.RollbackTimeout = *cmp.Or(autoUpdate.RollbackTimeout, &current.RollbackTimeout)
+	}
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.Notification != nil {
+		notification := payload.ContainerAutomation.Notification
+		current := &settings.ContainerAutomation.Notification
+		current.UpdateWebhookURL = *cmp.Or(notification.UpdateWebhookURL, &current.UpdateWebhookURL)
+		current.HealWebhookURL = *cmp.Or(notification.HealWebhookURL, &current.HealWebhookURL)
+	}
 
 	if err := tx.Settings().UpdateSettings(settings); err != nil {
 		return nil, httperror.InternalServerError("Unable to persist settings changes inside the database", err)

@@ -1,0 +1,109 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+
+import axios, { parseAxiosError } from '@/portainer/services/axios/axios';
+import { withError } from '@/react-tools/react-query';
+import { EnvironmentId } from '@/react/portainer/environments/types';
+
+import { buildDockerUrl } from '../../queries/utils/buildDockerUrl';
+import { ContainerId } from '../types';
+
+import { queryKeys } from './query-keys';
+
+/**
+ * Status of a running container image as reported by the CE detection engine.
+ *
+ * - `outdated`: a newer image is available in the registry.
+ * - `updated`: the local image matches the remote registry digest.
+ * - `skipped`: detection is not applicable (digest-pinned or local-only image).
+ * - `processing` / `preparing`: detection is in progress (mostly relevant for services).
+ * - `error`: detection failed (registry unreachable, auth failure, ...).
+ */
+export type ContainerImageStatusValue =
+  | 'outdated'
+  | 'updated'
+  | 'skipped'
+  | 'processing'
+  | 'preparing'
+  | 'error';
+
+export interface ContainerImageStatus {
+  Status: ContainerImageStatusValue;
+  Message?: string;
+}
+
+// Client-side staleTime for image-status badges: long enough to avoid hammering
+// the endpoint when many rows are visible at once, short enough that a freshly
+// pushed upstream image surfaces reasonably soon. Exported as the single source of
+// truth so the bulk-update action reuses the same window instead of redefining it.
+export const STALE_TIME = 5 * 60 * 1000; // 5 minutes
+
+export async function getContainerImageStatus(
+  environmentId: EnvironmentId,
+  containerId: ContainerId,
+  nodeName?: string,
+  // When true, ask the backend to bypass its short-lived status cache and
+  // recompute against the registry (manual re-check). Off by default so the
+  // per-row auto-badges keep using the cache.
+  force = false
+) {
+  try {
+    const params: { nodeName?: string; force?: boolean } = {};
+    if (nodeName) {
+      params.nodeName = nodeName;
+    }
+    if (force) {
+      params.force = true;
+    }
+    const { data } = await axios.get<ContainerImageStatus>(
+      buildDockerUrl(environmentId, 'containers', containerId, 'image_status'),
+      { params: Object.keys(params).length > 0 ? params : undefined }
+    );
+    return data;
+  } catch (err) {
+    throw parseAxiosError(err as Error, 'Unable to retrieve image status');
+  }
+}
+
+export function useContainerImageStatus(
+  environmentId: EnvironmentId,
+  containerId: ContainerId,
+  nodeName?: string,
+  enabled = true
+) {
+  return useQuery(
+    queryKeys.imageStatus(environmentId, containerId, nodeName),
+    () => getContainerImageStatus(environmentId, containerId, nodeName),
+    {
+      enabled,
+      staleTime: STALE_TIME,
+      refetchOnWindowFocus: false,
+    }
+  );
+}
+
+/**
+ * Manual "re-check" for a single container: forces a cache-bypassing registry
+ * comparison and writes the fresh result into the shared image-status query cache,
+ * so the badge flips in place if the status changed. Used by the interactive
+ * "Up to date" list badge; the background per-row query keeps using the cache.
+ */
+export function useRecheckContainerImageStatus(
+  environmentId: EnvironmentId,
+  containerId: ContainerId,
+  nodeName?: string
+) {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    () => getContainerImageStatus(environmentId, containerId, nodeName, true),
+    {
+      onSuccess: (data) => {
+        queryClient.setQueryData(
+          queryKeys.imageStatus(environmentId, containerId, nodeName),
+          data
+        );
+      },
+      ...withError('Unable to refresh image status'),
+    }
+  );
+}

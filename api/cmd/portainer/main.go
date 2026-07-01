@@ -14,6 +14,7 @@ import (
 	"github.com/portainer/portainer/api/apikey"
 	"github.com/portainer/portainer/api/chisel"
 	"github.com/portainer/portainer/api/cli"
+	"github.com/portainer/portainer/api/containerautomation"
 	"github.com/portainer/portainer/api/crypto"
 	"github.com/portainer/portainer/api/database"
 	"github.com/portainer/portainer/api/database/boltdb"
@@ -577,6 +578,10 @@ func buildServer(flags *portainer.CLIFlags, shutdownCtx context.Context, shutdow
 		log.Fatal().Err(err).Msg("failed to start stack scheduler")
 	}
 
+	containerService := docker.NewContainerService(dockerClientFactory, dataStore)
+	containerAutomationService := containerautomation.NewService(shutdownCtx, scheduler, dataStore, dockerClientFactory, containerService, stackDeployer)
+	containerAutomationService.Start()
+
 	sslDBSettings, err := dataStore.SSLSettings().Settings()
 	if err != nil {
 		log.Fatal().Msg("failed to fetch SSL settings from DB")
@@ -650,6 +655,7 @@ func buildServer(flags *portainer.CLIFlags, shutdownCtx context.Context, shutdow
 		DockerClientFactory:         dockerClientFactory,
 		KubernetesClientFactory:     kubernetesClientFactory,
 		Scheduler:                   scheduler,
+		ContainerAutomationService:  containerAutomationService,
 		ShutdownTrigger:             shutdownTrigger,
 		StackDeployer:               stackDeployer,
 		UpgradeService:              upgradeService,

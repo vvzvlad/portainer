@@ -500,6 +500,11 @@ type (
 
 		EnableGPUManagement bool `json:"EnableGPUManagement,omitempty"`
 
+		// ContainerAutomationDisabled opts this environment out of native container
+		// automation (auto-heal / auto-update) regardless of the global switch (M5).
+		// The zero value participates, preserving behavior for existing environments.
+		ContainerAutomationDisabled bool `json:"ContainerAutomationDisabled,omitempty"`
+
 		// Deprecated fields
 		// Deprecated in DBVersion == 4
 		TLS           bool   `json:"TLS,omitempty" swaggerignore:"true"`
@@ -1151,6 +1156,53 @@ type (
 		AsyncMode bool `json:"AsyncMode,omitempty" example:"false"`
 	}
 
+	// ContainerAutoHealSettings holds the native auto-heal settings.
+	ContainerAutoHealSettings struct {
+		Enabled       bool   `json:"Enabled"`
+		CheckInterval string `json:"CheckInterval" example:"30s"`
+		Scope         string `json:"Scope" example:"labeled"` // "labeled" | "all"
+	}
+
+	// ContainerAutoUpdateSettings holds the native auto-update settings.
+	ContainerAutoUpdateSettings struct {
+		Enabled      bool   `json:"Enabled"`
+		PollInterval string `json:"PollInterval" example:"6h"`
+		Scope        string `json:"Scope" example:"labeled"` // "labeled" | "all"
+		Cleanup      bool   `json:"Cleanup"`                 // remove dangling old images after a standalone update
+		// RollbackOnFailure health-gates a standalone update: if the new
+		// container does not become healthy within RollbackTimeout, it is
+		// recreated back on the previous image. Standalone-only (M5).
+		RollbackOnFailure bool   `json:"RollbackOnFailure"`
+		RollbackTimeout   string `json:"RollbackTimeout" example:"120s"`
+	}
+
+	// ContainerAutomationNotificationSettings holds the webhook notification
+	// config for container-automation events, split per mechanism so auto-update
+	// and auto-heal can be wired to different endpoints (or one enabled without
+	// the other): update-family events (image update, rollback, update-failed)
+	// use UpdateWebhookURL, and auto-heal restart uses HealWebhookURL. Each URL
+	// is independently optional, as requested by the maintainer.
+	ContainerAutomationNotificationSettings struct {
+		// UpdateWebhookURL is the HTTP(S) endpoint called on auto-update events
+		// (image update, rollback and update-failed). When it contains the
+		// "{{message}}" placeholder, the URL-encoded event message is substituted
+		// in and the URL is fetched with GET; otherwise the plain-text message is
+		// POSTed as the request body. Empty disables update notifications.
+		UpdateWebhookURL string `json:"UpdateWebhookURL"`
+		// HealWebhookURL is the HTTP(S) endpoint called on auto-heal restart
+		// events. It follows the same "{{message}}" placeholder / GET-vs-POST
+		// convention as UpdateWebhookURL. Empty disables heal notifications.
+		HealWebhookURL string `json:"HealWebhookURL"`
+	}
+
+	// ContainerAutomationSettings holds native container automation settings
+	// (auto-heal and auto-update).
+	ContainerAutomationSettings struct {
+		AutoHeal     ContainerAutoHealSettings               `json:"AutoHeal"`
+		AutoUpdate   ContainerAutoUpdateSettings             `json:"AutoUpdate"`
+		Notification ContainerAutomationNotificationSettings `json:"Notification"`
+	}
+
 	// Settings represents the application settings
 	Settings struct {
 		// URL to a logo that will be displayed on the login page as well as on top of the sidebar. Will use default Portainer logo when value is empty string
@@ -1211,6 +1263,9 @@ type (
 		// ForceSecureCookies forces the Secure attribute on auth cookies regardless of detected scheme.
 		// Enable when Portainer runs behind a TLS-terminating proxy.
 		ForceSecureCookies bool `json:"ForceSecureCookies" example:"false"`
+
+		// ContainerAutomation holds native container automation settings.
+		ContainerAutomation ContainerAutomationSettings `json:"ContainerAutomation"`
 	}
 
 	// SnapshotJob represents a scheduled job that can create environment(endpoint) snapshots

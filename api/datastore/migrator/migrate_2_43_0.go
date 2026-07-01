@@ -248,3 +248,41 @@ func (m *Migrator) migrateCustomTemplateGitConfigToSources_2_43_0() error {
 
 	return nil
 }
+
+// migrateContainerAutomationSettings_2_43_0 backfills the native container
+// automation defaults into existing installs so the new ContainerAutomation
+// block is populated without changing behavior: auto-heal (disabled, 30s
+// interval, "labeled" scope) and auto-update (disabled, 6h interval, "labeled"
+// scope, no cleanup, no rollback with a 120s rollback timeout).
+func (m *Migrator) migrateContainerAutomationSettings_2_43_0() error {
+	log.Info().Msg("backfilling container automation (auto-heal, auto-update) settings")
+
+	settings, err := m.settingsService.Settings()
+	if err != nil {
+		return err
+	}
+
+	autoHeal := &settings.ContainerAutomation.AutoHeal
+	if autoHeal.CheckInterval == "" {
+		autoHeal.CheckInterval = "30s"
+	}
+
+	if autoHeal.Scope == "" {
+		autoHeal.Scope = "labeled"
+	}
+
+	autoUpdate := &settings.ContainerAutomation.AutoUpdate
+	if autoUpdate.PollInterval == "" {
+		autoUpdate.PollInterval = "6h"
+	}
+
+	if autoUpdate.Scope == "" {
+		autoUpdate.Scope = "labeled"
+	}
+
+	if autoUpdate.RollbackTimeout == "" {
+		autoUpdate.RollbackTimeout = "120s"
+	}
+
+	return m.settingsService.UpdateSettings(settings)
+}

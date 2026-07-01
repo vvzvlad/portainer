@@ -9,9 +9,12 @@ import { useSettings } from '../queries';
 import { Settings } from '../types';
 
 import { ApplicationSettingsPanel } from './ApplicationSettingsPanel';
+import { AutoHealPanel } from './AutoHealPanel';
+import { AutoUpdatePanel } from './AutoUpdatePanel';
 import { BackupSettingsPanel } from './BackupSettingsView';
 import { HiddenContainersPanel } from './HiddenContainersPanel/HiddenContainersPanel';
 import { KubeSettingsPanel } from './KubeSettingsPanel';
+import { NotificationPanel } from './NotificationPanel';
 import { SSLSettingsPanelWrapper } from './SSLSettingsPanel/SSLSettingsPanel';
 
 export function SettingsView() {
@@ -46,6 +49,12 @@ export function SettingsView() {
         <SSLSettingsPanelWrapper />
 
         <HiddenContainersPanel />
+
+        <AutoHealPanel />
+
+        <AutoUpdatePanel />
+
+        <NotificationPanel />
 
         <BackupSettingsPanel />
       </div>

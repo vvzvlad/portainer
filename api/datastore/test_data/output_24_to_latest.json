@@ -585,6 +585,25 @@
     "AllowStackManagementForRegularUsers": true,
     "AuthenticationMethod": 1,
     "BlackListedLabels": [],
+    "ContainerAutomation": {
+      "AutoHeal": {
+        "CheckInterval": "30s",
+        "Enabled": false,
+        "Scope": "labeled"
+      },
+      "AutoUpdate": {
+        "Cleanup": false,
+        "Enabled": false,
+        "PollInterval": "6h",
+        "RollbackOnFailure": false,
+        "RollbackTimeout": "120s",
+        "Scope": "labeled"
+      },
+      "Notification": {
+        "HealWebhookURL": "",
+        "UpdateWebhookURL": ""
+      }
+    },
     "Edge": {
       "CommandInterval": 0,
       "PingInterval": 0,
@@ -921,7 +940,7 @@
     }
   ],
   "version": {
-    "VERSION": "{\"SchemaVersion\":\"2.43.0\",\"MigratorCount\":2,\"Edition\":1,\"InstanceID\":\"463d5c47-0ea5-4aca-85b1-405ceefee254\"}"
+    "VERSION": "{\"SchemaVersion\":\"2.43.0\",\"MigratorCount\":3,\"Edition\":1,\"InstanceID\":\"463d5c47-0ea5-4aca-85b1-405ceefee254\"}"
   },
   "webhooks": null,
   "workflows": null

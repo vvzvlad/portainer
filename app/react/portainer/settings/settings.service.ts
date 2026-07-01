@@ -33,8 +33,11 @@ export async function getSettings() {
   }
 }
 
-type OptionalSettings = Omit<Partial<Settings>, 'Edge'> & {
+type OptionalSettings = Omit<Partial<Settings>, 'Edge' | 'ContainerAutomation'> & {
   Edge?: Partial<Settings['Edge']>;
+  // ContainerAutomation blocks (AutoHeal / AutoUpdate) are saved independently
+  // by their own settings panels, so each may be sent on its own.
+  ContainerAutomation?: Partial<Settings['ContainerAutomation']>;
 };
 
 export async function updateSettings(settings: OptionalSettings) {

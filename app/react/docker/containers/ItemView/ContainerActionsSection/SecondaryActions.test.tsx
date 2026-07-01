@@ -197,6 +197,7 @@ function renderComponent(
     containerId: 'test-container-id',
     nodeName: 'node1',
     containerImage: 'nginx:latest',
+    containerName: 'test-container',
     containerAutoRemove: false,
     isPortainer: false,
     partOfSwarmService: false,

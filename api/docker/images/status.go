@@ -9,6 +9,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	dockerclient "github.com/docker/docker/client"
 	portainer "github.com/portainer/portainer/api"
 	consts "github.com/portainer/portainer/api/docker/consts"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 // Status constants
@@ -30,14 +32,44 @@ const (
 )
 
 const (
+	// statusCacheTTL bounds how long a computed image status is served from the
+	// statusCache. It is intentionally short (tied to the auto-update poll window),
+	// NOT the previous 24h: the cache key is the LOCAL imageID, which does not
+	// change when upstream pushes a new image under the same tag. A long TTL would
+	// therefore keep serving a stale "updated" status for up to a day, and the
+	// auto-update daemon (which resolves status through this same path) could not
+	// see a freshly-pushed image within its poll interval. A few minutes still
+	// absorbs bursts of badge lookups for the same image while re-checking the
+	// remote digest soon after an upstream push.
+	statusCacheTTL            = 5 * time.Minute
 	errorStatusCacheTTL       = 5 * time.Minute
 	maxConcurrentStatusChecks = 8
+
+	// forcedRecheckMinInterval bounds how often a forced re-check (?force=true)
+	// actually contacts the registry for the same local imageID. A manual re-check
+	// bypasses the read caches and issues an outbound registry HEAD; because the
+	// endpoint is available to any env-authorized user with no throttle, an
+	// unbounded loop of forced calls would burn the instance's shared registry
+	// pull-rate quota. Within this window a forced call reuses the just-computed
+	// fresh result instead of re-HEADing. It is tied to the remoteDigestCache TTL so
+	// a genuine manual re-check still gets a fresh answer the first time.
+	forcedRecheckMinInterval = 5 * time.Second
 )
 
 var (
-	statusCache       = cache.New(24*time.Hour, 24*time.Hour)
+	statusCache       = cache.New(statusCacheTTL, statusCacheTTL)
 	remoteDigestCache = cache.New(5*time.Second, 5*time.Second)
 	swarmID2NameCache = cache.New(5*time.Second, 5*time.Second)
+
+	// forcedRecheckGroup coalesces concurrent forced re-checks of the SAME local
+	// imageID so N simultaneous ?force=true calls collapse to ONE registry HEAD
+	// (singleflight), rather than each issuing its own outbound HEAD.
+	forcedRecheckGroup singleflight.Group
+	// forcedResultCache holds the last successful forced-recompute result per
+	// imageID for forcedRecheckMinInterval, so rapid successive forced calls reuse it
+	// instead of re-HEADing the registry. Only successful results are stored (errors
+	// are never cached, so a transient failure does not suppress a real re-check).
+	forcedResultCache = cache.New(forcedRecheckMinInterval, forcedRecheckMinInterval)
 )
 
 // Status holds Docker image  analysis
@@ -113,7 +145,23 @@ func AggregateImageStatus(statuses []Status) Status {
 	return Updated
 }
 
+// ContainerImageStatus returns the image status for a container, serving a recent
+// value from the statusCache when available (the default used by per-row badges,
+// ContainersImageStatus and the auto-update daemon).
 func (c *DigestClient) ContainerImageStatus(ctx context.Context, containerID string, endpoint *portainer.Endpoint, nodeName string) (Status, error) {
+	return c.containerImageStatus(ctx, containerID, endpoint, nodeName, false)
+}
+
+// ContainerImageStatusForced recomputes the image status against the remote
+// registry, bypassing the cached read while still refreshing the cache with the
+// fresh result. It backs the UI's manual "re-check" action, where the user
+// explicitly asks for an up-to-date registry comparison rather than the value
+// cached for statusCacheTTL.
+func (c *DigestClient) ContainerImageStatusForced(ctx context.Context, containerID string, endpoint *portainer.Endpoint, nodeName string) (Status, error) {
+	return c.containerImageStatus(ctx, containerID, endpoint, nodeName, true)
+}
+
+func (c *DigestClient) containerImageStatus(ctx context.Context, containerID string, endpoint *portainer.Endpoint, nodeName string, force bool) (Status, error) {
 	cli, err := c.clientFactory.CreateClient(endpoint, nodeName, nil)
 	if err != nil {
 		log.Warn().Str("swarmNodeId", nodeName).Msg("Cannot create new docker client.")
@@ -134,9 +182,42 @@ func (c *DigestClient) ContainerImageStatus(ctx context.Context, containerID str
 		return Skipped, nil
 	}
 
+	// statusCache is keyed by the LOCAL imageID and read here so every caller
+	// (handler, ContainersImageStatus, the auto-update job) can skip the expensive,
+	// rate-limited remote registry digest lookup below on a hit; the container/image
+	// inspects above are cheap local Docker calls, the registry HEAD is the part
+	// worth avoiding. The entry TTL is deliberately short (statusCacheTTL): because
+	// the key is the local imageID, a new upstream image pushed under the same tag
+	// leaves the key unchanged, so a long TTL would keep serving a stale "updated"
+	// status (the full computation would now return "outdated") until it expired. A
+	// short TTL re-checks the remote digest within the poll window. Both Outdated
+	// and Skipped are cached too (only the error paths return early without caching).
+	//
+	// A forced re-check (force=true) skips this cached read and recomputes against
+	// the registry (see forcedImageStatus), then writes the fresh result back into
+	// the cache below.
+	if !force {
+		if s, err := CachedResourceImageStatus(imageID); err == nil {
+			return s, nil
+		}
+
+		return c.computeImageStatus(ctx, cli, imageID, container.Config.Image, false)
+	}
+
+	return c.forcedImageStatus(ctx, cli, imageID, container.Config.Image)
+}
+
+// computeImageStatus performs the full, uncached image-status computation for a
+// resolved local imageID: it parses the configured image reference, inspects the
+// local image for its repo digests/tags, compares them against the remote registry
+// digest (honoring force for the short-lived remoteDigestCache read in checkStatus)
+// and writes the fresh result back into the statusCache. It is the shared body of
+// both the default (cache-miss) and forced-recompute paths; the default path's
+// behaviour is unchanged from the previous inline implementation.
+func (c *DigestClient) computeImageStatus(ctx context.Context, cli *dockerclient.Client, imageID, configImage string, force bool) (Status, error) {
 	digs := make([]digest.Digest, 0)
 	images := make([]*Image, 0)
-	if i, err := ParseImage(ParseImageOptions{Name: container.Config.Image}); err == nil {
+	if i, err := ParseImage(ParseImageOptions{Name: configImage}); err == nil {
 		images = append(images, &i)
 	}
 
@@ -154,15 +235,56 @@ func (c *DigestClient) ContainerImageStatus(ctx context.Context, containerID str
 		images = append(images, ParseRepoTags(imageInspect.RepoTags)...)
 	}
 
-	s, err := c.checkStatus(ctx, images, digs)
+	s, err := c.checkStatus(ctx, images, digs, force)
 	if err != nil {
-		log.Debug().Str("image", container.Image).Err(err).Msg("fetching a certain image status")
+		log.Debug().Str("image", configImage).Err(err).Msg("fetching a certain image status")
 		return Error, err
 	}
 
 	statusCache.Set(imageID, s, 0)
 
-	return s, err
+	return s, nil
+}
+
+// forcedImageStatus recomputes the image status against the registry for a manual
+// re-check while bounding the registry load a ?force=true call can cause:
+//
+//   - forcedResultCache serves the just-computed fresh result for
+//     forcedRecheckMinInterval, so rapid successive forced calls reuse it instead
+//     of re-HEADing the registry (min-interval throttle).
+//   - forcedRecheckGroup (singleflight) shares one in-flight computation per
+//     imageID, so N concurrent forced calls collapse to a single registry HEAD.
+//
+// A successful recompute still repopulates both the statusCache and (via
+// checkStatus) the remoteDigestCache, so an immediately following default read is
+// served from cache. Failures are not cached, so a transient error never suppresses
+// a genuine re-check.
+func (c *DigestClient) forcedImageStatus(ctx context.Context, cli *dockerclient.Client, imageID, configImage string) (Status, error) {
+	if s, ok := forcedResultCache.Get(imageID); ok {
+		return s.(Status), nil
+	}
+
+	v, err, _ := forcedRecheckGroup.Do(imageID, func() (any, error) {
+		// A concurrent forced call may have populated the result between our read
+		// above and entering the flight; reuse it rather than HEAD the registry again.
+		if s, ok := forcedResultCache.Get(imageID); ok {
+			return s.(Status), nil
+		}
+
+		s, err := c.computeImageStatus(ctx, cli, imageID, configImage, true)
+		if err != nil {
+			return Error, err
+		}
+
+		forcedResultCache.Set(imageID, s, 0)
+
+		return s, nil
+	})
+	if err != nil {
+		return Error, err
+	}
+
+	return v.(Status), nil
 }
 
 func (c *DigestClient) ServiceImageStatus(ctx context.Context, serviceID string, endpoint *portainer.Endpoint) (Status, error) {
@@ -204,7 +326,7 @@ func (c *DigestClient) ServiceImageStatus(ctx context.Context, serviceID string,
 	return c.ContainersImageStatus(ctx, nonExistedOrStoppedContainers, endpoint), nil
 }
 
-func (c *DigestClient) checkStatus(ctx context.Context, images []*Image, digests []digest.Digest) (Status, error) {
+func (c *DigestClient) checkStatus(ctx context.Context, images []*Image, digests []digest.Digest, force bool) (Status, error) {
 	if digests == nil {
 		digests = make([]digest.Digest, 0)
 	}
@@ -225,8 +347,14 @@ func (c *DigestClient) checkStatus(ctx context.Context, images []*Image, digests
 	for _, img := range images {
 		var remoteDigest digest.Digest
 		var err error
-		if rd, ok := remoteDigestCache.Get(img.FullName()); ok {
-			remoteDigest, _ = rd.(digest.Digest)
+		// A forced re-check skips the short-lived remoteDigestCache read so it
+		// actually HEADs the registry; the fresh digest is still written back
+		// below. The default path keeps reusing the cache (auto-badges and the
+		// auto-update daemon must not add registry load).
+		if !force {
+			if rd, ok := remoteDigestCache.Get(img.FullName()); ok {
+				remoteDigest, _ = rd.(digest.Digest)
+			}
 		}
 		if remoteDigest == "" {
 			remoteDigest, err = c.RemoteDigest(ctx, *img)

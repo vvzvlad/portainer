@@ -10,6 +10,8 @@ import { Widget } from '@@/Widget';
 import { RestartPolicy } from '../../CreateView/RestartPolicyTab/types';
 import { RestartPolicySection } from '../RestartPolicySection/RestartPolicySection';
 
+import { AutoHealRow } from './AutoHealRow';
+import { AutoUpdateRow } from './AutoUpdateRow';
 import { ImageRow } from './ImageRow';
 import { PortConfigurationRow } from './PortConfigurationRow';
 import { EnvironmentVariablesRow } from './EnvironmentVariablesRow';
@@ -79,6 +81,10 @@ export function ContainerDetailsSection({
               onUpdateSuccess={onUpdateSuccess}
             />
           </DetailsTable.Row>
+
+          <AutoHealRow labels={config.Labels} />
+
+          <AutoUpdateRow labels={config.Labels} />
 
           <SysctlsRow sysctls={hostConfig.Sysctls} />
 

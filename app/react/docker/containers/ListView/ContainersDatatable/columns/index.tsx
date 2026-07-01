@@ -14,6 +14,7 @@ import { quickActions } from './quick-actions';
 import { stack } from './stack';
 import { state } from './state';
 import { gpus } from './gpus';
+import { updateAvailable } from './updateAvailable';
 
 export function useColumns(
   isHostColumnVisible: boolean,
@@ -27,6 +28,7 @@ export function useColumns(
         quickActions,
         stack,
         image,
+        updateAvailable,
         created,
         ip,
         isHostColumnVisible && host,

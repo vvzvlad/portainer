@@ -127,6 +127,7 @@ export interface Settings {
   AllowContainerCapabilitiesForRegularUsers: boolean;
   ForceSecureCookies: boolean;
   GlobalDeploymentOptions?: GlobalDeploymentOptions;
+  ContainerAutomation: ContainerAutomationSettings;
   Edge: {
     PingInterval: number;
     SnapshotInterval: number;
@@ -134,6 +135,46 @@ export interface Settings {
     AsyncMode: boolean;
     TunnelServerAddress: string;
   };
+}
+
+export type AutoHealScope = 'labeled' | 'all';
+
+export interface AutoHealSettings {
+  Enabled: boolean;
+  CheckInterval: string;
+  Scope: AutoHealScope;
+}
+
+// AutoUpdateScope shares the same values as AutoHealScope but is named
+// separately so the two automation features can diverge later.
+export type AutoUpdateScope = 'labeled' | 'all';
+
+export interface AutoUpdateSettings {
+  Enabled: boolean;
+  PollInterval: string;
+  Scope: AutoUpdateScope;
+  Cleanup: boolean;
+  // RollbackOnFailure health-gates a standalone update and rolls back to the
+  // previous image when the new container does not become healthy in time.
+  RollbackOnFailure: boolean;
+  RollbackTimeout: string;
+}
+
+// NotificationSettings holds the per-mechanism webhooks for container-automation
+// events, so auto-update and auto-heal can be wired to different endpoints (or
+// one enabled without the other). UpdateWebhookURL is called on update-family
+// events (image update, rollback, failed update) and HealWebhookURL on auto-heal
+// restart. Each URL is independently optional; an empty value disables that
+// mechanism's webhook.
+export interface NotificationSettings {
+  UpdateWebhookURL: string;
+  HealWebhookURL: string;
+}
+
+export interface ContainerAutomationSettings {
+  AutoHeal: AutoHealSettings;
+  AutoUpdate: AutoUpdateSettings;
+  Notification: NotificationSettings;
 }
 
 export interface GlobalDeploymentOptions {

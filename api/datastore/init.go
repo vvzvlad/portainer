@@ -62,6 +62,22 @@ func (store *Store) checkOrCreateDefaultSettings() error {
 			EnforceEdgeID:            true,
 		}
 
+		defaultSettings.ContainerAutomation.AutoHeal.Enabled = false
+		defaultSettings.ContainerAutomation.AutoHeal.CheckInterval = "30s"
+		defaultSettings.ContainerAutomation.AutoHeal.Scope = "labeled"
+
+		defaultSettings.ContainerAutomation.AutoUpdate.Enabled = false
+		defaultSettings.ContainerAutomation.AutoUpdate.PollInterval = "6h"
+		defaultSettings.ContainerAutomation.AutoUpdate.Scope = "labeled"
+		defaultSettings.ContainerAutomation.AutoUpdate.Cleanup = false
+		defaultSettings.ContainerAutomation.AutoUpdate.RollbackOnFailure = false
+		defaultSettings.ContainerAutomation.AutoUpdate.RollbackTimeout = "120s"
+
+		// The automation notification webhooks are opt-in per mechanism: both the
+		// auto-update and auto-heal endpoints are empty (disabled) by default.
+		defaultSettings.ContainerAutomation.Notification.UpdateWebhookURL = ""
+		defaultSettings.ContainerAutomation.Notification.HealWebhookURL = ""
+
 		return store.SettingsService.UpdateSettings(defaultSettings)
 	}
 	if err != nil {
