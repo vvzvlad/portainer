@@ -26,6 +26,10 @@ type imageStatusResponse struct {
 // @description Detect whether a newer image is available for the running container by
 // @description comparing the local image digest against the remote registry digest.
 // @description This is a read-only operation: it never pulls or recreates anything.
+// @description Engine-level issues (container not found, registry unreachable, auth
+// @description failure, ...) are not treated as API errors: they degrade gracefully to a
+// @description 200 response carrying a "skipped" or "error" status. HTTP errors are only
+// @description returned for request/authorization problems.
 // @description **Access policy**: authenticated
 // @tags docker
 // @security ApiKeyAuth
@@ -34,10 +38,7 @@ type imageStatusResponse struct {
 // @param id path int true "Environment identifier"
 // @param containerId path string true "Container identifier"
 // @param nodeName query string false "Node name for a Swarm/agent endpoint"
-// @description Engine-level issues (container not found, registry unreachable, auth
-// @description failure, ...) are not treated as API errors: they degrade gracefully to a
-// @description 200 response carrying a "skipped" or "error" status. HTTP errors are only
-// @description returned for request/authorization problems.
+// @param force query bool false "Bypass the server-side status cache and recompute against the registry (manual re-check)"
 // @success 200 {object} imageStatusResponse "Image status (also returned with a skipped/error status for engine-level issues)"
 // @failure 400 "Invalid request: missing container identifier"
 // @failure 403 "Permission denied to access the environment"
@@ -51,6 +52,11 @@ func (handler *Handler) imageStatus(w http.ResponseWriter, r *http.Request) *htt
 
 	// nodeName is optional and only relevant for Swarm/agent endpoints.
 	nodeName, _ := request.RetrieveQueryParameter(r, "nodeName", true)
+
+	// force is set by the UI's manual "re-check" action to bypass the ~5m server
+	// cache and recompute against the registry. Absent (the default, used by the
+	// per-row auto-badges) the cached value is served as before.
+	force, _ := request.RetrieveBooleanQueryParameter(r, "force", true)
 
 	endpoint, err := middlewares.FetchEndpoint(r)
 	if err != nil {
@@ -68,7 +74,12 @@ func (handler *Handler) imageStatus(w http.ResponseWriter, r *http.Request) *htt
 	// filter; this mirrors upstream ContainersImageStatus behaviour.
 	digestClient := images.NewClientWithRegistry(images.NewRegistryClient(handler.dataStore), handler.dockerClientFactory)
 
-	status, err := digestClient.ContainerImageStatus(r.Context(), containerID, endpoint, nodeName)
+	statusFn := digestClient.ContainerImageStatus
+	if force {
+		statusFn = digestClient.ContainerImageStatusForced
+	}
+
+	status, err := statusFn(r.Context(), containerID, endpoint, nodeName)
 	if err != nil {
 		// A detection failure (registry unreachable, auth failure, ...) is not an API
 		// failure: degrade gracefully with a 200 + "error" status so the UI can render a

@@ -35,19 +35,23 @@ const composeStack = {
   Type: StackType.DockerCompose,
 };
 
-vi.mock(
-  '@/react/docker/containers/update',
-  async (importOriginal: () => Promise<object>) => ({
-    ...(await importOriginal()),
-    useUpdateContainerImage: () => ({ mutate: mockMutate, isLoading: false }),
-  })
-);
+// Mock the concrete mutation module so both the `update` index re-export and the
+// shared `useApplyContainerImageUpdate` hook (which imports it directly) resolve
+// to the stub.
+vi.mock('@/react/docker/containers/update/useUpdateContainerImage', () => ({
+  useUpdateContainerImage: () => ({ mutate: mockMutate, isLoading: false }),
+  invalidateContainerUpdateQueries: vi.fn(),
+}));
 
 function setStatus(status?: ContainerImageStatusValue) {
-  mockUseImageStatus.mockReturnValue({ data: status ? { Status: status } : undefined });
+  mockUseImageStatus.mockReturnValue({
+    data: status ? { Status: status } : undefined,
+  });
 }
 
-function renderButton(props: Partial<React.ComponentProps<typeof UpdateNowButton>> = {}) {
+function renderButton(
+  props: Partial<React.ComponentProps<typeof UpdateNowButton>> = {}
+) {
   return render(
     <UpdateNowButton
       environmentId={3}

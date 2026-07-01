@@ -123,7 +123,23 @@ func AggregateImageStatus(statuses []Status) Status {
 	return Updated
 }
 
+// ContainerImageStatus returns the image status for a container, serving a recent
+// value from the statusCache when available (the default used by per-row badges,
+// ContainersImageStatus and the auto-update daemon).
 func (c *DigestClient) ContainerImageStatus(ctx context.Context, containerID string, endpoint *portainer.Endpoint, nodeName string) (Status, error) {
+	return c.containerImageStatus(ctx, containerID, endpoint, nodeName, false)
+}
+
+// ContainerImageStatusForced recomputes the image status against the remote
+// registry, bypassing the cached read while still refreshing the cache with the
+// fresh result. It backs the UI's manual "re-check" action, where the user
+// explicitly asks for an up-to-date registry comparison rather than the value
+// cached for statusCacheTTL.
+func (c *DigestClient) ContainerImageStatusForced(ctx context.Context, containerID string, endpoint *portainer.Endpoint, nodeName string) (Status, error) {
+	return c.containerImageStatus(ctx, containerID, endpoint, nodeName, true)
+}
+
+func (c *DigestClient) containerImageStatus(ctx context.Context, containerID string, endpoint *portainer.Endpoint, nodeName string, force bool) (Status, error) {
 	cli, err := c.clientFactory.CreateClient(endpoint, nodeName, nil)
 	if err != nil {
 		log.Warn().Str("swarmNodeId", nodeName).Msg("Cannot create new docker client.")
@@ -154,8 +170,13 @@ func (c *DigestClient) ContainerImageStatus(ctx context.Context, containerID str
 	// status (the full computation would now return "outdated") until it expired. A
 	// short TTL re-checks the remote digest within the poll window. Both Outdated
 	// and Skipped are cached too (only the error paths return early without caching).
-	if s, err := CachedResourceImageStatus(imageID); err == nil {
-		return s, nil
+	//
+	// A forced re-check (force=true) skips this cached read and recomputes against
+	// the registry, then writes the fresh result back into the cache below.
+	if !force {
+		if s, err := CachedResourceImageStatus(imageID); err == nil {
+			return s, nil
+		}
 	}
 
 	digs := make([]digest.Digest, 0)
@@ -178,7 +199,7 @@ func (c *DigestClient) ContainerImageStatus(ctx context.Context, containerID str
 		images = append(images, ParseRepoTags(imageInspect.RepoTags)...)
 	}
 
-	s, err := c.checkStatus(ctx, images, digs)
+	s, err := c.checkStatus(ctx, images, digs, force)
 	if err != nil {
 		log.Debug().Str("image", container.Image).Err(err).Msg("fetching a certain image status")
 		return Error, err
@@ -228,7 +249,7 @@ func (c *DigestClient) ServiceImageStatus(ctx context.Context, serviceID string,
 	return c.ContainersImageStatus(ctx, nonExistedOrStoppedContainers, endpoint), nil
 }
 
-func (c *DigestClient) checkStatus(ctx context.Context, images []*Image, digests []digest.Digest) (Status, error) {
+func (c *DigestClient) checkStatus(ctx context.Context, images []*Image, digests []digest.Digest, force bool) (Status, error) {
 	if digests == nil {
 		digests = make([]digest.Digest, 0)
 	}
@@ -249,8 +270,14 @@ func (c *DigestClient) checkStatus(ctx context.Context, images []*Image, digests
 	for _, img := range images {
 		var remoteDigest digest.Digest
 		var err error
-		if rd, ok := remoteDigestCache.Get(img.FullName()); ok {
-			remoteDigest, _ = rd.(digest.Digest)
+		// A forced re-check skips the short-lived remoteDigestCache read so it
+		// actually HEADs the registry; the fresh digest is still written back
+		// below. The default path keeps reusing the cache (auto-badges and the
+		// auto-update daemon must not add registry load).
+		if !force {
+			if rd, ok := remoteDigestCache.Get(img.FullName()); ok {
+				remoteDigest, _ = rd.(digest.Digest)
+			}
 		}
 		if remoteDigest == "" {
 			remoteDigest, err = c.RemoteDigest(ctx, *img)

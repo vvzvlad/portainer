@@ -7,6 +7,7 @@ import { withTestQueryProvider } from '@/react/test-utils/withTestQuery';
 import {
   ContainerImageStatus,
   useContainerImageStatus,
+  useRecheckContainerImageStatus,
 } from './useContainerImageStatus';
 
 const environmentId = 3;
@@ -53,5 +54,54 @@ describe('useContainerImageStatus', () => {
 
     await waitFor(() => result.current.isSuccess);
     expect(receivedNodeName).toBe('node-2');
+  });
+
+  it('does not send the force parameter on the background query', async () => {
+    let receivedForce: string | null = 'unset';
+
+    server.use(
+      http.get(
+        `/api/docker/${environmentId}/containers/${containerId}/image_status`,
+        ({ request }) => {
+          receivedForce = new URL(request.url).searchParams.get('force');
+          return HttpResponse.json<ContainerImageStatus>({ Status: 'updated' });
+        }
+      )
+    );
+
+    const { result, waitFor } = renderImageStatusHook();
+
+    await waitFor(() => result.current.isSuccess);
+    expect(receivedForce).toBeNull();
+  });
+});
+
+describe('useRecheckContainerImageStatus', () => {
+  it('sends force=true and updates the shared query cache with the fresh status', async () => {
+    let receivedForce: string | null = null;
+
+    server.use(
+      http.get(
+        `/api/docker/${environmentId}/containers/${containerId}/image_status`,
+        ({ request }) => {
+          receivedForce = new URL(request.url).searchParams.get('force');
+          return HttpResponse.json<ContainerImageStatus>({
+            Status: 'outdated',
+          });
+        }
+      )
+    );
+
+    const wrapper = withTestQueryProvider(({ children }) => <>{children}</>);
+    const { result, waitFor } = renderHook(
+      () => useRecheckContainerImageStatus(environmentId, containerId),
+      { wrapper }
+    );
+
+    result.current.mutate();
+
+    await waitFor(() => result.current.isSuccess);
+    expect(receivedForce).toBe('true');
+    expect(result.current.data).toEqual({ Status: 'outdated' });
   });
 });
