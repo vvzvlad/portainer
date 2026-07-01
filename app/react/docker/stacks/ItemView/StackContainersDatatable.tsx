@@ -1,4 +1,5 @@
 import { Box } from 'lucide-react';
+import { useCurrentStateAndParams } from '@uirouter/react';
 
 import { ContainerListViewModel } from '@/react/docker/containers/types';
 import { createStore } from '@/react/docker/containers/ListView/ContainersDatatable/datatable-store';
@@ -42,6 +43,9 @@ export interface Props {
 export function StackContainersDatatable({ stackName }: Props) {
   const environmentQuery = useCurrentEnvironment();
   const tableState = useTableState(settingsStore, storageKey);
+  // Current stack route params, forwarded to the Quick Actions column so it can
+  // link to the stack-scoped container sub-tab states and keep the stack trail.
+  const { params: stackRouteParams } = useCurrentStateAndParams();
 
   const isGPUsColumnVisible = useShowGPUsColumn(environmentQuery.data);
   const columns = useColumns(false, isGPUsColumnVisible);
@@ -60,7 +64,7 @@ export function StackContainersDatatable({ stackName }: Props) {
   const environment = environmentQuery.data;
 
   return (
-    <RowProvider context={{ environment }}>
+    <RowProvider context={{ environment, stackRouteParams }}>
       <TableSettingsProvider settings={settingsStore}>
         <Datatable
           title="Containers"
