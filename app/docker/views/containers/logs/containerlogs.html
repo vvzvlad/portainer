@@ -1,12 +1,8 @@
 <page-header title="'Container logs'" breadcrumbs="breadcrumbs"> </page-header>
 
-<container-log-view ng-if="!logsEnabled"></container-log-view>
-
-<log-viewer
-  data="logs"
-  ng-if="logs && logsEnabled"
-  display-timestamps="state.displayTimestamps"
-  line-count="state.lineCount"
-  since-timestamp="state.sinceTimestamp"
-  resource-name="container.Name"
-></log-viewer>
+<!-- The React <container-log-view> now owns the whole logs page: it renders the
+     "logging disabled" panel when logging is off, and the React log viewer
+     (live tailing, formatting, colouring) when it is on. The legacy AngularJS
+     <log-viewer> is intentionally no longer used here (service/task pages still
+     use it). -->
+<container-log-view></container-log-view>

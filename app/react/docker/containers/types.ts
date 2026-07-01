@@ -58,5 +58,8 @@ export type ContainerLogsParams = {
   // reconnect can resume at exact nanosecond precision (which a number cannot
   // hold); the buffered axios path passes a plain number.
   since?: number | string;
+  // Unix timestamp upper bound. Only relevant for a bounded snapshot fetch (Auto
+  // refresh off with a from–to range selected); the live-tail path never sets it.
+  until?: number | string;
   tail?: number;
 };
