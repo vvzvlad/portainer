@@ -53,7 +53,11 @@ export function LogLine({ line, lineNumber, showLineNumber, search }: Props) {
     <div className="log-viewer-line flex">
       {showLineNumber && (
         <span
-          className="log-viewer-gutter shrink-0 select-none pr-3 text-right text-muted"
+          // Left gutter styled to the maintainer's mockup (fixed width, right
+          // aligned, muted grey). Kept as its own class so the layout/tests can
+          // target it.
+          className="log-viewer-gutter shrink-0 select-none pr-4 text-right"
+          style={{ width: '3.25rem', color: '#8b939a' }}
           aria-hidden="true"
         >
           {lineNumber}
