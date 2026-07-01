@@ -160,11 +160,15 @@ export interface AutoUpdateSettings {
   RollbackTimeout: string;
 }
 
-// NotificationSettings holds the shared webhook called on every
-// container-automation event (image update, rollback, failed update, auto-heal
-// restart). An empty WebhookURL disables it.
+// NotificationSettings holds the per-mechanism webhooks for container-automation
+// events, so auto-update and auto-heal can be wired to different endpoints (or
+// one enabled without the other). UpdateWebhookURL is called on update-family
+// events (image update, rollback, failed update) and HealWebhookURL on auto-heal
+// restart. Each URL is independently optional; an empty value disables that
+// mechanism's webhook.
 export interface NotificationSettings {
-  WebhookURL: string;
+  UpdateWebhookURL: string;
+  HealWebhookURL: string;
 }
 
 export interface ContainerAutomationSettings {

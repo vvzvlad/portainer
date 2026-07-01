@@ -127,10 +127,11 @@ func TestSettingsUpdatePayloadValidateRollbackTimeout(t *testing.T) {
 	}
 }
 
-// TestSettingsUpdatePayloadValidateNotificationWebhookURL covers the shared
-// container-automation notification webhook URL: it is optional (empty is valid),
-// must be a valid http(s) URL with a host when set, and accepts the
-// "{{message}}" placeholder.
+// TestSettingsUpdatePayloadValidateNotificationWebhookURL covers the
+// per-mechanism container-automation notification webhook URLs (auto-update and
+// auto-heal): each is independently optional (empty is valid), must be a valid
+// http(s) URL with a host when set, and accepts the "{{message}}" placeholder.
+// Each case is exercised against both the update field and the heal field.
 func TestSettingsUpdatePayloadValidateNotificationWebhookURL(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -147,23 +148,41 @@ func TestSettingsUpdatePayloadValidateNotificationWebhookURL(t *testing.T) {
 		{name: "garbage is rejected", url: "not a url", wantErr: true},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			payload := settingsUpdatePayload{
-				ContainerAutomation: &containerAutomationSettingsPayload{
-					Notification: &notificationSettingsPayload{
-						WebhookURL: strptr(tc.url),
-					},
-				},
-			}
+	fields := []struct {
+		name    string
+		payload func(url string) *notificationSettingsPayload
+	}{
+		{
+			name: "UpdateWebhookURL",
+			payload: func(url string) *notificationSettingsPayload {
+				return &notificationSettingsPayload{UpdateWebhookURL: strptr(url)}
+			},
+		},
+		{
+			name: "HealWebhookURL",
+			payload: func(url string) *notificationSettingsPayload {
+				return &notificationSettingsPayload{HealWebhookURL: strptr(url)}
+			},
+		},
+	}
 
-			err := payload.Validate(httptest.NewRequest("PUT", "/settings", nil))
-			if tc.wantErr && err == nil {
-				t.Errorf("Validate(%q) = nil, want error", tc.url)
-			}
-			if !tc.wantErr && err != nil {
-				t.Errorf("Validate(%q) = %v, want nil", tc.url, err)
-			}
-		})
+	for _, field := range fields {
+		for _, tc := range cases {
+			t.Run(field.name+"/"+tc.name, func(t *testing.T) {
+				payload := settingsUpdatePayload{
+					ContainerAutomation: &containerAutomationSettingsPayload{
+						Notification: field.payload(tc.url),
+					},
+				}
+
+				err := payload.Validate(httptest.NewRequest("PUT", "/settings", nil))
+				if tc.wantErr && err == nil {
+					t.Errorf("Validate(%q) = nil, want error", tc.url)
+				}
+				if !tc.wantErr && err != nil {
+					t.Errorf("Validate(%q) = %v, want nil", tc.url, err)
+				}
+			})
+		}
 	}
 }

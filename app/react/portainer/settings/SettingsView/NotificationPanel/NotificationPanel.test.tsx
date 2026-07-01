@@ -17,13 +17,14 @@ function renderComponent() {
 }
 
 describe('NotificationPanel', () => {
-  it('renders the webhook URL read from the API', async () => {
+  it('renders both webhook URLs read from the API', async () => {
     server.use(
       http.get('/api/settings', () =>
         HttpResponse.json({
           ContainerAutomation: {
             Notification: {
-              WebhookURL: 'https://example.com/notify?msg={{message}}',
+              UpdateWebhookURL: 'https://example.com/update?msg={{message}}',
+              HealWebhookURL: 'https://example.com/heal?msg={{message}}',
             },
           },
         })
@@ -37,26 +38,31 @@ describe('NotificationPanel', () => {
     ).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(screen.getByLabelText(/Webhook URL/i)).toHaveValue(
-        'https://example.com/notify?msg={{message}}'
+      expect(screen.getByLabelText(/Auto-update webhook URL/i)).toHaveValue(
+        'https://example.com/update?msg={{message}}'
+      );
+      expect(screen.getByLabelText(/Auto-heal webhook URL/i)).toHaveValue(
+        'https://example.com/heal?msg={{message}}'
       );
     });
   });
 
-  it('disables the save button on an invalid URL', async () => {
+  it('disables the save button on an invalid auto-update URL', async () => {
     const user = userEvent.setup();
 
     server.use(
       http.get('/api/settings', () =>
         HttpResponse.json({
-          ContainerAutomation: { Notification: { WebhookURL: '' } },
+          ContainerAutomation: {
+            Notification: { UpdateWebhookURL: '', HealWebhookURL: '' },
+          },
         })
       )
     );
 
     renderComponent();
 
-    const input = await screen.findByLabelText(/Webhook URL/i);
+    const input = await screen.findByLabelText(/Auto-update webhook URL/i);
     await user.type(input, 'not-a-url');
 
     await waitFor(() => {
@@ -70,14 +76,45 @@ describe('NotificationPanel', () => {
     ).toBeDisabled();
   });
 
-  it('includes the webhook URL in the saved payload', async () => {
+  it('disables the save button on an invalid auto-heal URL', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/settings', () =>
+        HttpResponse.json({
+          ContainerAutomation: {
+            Notification: { UpdateWebhookURL: '', HealWebhookURL: '' },
+          },
+        })
+      )
+    );
+
+    renderComponent();
+
+    const input = await screen.findByLabelText(/Auto-heal webhook URL/i);
+    await user.type(input, 'not-a-url');
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Must be a valid http(s) URL')
+      ).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByRole('button', { name: /Save notification settings/i })
+    ).toBeDisabled();
+  });
+
+  it('includes both webhook URLs in the saved payload', async () => {
     const user = userEvent.setup();
 
     let savedPayload: unknown;
     server.use(
       http.get('/api/settings', () =>
         HttpResponse.json({
-          ContainerAutomation: { Notification: { WebhookURL: '' } },
+          ContainerAutomation: {
+            Notification: { UpdateWebhookURL: '', HealWebhookURL: '' },
+          },
         })
       ),
       http.put('/api/settings', async ({ request }) => {
@@ -88,8 +125,11 @@ describe('NotificationPanel', () => {
 
     renderComponent();
 
-    const input = await screen.findByLabelText(/Webhook URL/i);
-    await user.type(input, 'https://hook.example/notify');
+    const updateInput = await screen.findByLabelText(/Auto-update webhook URL/i);
+    await user.type(updateInput, 'https://hook.example/update');
+
+    const healInput = screen.getByLabelText(/Auto-heal webhook URL/i);
+    await user.type(healInput, 'https://hook.example/heal');
 
     const save = screen.getByRole('button', {
       name: /Save notification settings/i,
@@ -101,7 +141,8 @@ describe('NotificationPanel', () => {
       expect(savedPayload).toEqual({
         ContainerAutomation: {
           Notification: {
-            WebhookURL: 'https://hook.example/notify',
+            UpdateWebhookURL: 'https://hook.example/update',
+            HealWebhookURL: 'https://hook.example/heal',
           },
         },
       });

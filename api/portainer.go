@@ -1176,16 +1176,23 @@ type (
 		RollbackTimeout   string `json:"RollbackTimeout" example:"120s"`
 	}
 
-	// ContainerAutomationNotificationSettings holds the shared webhook
-	// notification config for container-automation events (image update,
-	// rollback, update-failed and auto-heal restart). A single webhook is used
-	// across every automation event, as requested by the maintainer.
+	// ContainerAutomationNotificationSettings holds the webhook notification
+	// config for container-automation events, split per mechanism so auto-update
+	// and auto-heal can be wired to different endpoints (or one enabled without
+	// the other): update-family events (image update, rollback, update-failed)
+	// use UpdateWebhookURL, and auto-heal restart uses HealWebhookURL. Each URL
+	// is independently optional, as requested by the maintainer.
 	ContainerAutomationNotificationSettings struct {
-		// WebhookURL is the HTTP(S) endpoint called on each automation event.
-		// When it contains the "{{message}}" placeholder, the URL-encoded event
-		// message is substituted in and the URL is fetched with GET; otherwise the
-		// plain-text message is POSTed as the request body. Empty disables it.
-		WebhookURL string `json:"WebhookURL"`
+		// UpdateWebhookURL is the HTTP(S) endpoint called on auto-update events
+		// (image update, rollback and update-failed). When it contains the
+		// "{{message}}" placeholder, the URL-encoded event message is substituted
+		// in and the URL is fetched with GET; otherwise the plain-text message is
+		// POSTed as the request body. Empty disables update notifications.
+		UpdateWebhookURL string `json:"UpdateWebhookURL"`
+		// HealWebhookURL is the HTTP(S) endpoint called on auto-heal restart
+		// events. It follows the same "{{message}}" placeholder / GET-vs-POST
+		// convention as UpdateWebhookURL. Empty disables heal notifications.
+		HealWebhookURL string `json:"HealWebhookURL"`
 	}
 
 	// ContainerAutomationSettings holds native container automation settings

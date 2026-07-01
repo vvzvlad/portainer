@@ -49,12 +49,31 @@ func newWebhookNotifier(dataStore dataservices.DataStore) webhookNotifier {
 	}
 }
 
-// Notify reads the current webhook URL and, when set, dispatches the event in a
-// background goroutine. Only the settings read and the empty-URL short-circuit
-// run synchronously (they decide whether to spawn at all); message formatting —
-// which itself reads Endpoint()/Stack() from the datastore — and the HTTP call
-// both happen off the daemon hot path, under a single recover(). It never blocks
-// the caller and never returns an error: the webhook is strictly best-effort.
+// webhookURLForKind selects the configured webhook URL for an event kind: the
+// update-family events (image update, rollback, update-failed) route to the
+// update endpoint, and the auto-heal restart routes to the heal endpoint. This
+// lets a user enable notifications for one mechanism without the other — an
+// empty URL for a mechanism means "no webhook for that mechanism".
+func webhookURLForKind(notification portainer.ContainerAutomationNotificationSettings, kind EventKind) string {
+	switch kind {
+	case EventUpdated, EventRollback, EventUpdateFailed:
+		return notification.UpdateWebhookURL
+	case EventHealRestarted:
+		return notification.HealWebhookURL
+	default:
+		return ""
+	}
+}
+
+// Notify reads the webhook URL for the event's mechanism (update vs heal) and,
+// when set, dispatches the event in a background goroutine. Only the settings
+// read and the empty-URL short-circuit run synchronously (they decide whether
+// to spawn at all); message formatting — which itself reads Endpoint()/Stack()
+// from the datastore — and the HTTP call both happen off the daemon hot path,
+// under a single recover(). It never blocks the caller and never returns an
+// error: the webhook is strictly best-effort. When the URL for the event's
+// mechanism is empty, the event is skipped and the other mechanism is
+// unaffected.
 func (n webhookNotifier) Notify(event Event) {
 	settings, err := n.dataStore.Settings().Settings()
 	if err != nil {
@@ -62,7 +81,7 @@ func (n webhookNotifier) Notify(event Event) {
 		return
 	}
 
-	webhookURL := strings.TrimSpace(settings.ContainerAutomation.Notification.WebhookURL)
+	webhookURL := strings.TrimSpace(webhookURLForKind(settings.ContainerAutomation.Notification, event.Kind))
 	if webhookURL == "" {
 		return
 	}

@@ -87,7 +87,8 @@ type containerAutomationSettingsPayload struct {
 }
 
 type notificationSettingsPayload struct {
-	WebhookURL *string `example:"https://example.com/notify?msg={{message}}"`
+	UpdateWebhookURL *string `example:"https://example.com/notify?msg={{message}}"`
+	HealWebhookURL   *string `example:"https://example.com/notify?msg={{message}}"`
 }
 
 type autoHealSettingsPayload struct {
@@ -186,15 +187,33 @@ func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
 
 	if payload.ContainerAutomation != nil && payload.ContainerAutomation.Notification != nil {
 		notification := payload.ContainerAutomation.Notification
-		// Optional field: only validate when a non-empty URL is provided. The URL may
-		// carry the "{{message}}" placeholder, so we accept any http(s) URL with a
-		// host rather than a strict format check.
-		if notification.WebhookURL != nil && *notification.WebhookURL != "" {
-			u, err := url.Parse(*notification.WebhookURL)
-			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-				return errors.New("Invalid notification webhook URL. Must be a valid http(s) URL")
-			}
+		// Each mechanism's webhook URL is independently optional: validate a URL only
+		// when it is provided and non-empty. The URL may carry the "{{message}}"
+		// placeholder, so we accept any http(s) URL with a host rather than a strict
+		// format check.
+		if err := validateNotificationWebhookURL(notification.UpdateWebhookURL, "auto-update"); err != nil {
+			return err
 		}
+		if err := validateNotificationWebhookURL(notification.HealWebhookURL, "auto-heal"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateNotificationWebhookURL validates an optional container-automation
+// notification webhook URL: nil or empty is accepted (the mechanism's webhook is
+// disabled); otherwise it must be a valid http(s) URL with a host. mechanism
+// names the automation the URL belongs to for the error message.
+func validateNotificationWebhookURL(webhookURL *string, mechanism string) error {
+	if webhookURL == nil || *webhookURL == "" {
+		return nil
+	}
+
+	u, err := url.Parse(*webhookURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("Invalid " + mechanism + " notification webhook URL. Must be a valid http(s) URL")
 	}
 
 	return nil
@@ -359,7 +378,8 @@ func (handler *Handler) updateSettings(tx dataservices.DataStoreTx, payload sett
 	if payload.ContainerAutomation != nil && payload.ContainerAutomation.Notification != nil {
 		notification := payload.ContainerAutomation.Notification
 		current := &settings.ContainerAutomation.Notification
-		current.WebhookURL = *cmp.Or(notification.WebhookURL, &current.WebhookURL)
+		current.UpdateWebhookURL = *cmp.Or(notification.UpdateWebhookURL, &current.UpdateWebhookURL)
+		current.HealWebhookURL = *cmp.Or(notification.HealWebhookURL, &current.HealWebhookURL)
 	}
 
 	if err := tx.Settings().UpdateSettings(settings); err != nil {

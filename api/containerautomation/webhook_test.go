@@ -12,9 +12,20 @@ import (
 	"github.com/portainer/portainer/api/datastore"
 )
 
-// newTestWebhookNotifier builds an initialized test datastore, sets the webhook
-// URL, and returns a webhookNotifier bound to it.
+// newTestWebhookNotifier builds an initialized test datastore, sets both the
+// update and heal webhook URLs to the same value (so the notifier fires for
+// every event kind), and returns a webhookNotifier bound to it. Use
+// newTestWebhookNotifierSplit to configure the two URLs independently.
 func newTestWebhookNotifier(t *testing.T, webhookURL string) (webhookNotifier, *datastore.Store) {
+	t.Helper()
+
+	return newTestWebhookNotifierSplit(t, webhookURL, webhookURL)
+}
+
+// newTestWebhookNotifierSplit builds an initialized test datastore with the
+// auto-update and auto-heal webhook URLs set independently, and returns a
+// webhookNotifier bound to it.
+func newTestWebhookNotifierSplit(t *testing.T, updateURL, healURL string) (webhookNotifier, *datastore.Store) {
 	t.Helper()
 
 	_, store := datastore.MustNewTestStore(t, true, false)
@@ -24,7 +35,8 @@ func newTestWebhookNotifier(t *testing.T, webhookURL string) (webhookNotifier, *
 		t.Fatalf("read settings: %v", err)
 	}
 
-	settings.ContainerAutomation.Notification.WebhookURL = webhookURL
+	settings.ContainerAutomation.Notification.UpdateWebhookURL = updateURL
+	settings.ContainerAutomation.Notification.HealWebhookURL = healURL
 	if err := store.Settings().UpdateSettings(settings); err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
@@ -136,6 +148,132 @@ func TestWebhookNotifierEmptyURLNoCall(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 		// No call, as expected.
 	}
+}
+
+// waitForRequest returns the first request seen on ch, or fails after a short
+// grace period.
+func waitForRequest(t *testing.T, ch <-chan *http.Request, what string) *http.Request {
+	t.Helper()
+
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s was not received", what)
+		return nil
+	}
+}
+
+// expectNoRequest asserts nothing arrives on ch within a short grace period.
+func expectNoRequest(t *testing.T, ch <-chan *http.Request, what string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+		t.Fatalf("%s should not have been called", what)
+	case <-time.After(300 * time.Millisecond):
+		// No call, as expected.
+	}
+}
+
+// TestWebhookNotifierUpdateEventRoutesToUpdateURL verifies an update-family event
+// dispatches to the auto-update URL only; the heal URL is set but never called.
+func TestWebhookNotifierUpdateEventRoutesToUpdateURL(t *testing.T) {
+	updateReqs := make(chan *http.Request, 1)
+	updateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		updateReqs <- r
+	}))
+	defer updateSrv.Close()
+
+	healReqs := make(chan *http.Request, 1)
+	healSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healReqs <- r
+	}))
+	defer healSrv.Close()
+
+	n, store := newTestWebhookNotifierSplit(t, updateSrv.URL+"/update", healSrv.URL+"/heal")
+	createEndpoint(t, store, 1, "prod")
+
+	for _, kind := range []EventKind{EventUpdated, EventRollback, EventUpdateFailed} {
+		n.Notify(Event{Kind: kind, EndpointID: 1, ContainerName: "c"})
+
+		r := waitForRequest(t, updateReqs, "update webhook for "+string(kind))
+		if r.URL.Path != "/update" {
+			t.Errorf("kind %s hit %q, want /update", kind, r.URL.Path)
+		}
+	}
+
+	expectNoRequest(t, healReqs, "heal webhook")
+}
+
+// TestWebhookNotifierHealEventRoutesToHealURL verifies a heal event dispatches to
+// the auto-heal URL only; the update URL is set but never called.
+func TestWebhookNotifierHealEventRoutesToHealURL(t *testing.T) {
+	updateReqs := make(chan *http.Request, 1)
+	updateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		updateReqs <- r
+	}))
+	defer updateSrv.Close()
+
+	healReqs := make(chan *http.Request, 1)
+	healSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healReqs <- r
+	}))
+	defer healSrv.Close()
+
+	n, store := newTestWebhookNotifierSplit(t, updateSrv.URL+"/update", healSrv.URL+"/heal")
+	createEndpoint(t, store, 1, "prod")
+
+	n.Notify(Event{Kind: EventHealRestarted, EndpointID: 1, ContainerName: "nginx"})
+
+	r := waitForRequest(t, healReqs, "heal webhook")
+	if r.URL.Path != "/heal" {
+		t.Errorf("heal event hit %q, want /heal", r.URL.Path)
+	}
+
+	expectNoRequest(t, updateReqs, "update webhook")
+}
+
+// TestWebhookNotifierEmptyUpdateURLSkipsUpdateOnly verifies that an empty
+// auto-update URL suppresses update-family events while heal still fires.
+func TestWebhookNotifierEmptyUpdateURLSkipsUpdateOnly(t *testing.T) {
+	healReqs := make(chan *http.Request, 1)
+	healSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healReqs <- r
+	}))
+	defer healSrv.Close()
+
+	n, store := newTestWebhookNotifierSplit(t, "", healSrv.URL+"/heal")
+	createEndpoint(t, store, 1, "prod")
+
+	// Update-family event: no URL configured, so nothing is delivered.
+	n.Notify(Event{Kind: EventUpdated, EndpointID: 1, ContainerName: "c"})
+	expectNoRequest(t, healReqs, "heal webhook on an update event")
+
+	// Heal event: the heal URL is set, so it still fires.
+	n.Notify(Event{Kind: EventHealRestarted, EndpointID: 1, ContainerName: "nginx"})
+	waitForRequest(t, healReqs, "heal webhook")
+}
+
+// TestWebhookNotifierEmptyHealURLSkipsHealOnly verifies that an empty auto-heal
+// URL suppresses heal events while update-family events still fire.
+func TestWebhookNotifierEmptyHealURLSkipsHealOnly(t *testing.T) {
+	updateReqs := make(chan *http.Request, 1)
+	updateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		updateReqs <- r
+	}))
+	defer updateSrv.Close()
+
+	n, store := newTestWebhookNotifierSplit(t, updateSrv.URL+"/update", "")
+	createEndpoint(t, store, 1, "prod")
+
+	// Heal event: no URL configured, so nothing is delivered.
+	n.Notify(Event{Kind: EventHealRestarted, EndpointID: 1, ContainerName: "nginx"})
+	expectNoRequest(t, updateReqs, "update webhook on a heal event")
+
+	// Update event: the update URL is set, so it still fires.
+	n.Notify(Event{Kind: EventUpdated, EndpointID: 1, ContainerName: "c"})
+	waitForRequest(t, updateReqs, "update webhook")
 }
 
 // TestWebhookNotifierFailingEndpointDoesNotBlock verifies that a broken endpoint

@@ -24,7 +24,8 @@ export function NotificationPanel() {
 
   const notification = settingsQuery.data.Notification;
   const initialValues: Values = {
-    webhookUrl: notification?.WebhookURL || '',
+    updateWebhookUrl: notification?.UpdateWebhookURL || '',
+    healWebhookUrl: notification?.HealWebhookURL || '',
   };
 
   return (
@@ -36,16 +37,19 @@ export function NotificationPanel() {
       <Widget.Body>
         <div className="mb-3">
           <TextTip color="blue">
-            When set, Portainer calls this HTTP URL for every container-automation
-            event (image update, rollback, failed update and auto-heal restart) so
-            you can forward them to chat or a custom endpoint. Include the{' '}
-            <code>{'{{message}}'}</code> placeholder to have the URL-encoded event
-            message substituted into the address (the URL is then fetched with
-            GET); when the placeholder is absent, the plain-text message is POSTed
-            as the request body instead. The message looks like{' '}
+            Portainer can call an HTTP URL for container-automation events so you
+            can forward them to chat or a custom endpoint. The two webhooks are
+            configured independently: the auto-update URL is called on image
+            update, rollback and failed-update events, and the auto-heal URL on
+            auto-heal restarts. Set only one to notify on that mechanism alone.
+            For each URL, include the <code>{'{{message}}'}</code> placeholder to
+            have the URL-encoded event message substituted into the address (the
+            URL is then fetched with GET); when the placeholder is absent, the
+            plain-text message is POSTed as the request body instead. The message
+            looks like{' '}
             <code>Environment | prod / Container [nginx] / Auto-heal: ...</code>.
-            Leave empty to disable. Delivery is best-effort and never blocks or
-            delays an update or heal.
+            Leave a URL empty to disable that mechanism. Delivery is best-effort
+            and never blocks or delays an update or heal.
           </TextTip>
         </div>
 
@@ -67,7 +71,8 @@ export function NotificationPanel() {
       {
         ContainerAutomation: {
           Notification: {
-            WebhookURL: values.webhookUrl,
+            UpdateWebhookURL: values.updateWebhookUrl,
+            HealWebhookURL: values.healWebhookUrl,
           },
         },
       },
@@ -86,16 +91,30 @@ function InnerForm({ isLoading }: { isLoading: boolean }) {
   return (
     <Form className="form-horizontal">
       <FormControl
-        label="Webhook URL"
-        inputId="notification_webhook_url"
-        errors={errors.webhookUrl}
+        label="Auto-update webhook URL"
+        inputId="notification_update_webhook_url"
+        errors={errors.updateWebhookUrl}
       >
         <Field
           as={Input}
-          id="notification_webhook_url"
-          placeholder="e.g. https://example.com/notify?msg={{message}}"
-          name="webhookUrl"
-          data-cy="settings-notificationWebhookUrl"
+          id="notification_update_webhook_url"
+          placeholder="e.g. https://example.com/update?msg={{message}}"
+          name="updateWebhookUrl"
+          data-cy="settings-notificationUpdateWebhookUrl"
+        />
+      </FormControl>
+
+      <FormControl
+        label="Auto-heal webhook URL"
+        inputId="notification_heal_webhook_url"
+        errors={errors.healWebhookUrl}
+      >
+        <Field
+          as={Input}
+          id="notification_heal_webhook_url"
+          placeholder="e.g. https://example.com/heal?msg={{message}}"
+          name="healWebhookUrl"
+          data-cy="settings-notificationHealWebhookUrl"
         />
       </FormControl>
 

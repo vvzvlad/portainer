@@ -1,3 +1,4 @@
 export interface Values {
-  webhookUrl: string;
+  updateWebhookUrl: string;
+  healWebhookUrl: string;
 }

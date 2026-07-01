@@ -73,8 +73,10 @@ func (store *Store) checkOrCreateDefaultSettings() error {
 		defaultSettings.ContainerAutomation.AutoUpdate.RollbackOnFailure = false
 		defaultSettings.ContainerAutomation.AutoUpdate.RollbackTimeout = "120s"
 
-		// The shared automation notification webhook is opt-in: empty by default.
-		defaultSettings.ContainerAutomation.Notification.WebhookURL = ""
+		// The automation notification webhooks are opt-in per mechanism: both the
+		// auto-update and auto-heal endpoints are empty (disabled) by default.
+		defaultSettings.ContainerAutomation.Notification.UpdateWebhookURL = ""
+		defaultSettings.ContainerAutomation.Notification.HealWebhookURL = ""
 
 		return store.SettingsService.UpdateSettings(defaultSettings)
 	}

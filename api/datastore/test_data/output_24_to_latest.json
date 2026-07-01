@@ -600,7 +600,8 @@
         "Scope": "labeled"
       },
       "Notification": {
-        "WebhookURL": ""
+        "HealWebhookURL": "",
+        "UpdateWebhookURL": ""
       }
     },
     "Edge": {

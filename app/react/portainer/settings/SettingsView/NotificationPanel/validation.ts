@@ -14,17 +14,25 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+// optionalHttpUrl builds a schema for an independently-optional webhook URL: an
+// empty value disables that mechanism's webhook, otherwise it must be an http(s)
+// URL (the "{{message}}" placeholder is allowed).
+function optionalHttpUrl() {
+  return string()
+    .default('')
+    .test('valid-webhook-url', 'Must be a valid http(s) URL', (value) => {
+      if (!value) {
+        return true;
+      }
+
+      return isHttpUrl(value);
+    });
+}
+
 export function validation(): SchemaOf<Values> {
   return object({
-    // Optional field: an empty URL disables the webhook.
-    webhookUrl: string()
-      .default('')
-      .test('valid-webhook-url', 'Must be a valid http(s) URL', (value) => {
-        if (!value) {
-          return true;
-        }
-
-        return isHttpUrl(value);
-      }),
+    // Each URL is independently optional: an empty URL disables that webhook.
+    updateWebhookUrl: optionalHttpUrl(),
+    healWebhookUrl: optionalHttpUrl(),
   });
 }
