@@ -4,6 +4,7 @@ import { saveAs } from 'file-saver';
 import DateTimeRangePicker from '@wojtekmaj/react-datetimerange-picker';
 import {
   Calendar,
+  Check,
   Clock,
   Copy,
   Download,
@@ -102,7 +103,7 @@ export function LogViewer({
   );
 
   // Copy uses the project's secure-context-safe clipboard wrapper.
-  const { handleCopy } = useCopy(logsAsString);
+  const { handleCopy, copiedSuccessfully } = useCopy(logsAsString);
 
   // Keep the newest line in view while tailing, but only if the user has not
   // scrolled up to read history (so an active read is never yanked to the bottom).
@@ -218,16 +219,16 @@ export function LogViewer({
             data-cy="log-viewer-filter-results"
           />
 
-          {/* Copy */}
+          {/* Copy — shows a transient "Copied" acknowledgement */}
           <Button
             color="default"
             size="small"
-            icon={Copy}
+            icon={copiedSuccessfully ? Check : Copy}
             onClick={handleCopy}
             className="!m-0"
             data-cy="log-viewer-copy"
           >
-            Copy
+            {copiedSuccessfully ? 'Copied' : 'Copy'}
           </Button>
 
           {/* Download logs */}

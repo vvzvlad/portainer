@@ -33,7 +33,10 @@ function highlight(text: string, search: string): ReactNode {
       parts.push(text.substring(start, idx));
     }
     parts.push(
-      <mark key={idx} className="bg-warning-5 th-dark:bg-warning-9">
+      <mark
+        key={idx}
+        className="bg-warning-5 text-black th-dark:bg-warning-9 th-dark:text-white th-highcontrast:bg-warning-9 th-highcontrast:text-white"
+      >
         {text.substring(idx, idx + term.length)}
       </mark>
     );
