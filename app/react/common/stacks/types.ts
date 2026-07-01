@@ -85,8 +85,19 @@ export interface Stack {
     Prune: boolean;
     Force: boolean;
   };
+  /**
+   * GitConfig is the git repository configuration for git-backed stacks.
+   * Deprecated: loaded from the Source via WorkflowID; kept for DB backwards
+   * compatibility only. Prefer WorkflowID to detect a git-backed stack.
+   */
   GitConfig?: RepoConfigResponse;
   GitSourceId?: number;
+  /**
+   * WorkflowID is the ID of the Workflow that owns the Source for this stack.
+   * A non-zero value means the stack is git-backed (canonical signal, mirrors
+   * the Go `Stack.WorkflowID`).
+   */
+  WorkflowID?: number;
   FromAppTemplate: boolean;
   Namespace?: string;
   IsComposeFormat: boolean;
