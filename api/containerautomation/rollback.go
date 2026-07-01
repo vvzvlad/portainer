@@ -9,7 +9,6 @@ import (
 	portainer "github.com/portainer/portainer/api"
 
 	"github.com/docker/docker/api/types/container"
-	dockerclient "github.com/docker/docker/client"
 	"github.com/rs/zerolog/log"
 	"go.podman.io/image/v5/docker/reference"
 )
@@ -245,7 +244,7 @@ func isTagReference(ref string) bool {
 // in the same tick. The overlap guard in update() still prevents ticks from
 // piling up; this is accepted rather than re-architected (no per-container
 // goroutine) to keep the update path simple and ordered.
-func (s *Service) healthGate(cli *dockerclient.Client, containerID string, timeout, startPeriod time.Duration) gateResult {
+func (s *Service) healthGate(cli dockerClient, containerID string, timeout, startPeriod time.Duration) gateResult {
 	if timeout <= 0 {
 		timeout = defaultRollbackTimeout
 	}
@@ -339,7 +338,7 @@ func (s *Service) gateDeadlineResult() gateResult {
 // If any step fails the previous image cannot be safely restored, so the
 // (unhealthy) new container is left running rather than destroyed, and a loud
 // failure notification is emitted.
-func (s *Service) rollback(cli *dockerclient.Client, endpoint *portainer.Endpoint, newContainerID, oldImageID, originalRef, containerName string) {
+func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newContainerID, oldImageID, originalRef, containerName string) {
 	endpointID := int(endpoint.ID)
 
 	log.Warn().Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
