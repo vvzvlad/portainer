@@ -177,7 +177,7 @@ func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, opt
 			continue
 		}
 
-		candidates = append(candidates, UpdateCandidate{ID: c.ID, Name: containerName(c.Names), ImageID: c.ImageID, Labels: c.Labels})
+		candidates = append(candidates, UpdateCandidate{ID: c.ID, Name: containerName(c.Names), ImageID: c.ImageID, Image: c.Image, Labels: c.Labels})
 	}
 
 	// Route and de-duplicate: one redeploy per stack per tick.
@@ -193,7 +193,7 @@ func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, opt
 	}
 
 	for _, st := range grouped.Stacks {
-		s.updateStack(endpoint, st)
+		s.updateStack(cli, endpoint, st)
 	}
 }
 
@@ -506,7 +506,11 @@ func (s *Service) cleanupOldImage(cli *dockerclient.Client, endpoint *portainer.
 //     change or via a manual "Update now", and we do not fetch git every tick.
 //   - file stacks: the deployer is driven directly with forcePullImage=true,
 //     applying the image update immediately.
-func (s *Service) updateStack(endpoint *portainer.Endpoint, st StackUpdate) {
+//
+// On a successful file-stack redeploy it emits one EventUpdated per member
+// container that triggered the update (not a single aggregate stack event), each
+// carrying the stack name and a best-effort post-redeploy new image id.
+func (s *Service) updateStack(cli *dockerclient.Client, endpoint *portainer.Endpoint, st StackUpdate) {
 	if st.IsGit {
 		// Detect-only: leave git bookkeeping to the git redeploy path. Logged at
 		// debug so it does not repeat at info on every tick (it would otherwise
@@ -553,8 +557,42 @@ func (s *Service) updateStack(endpoint *portainer.Endpoint, st StackUpdate) {
 
 	log.Info().Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
 		Msg("auto-update: redeployed compose stack with updated images")
-	s.notifier.Notify(Event{
-		Kind: EventUpdated, EndpointID: int(endpoint.ID), StackID: st.StackID,
-		Message: "redeployed compose stack with updated images",
-	})
+
+	// One notification PER updated container (the maintainer's requirement), each
+	// showing the container's stack name. The stack was redeployed as a whole, so the
+	// per-container new image id is not in hand; re-inspect each container by its
+	// (compose-stable) name to fill in the "new" digest best-effort. A failed inspect
+	// leaves NewDigest empty and the message falls back to "image updated" — never a
+	// blocked delivery.
+	for _, c := range st.Containers {
+		s.notifier.Notify(Event{
+			Kind: EventUpdated, EndpointID: int(endpoint.ID), StackID: st.StackID,
+			StackName: c.Labels[composeProjectLabel], ContainerName: c.Name,
+			Image: c.Image, OldDigest: c.ImageID, NewDigest: s.inspectImageID(cli, c.Name),
+			Message: "updated stack container",
+		})
+	}
+}
+
+// inspectImageID re-inspects a container by its (compose-stable) name after a stack
+// redeploy to recover the new local image id for the update notification. It is
+// best-effort: any failure (or an empty name) yields "", and the caller degrades the
+// message to "image updated" rather than blocking delivery. The inspect is bounded
+// like every other engine call so a hung engine cannot stall the tick.
+func (s *Service) inspectImageID(cli *dockerclient.Client, containerName string) string {
+	if containerName == "" {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(s.baseCtx, endpointTimeout)
+	defer cancel()
+
+	inspect, err := cli.ContainerInspect(ctx, containerName)
+	if err != nil {
+		log.Debug().Err(err).Str("container", containerName).
+			Msg("auto-update: unable to inspect stack container for its new image id, notifying without it")
+		return ""
+	}
+
+	return inspect.Image
 }

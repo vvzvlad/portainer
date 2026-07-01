@@ -29,7 +29,13 @@ type Event struct {
 	// by the webhook message. It may be empty for events keyed only by ID.
 	ContainerName string
 	StackID       int
-	Image         string
+	// StackName is the compose project (stack) name a container belongs to, sourced
+	// from its com.docker.compose.project label at detection time. It is set on a
+	// per-container update event for a stack member so the webhook can print a
+	// "Stack [name]" line without a StackID/Stack().Read round-trip; empty for
+	// standalone containers.
+	StackName string
+	Image     string
 	// OldDigest and NewDigest carry the pre/post image identities for an update
 	// (image IDs, e.g. "sha256:59b9..."). They are threaded from the update call
 	// site where they are known and left empty otherwise; the webhook notifier

@@ -144,8 +144,13 @@ func (n webhookNotifier) deliver(webhookURL, message string) {
 func (n webhookNotifier) formatMessage(settings *portainer.Settings, event Event) string {
 	lines := []string{"Environment | " + n.environmentName(event.EndpointID)}
 
-	// Context line: the stack for stack-scoped events, otherwise the container.
+	// Context line: the stack for stack-scoped events, otherwise the container. A
+	// per-container stack-member update carries StackName (from the compose label),
+	// preferred over a StackID/Stack().Read round-trip; the container itself still
+	// names the action line below.
 	switch {
+	case event.StackName != "":
+		lines = append(lines, fmt.Sprintf("Stack [%s]", event.StackName))
 	case event.StackID != 0:
 		lines = append(lines, fmt.Sprintf("Stack [%s]", n.stackName(event.StackID)))
 	case event.ContainerName != "":

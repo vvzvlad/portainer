@@ -9,6 +9,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	dockerclient "github.com/docker/docker/client"
 	portainer "github.com/portainer/portainer/api"
 	consts "github.com/portainer/portainer/api/docker/consts"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 // Status constants
@@ -42,12 +44,32 @@ const (
 	statusCacheTTL            = 5 * time.Minute
 	errorStatusCacheTTL       = 5 * time.Minute
 	maxConcurrentStatusChecks = 8
+
+	// forcedRecheckMinInterval bounds how often a forced re-check (?force=true)
+	// actually contacts the registry for the same local imageID. A manual re-check
+	// bypasses the read caches and issues an outbound registry HEAD; because the
+	// endpoint is available to any env-authorized user with no throttle, an
+	// unbounded loop of forced calls would burn the instance's shared registry
+	// pull-rate quota. Within this window a forced call reuses the just-computed
+	// fresh result instead of re-HEADing. It is tied to the remoteDigestCache TTL so
+	// a genuine manual re-check still gets a fresh answer the first time.
+	forcedRecheckMinInterval = 5 * time.Second
 )
 
 var (
 	statusCache       = cache.New(statusCacheTTL, statusCacheTTL)
 	remoteDigestCache = cache.New(5*time.Second, 5*time.Second)
 	swarmID2NameCache = cache.New(5*time.Second, 5*time.Second)
+
+	// forcedRecheckGroup coalesces concurrent forced re-checks of the SAME local
+	// imageID so N simultaneous ?force=true calls collapse to ONE registry HEAD
+	// (singleflight), rather than each issuing its own outbound HEAD.
+	forcedRecheckGroup singleflight.Group
+	// forcedResultCache holds the last successful forced-recompute result per
+	// imageID for forcedRecheckMinInterval, so rapid successive forced calls reuse it
+	// instead of re-HEADing the registry. Only successful results are stored (errors
+	// are never cached, so a transient failure does not suppress a real re-check).
+	forcedResultCache = cache.New(forcedRecheckMinInterval, forcedRecheckMinInterval)
 )
 
 // Status holds Docker image  analysis
@@ -172,16 +194,30 @@ func (c *DigestClient) containerImageStatus(ctx context.Context, containerID str
 	// and Skipped are cached too (only the error paths return early without caching).
 	//
 	// A forced re-check (force=true) skips this cached read and recomputes against
-	// the registry, then writes the fresh result back into the cache below.
+	// the registry (see forcedImageStatus), then writes the fresh result back into
+	// the cache below.
 	if !force {
 		if s, err := CachedResourceImageStatus(imageID); err == nil {
 			return s, nil
 		}
+
+		return c.computeImageStatus(ctx, cli, imageID, container.Config.Image, false)
 	}
 
+	return c.forcedImageStatus(ctx, cli, imageID, container.Config.Image)
+}
+
+// computeImageStatus performs the full, uncached image-status computation for a
+// resolved local imageID: it parses the configured image reference, inspects the
+// local image for its repo digests/tags, compares them against the remote registry
+// digest (honoring force for the short-lived remoteDigestCache read in checkStatus)
+// and writes the fresh result back into the statusCache. It is the shared body of
+// both the default (cache-miss) and forced-recompute paths; the default path's
+// behaviour is unchanged from the previous inline implementation.
+func (c *DigestClient) computeImageStatus(ctx context.Context, cli *dockerclient.Client, imageID, configImage string, force bool) (Status, error) {
 	digs := make([]digest.Digest, 0)
 	images := make([]*Image, 0)
-	if i, err := ParseImage(ParseImageOptions{Name: container.Config.Image}); err == nil {
+	if i, err := ParseImage(ParseImageOptions{Name: configImage}); err == nil {
 		images = append(images, &i)
 	}
 
@@ -201,13 +237,54 @@ func (c *DigestClient) containerImageStatus(ctx context.Context, containerID str
 
 	s, err := c.checkStatus(ctx, images, digs, force)
 	if err != nil {
-		log.Debug().Str("image", container.Image).Err(err).Msg("fetching a certain image status")
+		log.Debug().Str("image", configImage).Err(err).Msg("fetching a certain image status")
 		return Error, err
 	}
 
 	statusCache.Set(imageID, s, 0)
 
-	return s, err
+	return s, nil
+}
+
+// forcedImageStatus recomputes the image status against the registry for a manual
+// re-check while bounding the registry load a ?force=true call can cause:
+//
+//   - forcedResultCache serves the just-computed fresh result for
+//     forcedRecheckMinInterval, so rapid successive forced calls reuse it instead
+//     of re-HEADing the registry (min-interval throttle).
+//   - forcedRecheckGroup (singleflight) shares one in-flight computation per
+//     imageID, so N concurrent forced calls collapse to a single registry HEAD.
+//
+// A successful recompute still repopulates both the statusCache and (via
+// checkStatus) the remoteDigestCache, so an immediately following default read is
+// served from cache. Failures are not cached, so a transient error never suppresses
+// a genuine re-check.
+func (c *DigestClient) forcedImageStatus(ctx context.Context, cli *dockerclient.Client, imageID, configImage string) (Status, error) {
+	if s, ok := forcedResultCache.Get(imageID); ok {
+		return s.(Status), nil
+	}
+
+	v, err, _ := forcedRecheckGroup.Do(imageID, func() (any, error) {
+		// A concurrent forced call may have populated the result between our read
+		// above and entering the flight; reuse it rather than HEAD the registry again.
+		if s, ok := forcedResultCache.Get(imageID); ok {
+			return s.(Status), nil
+		}
+
+		s, err := c.computeImageStatus(ctx, cli, imageID, configImage, true)
+		if err != nil {
+			return Error, err
+		}
+
+		forcedResultCache.Set(imageID, s, 0)
+
+		return s, nil
+	})
+	if err != nil {
+		return Error, err
+	}
+
+	return v.(Status), nil
 }
 
 func (c *DigestClient) ServiceImageStatus(ctx context.Context, serviceID string, endpoint *portainer.Endpoint) (Status, error) {

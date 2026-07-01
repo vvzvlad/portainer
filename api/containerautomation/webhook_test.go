@@ -205,6 +205,49 @@ func TestFormatMessageStackUpdate(t *testing.T) {
 	}
 }
 
+// TestFormatMessageStackMemberUpdate covers the per-container update of a
+// stack-member container: the context line is the compose stack name (from
+// StackName, no Stack().Read), the action line names the container with its
+// old->new digests. This is the maintainer's target output.
+func TestFormatMessageStackMemberUpdate(t *testing.T) {
+	n, store := newTestWebhookNotifier(t, "unused")
+	createEndpoint(t, store, 1, "nebula.lc")
+
+	settings, _ := store.Settings().Settings()
+
+	msg := n.formatMessage(settings, Event{
+		Kind: EventUpdated, EndpointID: 1, StackID: 7, StackName: "cache-demo",
+		ContainerName: "esphome",
+		OldDigest:     "sha256:59b94983c73aabcd", NewDigest: "sha256:2231ca5d676dabcd",
+	})
+
+	want := "Environment | nebula.lc\nStack [cache-demo]\nUpdate [esphome]: 59b94983c73a → 2231ca5d676d"
+	if msg != want {
+		t.Errorf("got:\n%q\nwant:\n%q", msg, want)
+	}
+}
+
+// TestFormatMessageStackMemberUpdateNoNewDigest covers the best-effort fallback:
+// when the post-redeploy new image id could not be recovered, the message still
+// carries the stack and container and degrades the action line to "image updated"
+// rather than blocking delivery.
+func TestFormatMessageStackMemberUpdateNoNewDigest(t *testing.T) {
+	n, store := newTestWebhookNotifier(t, "unused")
+	createEndpoint(t, store, 1, "nebula.lc")
+
+	settings, _ := store.Settings().Settings()
+
+	msg := n.formatMessage(settings, Event{
+		Kind: EventUpdated, EndpointID: 1, StackID: 7, StackName: "cache-demo",
+		ContainerName: "esphome", OldDigest: "sha256:59b94983c73aabcd",
+	})
+
+	want := "Environment | nebula.lc\nStack [cache-demo]\nUpdate [esphome]: image updated"
+	if msg != want {
+		t.Errorf("got:\n%q\nwant:\n%q", msg, want)
+	}
+}
+
 // TestFormatMessageAutoHeal covers the auto-heal message design.
 func TestFormatMessageAutoHeal(t *testing.T) {
 	n, store := newTestWebhookNotifier(t, "unused")

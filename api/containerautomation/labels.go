@@ -161,15 +161,26 @@ type UpdateCandidate struct {
 	ID string
 	// Name is the container's primary name (no leading slash). It is stable across
 	// a recreate and keys the update->rollback loop guard.
-	Name    string
+	Name string
+	// ImageID is the pre-update local image id ("sha256:..."), the "old" digest in a
+	// per-container update notification.
 	ImageID string
-	Labels  map[string]string
+	// Image is the container's image reference (e.g. "nginx:latest"), carried for the
+	// notification.
+	Image  string
+	Labels map[string]string
 }
 
-// StackUpdate identifies a Portainer stack to redeploy once.
+// StackUpdate identifies a Portainer stack to redeploy once, together with the
+// affected member containers so each updated container can emit its own
+// notification (with the stack name) after the redeploy.
 type StackUpdate struct {
 	StackID int
 	IsGit   bool
+	// Containers are the outdated member containers that triggered this stack
+	// redeploy, threaded through from detection so a per-container notification can
+	// be emitted for each (name + old image id + image + labels/stack name).
+	Containers []UpdateCandidate
 }
 
 // GroupedUpdates partitions candidates into their apply paths, de-duplicating
@@ -186,7 +197,10 @@ type GroupedUpdates struct {
 // so a stack with several outdated containers is redeployed only once.
 func groupContainersForUpdate(candidates []UpdateCandidate, stackLookup func(project string) *StackMatch) GroupedUpdates {
 	grouped := GroupedUpdates{}
-	seenStacks := make(map[int]bool)
+	// stackIndex maps a stack id to its slot in grouped.Stacks so a stack is
+	// redeployed once, while every member container is still collected for its own
+	// notification (rather than discarded at the collapse).
+	stackIndex := make(map[int]int)
 
 	for _, c := range candidates {
 		routing := resolveContainerUpdateRouting(c.Labels, stackLookup)
@@ -196,12 +210,14 @@ func groupContainersForUpdate(candidates []UpdateCandidate, stackLookup func(pro
 		case UpdateExternal:
 			grouped.External = append(grouped.External, c)
 		case UpdateStack:
-			if seenStacks[routing.StackID] {
-				continue
+			idx, ok := stackIndex[routing.StackID]
+			if !ok {
+				grouped.Stacks = append(grouped.Stacks, StackUpdate{StackID: routing.StackID, IsGit: routing.IsGit})
+				idx = len(grouped.Stacks) - 1
+				stackIndex[routing.StackID] = idx
 			}
 
-			seenStacks[routing.StackID] = true
-			grouped.Stacks = append(grouped.Stacks, StackUpdate{StackID: routing.StackID, IsGit: routing.IsGit})
+			grouped.Stacks[idx].Containers = append(grouped.Stacks[idx].Containers, c)
 		}
 	}
 

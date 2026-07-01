@@ -195,9 +195,9 @@ func TestGroupContainersForUpdate(t *testing.T) {
 
 	candidates := []UpdateCandidate{
 		{ID: "standalone-1"},
-		{ID: "web-a", Labels: map[string]string{composeProjectLabel: "web"}},
-		{ID: "web-b", Labels: map[string]string{composeProjectLabel: "web"}}, // same stack -> deduped
-		{ID: "api-a", Labels: map[string]string{composeProjectLabel: "api"}},
+		{ID: "web-a", Name: "web-a", Labels: map[string]string{composeProjectLabel: "web"}},
+		{ID: "web-b", Name: "web-b", Labels: map[string]string{composeProjectLabel: "web"}}, // same stack -> deduped redeploy, both kept as members
+		{ID: "api-a", Name: "api-a", Labels: map[string]string{composeProjectLabel: "api"}},
 		{ID: "ext-1", Labels: map[string]string{composeProjectLabel: "unknown"}},
 	}
 
@@ -227,5 +227,22 @@ func TestGroupContainersForUpdate(t *testing.T) {
 
 	if isGit, ok := got[4]; !ok || !isGit {
 		t.Errorf("stack 4 = (%v, present=%v), want present git stack", isGit, ok)
+	}
+
+	// The stack is redeployed once, but every member container is threaded through
+	// (not discarded at the collapse) so each can emit its own notification.
+	members := map[int][]string{}
+	for _, st := range grouped.Stacks {
+		for _, c := range st.Containers {
+			members[st.StackID] = append(members[st.StackID], c.Name)
+		}
+	}
+
+	if got := members[3]; len(got) != 2 || got[0] != "web-a" || got[1] != "web-b" {
+		t.Errorf("stack 3 members = %v, want [web-a web-b]", got)
+	}
+
+	if got := members[4]; len(got) != 1 || got[0] != "api-a" {
+		t.Errorf("stack 4 members = %v, want [api-a]", got)
 	}
 }
