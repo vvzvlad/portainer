@@ -34,9 +34,30 @@ describe('resolveContainerUpdatePath', () => {
     ).toEqual({ kind: 'stack', stackId: 7, isGitStack: false });
   });
 
-  it('flags git stacks so they redeploy via the git path', () => {
+  it('flags git stacks (non-zero WorkflowID) so they redeploy via the git path', () => {
     const stack = buildStack({
       Id: 9,
+      Name: 'git-stack',
+      EndpointId: 3,
+      WorkflowID: 42,
+    });
+
+    expect(
+      resolveContainerUpdatePath(
+        {
+          labels: { [COMPOSE_STACK_NAME_LABEL]: 'git-stack' },
+          environmentId: 3,
+        },
+        [stack]
+      )
+    ).toEqual({ kind: 'stack', stackId: 9, isGitStack: true });
+  });
+
+  it('does not flag a git stack from a deprecated GitConfig alone (no WorkflowID)', () => {
+    // GitConfig is deprecated and can diverge from the Workflow/Source model;
+    // only a non-zero WorkflowID marks a stack git-backed (mirrors the Go daemon).
+    const stack = buildStack({
+      Id: 11,
       Name: 'git-stack',
       EndpointId: 3,
       GitConfig: { URL: 'https://example.com/repo.git' } as Stack['GitConfig'],
@@ -50,7 +71,7 @@ describe('resolveContainerUpdatePath', () => {
         },
         [stack]
       )
-    ).toEqual({ kind: 'stack', stackId: 9, isGitStack: true });
+    ).toEqual({ kind: 'stack', stackId: 11, isGitStack: false });
   });
 
   it('returns external when the compose project has no matching stack', () => {
