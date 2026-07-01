@@ -25,9 +25,18 @@ type Event struct {
 	Kind        EventKind
 	EndpointID  int
 	ContainerID string
-	StackID     int
-	Image       string
-	Message     string
+	// ContainerName is the human-readable container name (no leading slash), used
+	// by the webhook message. It may be empty for events keyed only by ID.
+	ContainerName string
+	StackID       int
+	Image         string
+	// OldDigest and NewDigest carry the pre/post image identities for an update
+	// (image IDs, e.g. "sha256:59b9..."). They are threaded from the update call
+	// site where they are known and left empty otherwise; the webhook notifier
+	// short-forms them into the "old → new" part of the message.
+	OldDigest string
+	NewDigest string
+	Message   string
 	// Err carries the underlying error for failure events; nil otherwise.
 	Err error
 }
@@ -72,4 +81,27 @@ func (logNotifier) Notify(event Event) {
 	}
 
 	entry.Msg("container automation: " + message)
+}
+
+// multiNotifier fans an event out to several notifiers in order. It is how the
+// service composes the always-on logNotifier with the optional webhookNotifier
+// without either implementation having to know about the other. Each notifier is
+// itself non-blocking, so multiNotifier stays safe on the daemon hot path.
+type multiNotifier []Notifier
+
+// Notify forwards the event to every wrapped notifier. Each call is isolated by
+// a recover() so one misbehaving notifier can neither abort the others nor let a
+// panic reach the daemon hot path; logNotifier is kept first and unchanged.
+func (m multiNotifier) Notify(event Event) {
+	for _, n := range m {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Warn().Interface("panic", r).Msg("container automation: recovered from panic in notifier")
+				}
+			}()
+
+			n.Notify(event)
+		}()
+	}
 }

@@ -183,7 +183,7 @@ func (s *Service) healEndpoint(endpoint *portainer.Endpoint, scope string) {
 		log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).Int("attempt", newState.attempts).
 			Msg("auto-heal: restarted unhealthy container")
 		s.notifier.Notify(Event{
-			Kind: EventHealRestarted, EndpointID: endpointID, ContainerID: c.ID,
+			Kind: EventHealRestarted, EndpointID: endpointID, ContainerID: c.ID, ContainerName: containerName(c.Names),
 			Message: "restarted unhealthy container",
 		})
 	}

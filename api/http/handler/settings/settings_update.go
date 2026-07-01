@@ -3,6 +3,7 @@ package settings
 import (
 	"cmp"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -80,8 +81,13 @@ type settingsUpdatePayload struct {
 }
 
 type containerAutomationSettingsPayload struct {
-	AutoHeal   *autoHealSettingsPayload
-	AutoUpdate *autoUpdateSettingsPayload
+	AutoHeal     *autoHealSettingsPayload
+	AutoUpdate   *autoUpdateSettingsPayload
+	Notification *notificationSettingsPayload
+}
+
+type notificationSettingsPayload struct {
+	WebhookURL *string `example:"https://example.com/notify?msg={{message}}"`
 }
 
 type autoHealSettingsPayload struct {
@@ -174,6 +180,19 @@ func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
 		if autoUpdate.RollbackTimeout != nil {
 			if d, err := time.ParseDuration(*autoUpdate.RollbackTimeout); err != nil || d < minAutoUpdateRollbackTimeout {
 				return errors.New("Invalid auto-update rollback timeout. Must be a duration of at least 10s (e.g. 120s)")
+			}
+		}
+	}
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.Notification != nil {
+		notification := payload.ContainerAutomation.Notification
+		// Optional field: only validate when a non-empty URL is provided. The URL may
+		// carry the "{{message}}" placeholder, so we accept any http(s) URL with a
+		// host rather than a strict format check.
+		if notification.WebhookURL != nil && *notification.WebhookURL != "" {
+			u, err := url.Parse(*notification.WebhookURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return errors.New("Invalid notification webhook URL. Must be a valid http(s) URL")
 			}
 		}
 	}
@@ -335,6 +354,12 @@ func (handler *Handler) updateSettings(tx dataservices.DataStoreTx, payload sett
 		current.Cleanup = *cmp.Or(autoUpdate.Cleanup, &current.Cleanup)
 		current.RollbackOnFailure = *cmp.Or(autoUpdate.RollbackOnFailure, &current.RollbackOnFailure)
 		current.RollbackTimeout = *cmp.Or(autoUpdate.RollbackTimeout, &current.RollbackTimeout)
+	}
+
+	if payload.ContainerAutomation != nil && payload.ContainerAutomation.Notification != nil {
+		notification := payload.ContainerAutomation.Notification
+		current := &settings.ContainerAutomation.Notification
+		current.WebhookURL = *cmp.Or(notification.WebhookURL, &current.WebhookURL)
 	}
 
 	if err := tx.Settings().UpdateSettings(settings); err != nil {

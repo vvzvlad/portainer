@@ -160,9 +160,17 @@ export interface AutoUpdateSettings {
   RollbackTimeout: string;
 }
 
+// NotificationSettings holds the shared webhook called on every
+// container-automation event (image update, rollback, failed update, auto-heal
+// restart). An empty WebhookURL disables it.
+export interface NotificationSettings {
+  WebhookURL: string;
+}
+
 export interface ContainerAutomationSettings {
   AutoHeal: AutoHealSettings;
   AutoUpdate: AutoUpdateSettings;
+  Notification: NotificationSettings;
 }
 
 export interface GlobalDeploymentOptions {

@@ -598,6 +598,9 @@
         "RollbackOnFailure": false,
         "RollbackTimeout": "120s",
         "Scope": "labeled"
+      },
+      "Notification": {
+        "WebhookURL": ""
       }
     },
     "Edge": {

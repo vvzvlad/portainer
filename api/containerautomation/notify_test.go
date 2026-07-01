@@ -43,6 +43,32 @@ func TestRecordingNotifierCapturesEvents(t *testing.T) {
 	}
 }
 
+// panicNotifier always panics, standing in for a misbehaving notifier.
+type panicNotifier struct{}
+
+func (panicNotifier) Notify(Event) {
+	panic("boom")
+}
+
+// TestMultiNotifierIsolatesPanics verifies a panicking notifier neither aborts
+// the sibling notifiers nor lets the panic reach the caller.
+func TestMultiNotifierIsolatesPanics(t *testing.T) {
+	before := &recordingNotifier{}
+	after := &recordingNotifier{}
+
+	m := multiNotifier{before, panicNotifier{}, after}
+
+	// Must not panic even though a wrapped notifier does.
+	m.Notify(Event{Kind: EventUpdated, EndpointID: 1})
+
+	if len(before.events) != 1 {
+		t.Errorf("notifier before the panicking one got %d events, want 1", len(before.events))
+	}
+	if len(after.events) != 1 {
+		t.Errorf("notifier after the panicking one got %d events, want 1 (panic must not abort the loop)", len(after.events))
+	}
+}
+
 func TestAutomationEnabledForEndpoint(t *testing.T) {
 	tests := []struct {
 		name     string

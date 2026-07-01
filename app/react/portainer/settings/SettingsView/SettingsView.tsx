@@ -16,6 +16,7 @@ import { BackupSettingsPanel } from './BackupSettingsView';
 import { HelmCertPanel } from './HelmCertPanel';
 import { HiddenContainersPanel } from './HiddenContainersPanel/HiddenContainersPanel';
 import { KubeSettingsPanel } from './KubeSettingsPanel';
+import { NotificationPanel } from './NotificationPanel';
 import { SSLSettingsPanelWrapper } from './SSLSettingsPanel/SSLSettingsPanel';
 import { ExperimentalFeatures } from './ExperimentalFeatures';
 
@@ -59,6 +60,8 @@ export function SettingsView() {
         <AutoHealPanel />
 
         <AutoUpdatePanel />
+
+        <NotificationPanel />
 
         <BackupSettingsPanel />
       </div>

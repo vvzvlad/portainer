@@ -107,9 +107,13 @@ func NewService(
 		digestClient:     images.NewClientWithRegistry(images.NewRegistryClient(dataStore), clientFactory),
 		containerService: containerService,
 		stackDeployer:    stackDeployer,
-		notifier:         logNotifier{},
-		retries:          make(map[string]retryState),
-		rolledBack:       make(map[string]rolledBackTarget),
+		// Compose the always-on log notifier with the optional webhook notifier.
+		// The webhook reads the current settings per-event from the datastore, so a
+		// URL change in the UI takes effect without a restart; logNotifier keeps the
+		// existing structured log output unchanged.
+		notifier:   multiNotifier{logNotifier{}, newWebhookNotifier(dataStore)},
+		retries:    make(map[string]retryState),
+		rolledBack: make(map[string]rolledBackTarget),
 	}
 }
 

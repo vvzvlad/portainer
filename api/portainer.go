@@ -1176,11 +1176,24 @@ type (
 		RollbackTimeout   string `json:"RollbackTimeout" example:"120s"`
 	}
 
+	// ContainerAutomationNotificationSettings holds the shared webhook
+	// notification config for container-automation events (image update,
+	// rollback, update-failed and auto-heal restart). A single webhook is used
+	// across every automation event, as requested by the maintainer.
+	ContainerAutomationNotificationSettings struct {
+		// WebhookURL is the HTTP(S) endpoint called on each automation event.
+		// When it contains the "{{message}}" placeholder, the URL-encoded event
+		// message is substituted in and the URL is fetched with GET; otherwise the
+		// plain-text message is POSTed as the request body. Empty disables it.
+		WebhookURL string `json:"WebhookURL"`
+	}
+
 	// ContainerAutomationSettings holds native container automation settings
 	// (auto-heal and auto-update).
 	ContainerAutomationSettings struct {
-		AutoHeal   ContainerAutoHealSettings   `json:"AutoHeal"`
-		AutoUpdate ContainerAutoUpdateSettings `json:"AutoUpdate"`
+		AutoHeal     ContainerAutoHealSettings               `json:"AutoHeal"`
+		AutoUpdate   ContainerAutoUpdateSettings             `json:"AutoUpdate"`
+		Notification ContainerAutomationNotificationSettings `json:"Notification"`
 	}
 
 	// Settings represents the application settings

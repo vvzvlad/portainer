@@ -316,7 +316,7 @@ func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer
 		log.Warn().Err(err).Str("container_id", c.ID).Int("endpoint_id", endpointID).
 			Msg("auto-update: failed to recreate standalone container")
 		s.notifier.Notify(Event{
-			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID,
+			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
 			Message: "failed to recreate standalone container", Err: err,
 		})
 		return
@@ -352,8 +352,9 @@ func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer
 	// Emit "updated" now: either there was no gate (emitted right after recreate,
 	// as before), or the gate confirmed the new container is healthy.
 	s.notifier.Notify(Event{
-		Kind: EventUpdated, EndpointID: endpointID, ContainerID: newContainer.ID,
-		Image: newImage, Message: "updated standalone container",
+		Kind: EventUpdated, EndpointID: endpointID, ContainerID: newContainer.ID, ContainerName: c.Name,
+		Image: newImage, OldDigest: oldImageID, NewDigest: newContainer.Image,
+		Message: "updated standalone container",
 	})
 
 	if opts.cleanup && newContainer != nil && newContainer.Image != oldImageID {

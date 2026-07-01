@@ -355,7 +355,7 @@ func (s *Service) rollback(cli *dockerclient.Client, endpoint *portainer.Endpoin
 		log.Error().Err(err).Str("image_id", oldImageID).Str("image", originalRef).Int("endpoint_id", endpointID).
 			Msg("auto-update: rollback failed to re-tag the previous image, leaving the unhealthy container in place")
 		s.notifier.Notify(Event{
-			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID,
+			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
 			Image: originalRef, Message: "rollback failed: could not re-tag previous image", Err: err,
 		})
 
@@ -366,7 +366,7 @@ func (s *Service) rollback(cli *dockerclient.Client, endpoint *portainer.Endpoin
 		log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
 			Msg("auto-update: rollback recreate failed, leaving the unhealthy container in place")
 		s.notifier.Notify(Event{
-			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID,
+			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
 			Image: originalRef, Message: "rollback failed: could not recreate on previous image", Err: err,
 		})
 
@@ -376,7 +376,7 @@ func (s *Service) rollback(cli *dockerclient.Client, endpoint *portainer.Endpoin
 	log.Warn().Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
 		Msg("auto-update: rolled back to the previous image after a failed update")
 	s.notifier.Notify(Event{
-		Kind: EventRollback, EndpointID: endpointID, ContainerID: newContainerID,
+		Kind: EventRollback, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
 		Image: originalRef, Message: "rolled back to previous image after failed health check",
 	})
 

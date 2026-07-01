@@ -126,3 +126,44 @@ func TestSettingsUpdatePayloadValidateRollbackTimeout(t *testing.T) {
 		})
 	}
 }
+
+// TestSettingsUpdatePayloadValidateNotificationWebhookURL covers the shared
+// container-automation notification webhook URL: it is optional (empty is valid),
+// must be a valid http(s) URL with a host when set, and accepts the
+// "{{message}}" placeholder.
+func TestSettingsUpdatePayloadValidateNotificationWebhookURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{name: "empty is allowed (disabled)", url: "", wantErr: false},
+		{name: "plain https URL is allowed", url: "https://example.com/notify", wantErr: false},
+		{name: "http URL is allowed", url: "http://example.com/notify", wantErr: false},
+		{name: "URL with placeholder is allowed", url: "https://example.com/notify?msg={{message}}", wantErr: false},
+		{name: "missing scheme is rejected", url: "example.com/notify", wantErr: true},
+		{name: "non-http scheme is rejected", url: "ftp://example.com/notify", wantErr: true},
+		{name: "missing host is rejected", url: "https://", wantErr: true},
+		{name: "garbage is rejected", url: "not a url", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := settingsUpdatePayload{
+				ContainerAutomation: &containerAutomationSettingsPayload{
+					Notification: &notificationSettingsPayload{
+						WebhookURL: strptr(tc.url),
+					},
+				},
+			}
+
+			err := payload.Validate(httptest.NewRequest("PUT", "/settings", nil))
+			if tc.wantErr && err == nil {
+				t.Errorf("Validate(%q) = nil, want error", tc.url)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("Validate(%q) = %v, want nil", tc.url, err)
+			}
+		})
+	}
+}
