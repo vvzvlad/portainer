@@ -227,7 +227,19 @@ export function useLogViewer({
               setError(undefined);
             }
           },
-          signal
+          signal,
+          () => {
+            // Stream opened successfully (headers received, HTTP ok). Clear any
+            // stale error banner from a previous drop even when the container is
+            // idle and no new line arrives, so a healthy reconnect does not leave
+            // the banner stuck. Only fires on a real open, so a failing reconnect
+            // (which rejects before this) still surfaces its error.
+            if (!active) {
+              return;
+            }
+            errorNotified = false;
+            setError(undefined);
+          }
         );
         if (!active) {
           return;

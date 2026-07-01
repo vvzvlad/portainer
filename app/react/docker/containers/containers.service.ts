@@ -250,7 +250,8 @@ export async function streamContainerLogs(
   containerId: ContainerId,
   params: StreamLogsParams,
   onChunk: (bytes: Uint8Array) => void,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onOpen?: () => void
 ): Promise<void> {
   const path = buildDockerProxyUrl(
     environmentId,
@@ -295,6 +296,10 @@ export async function streamContainerLogs(
       `Unable to stream container logs (HTTP ${response.status})`
     );
   }
+
+  // Stream is open (headers received, HTTP ok). Signal it before reading so the
+  // caller can clear a stale error even if the container is idle and never emits.
+  onOpen?.();
 
   if (!response.body) {
     return;

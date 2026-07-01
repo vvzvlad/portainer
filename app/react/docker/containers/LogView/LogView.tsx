@@ -48,14 +48,16 @@ export function LogView() {
   function streamLogs(
     params: StreamLogsParams,
     onChunk: (bytes: Uint8Array) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    onOpen?: () => void
   ) {
     return streamContainerLogs(
       environmentId,
       containerId,
       params,
       onChunk,
-      signal
+      signal,
+      onOpen
     );
   }
 

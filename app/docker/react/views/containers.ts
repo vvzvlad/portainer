@@ -25,9 +25,8 @@ export const containersModule = angular
     'containerItemView',
     r2a(withUIRouter(withCurrentUser(ItemView)), [])
   )
-  // the view only contains the information panel when logging is disabled
-  // this is a temporary solution to avoid creating a publicly exposed component
-  // or an AngularJS component until the logs view is migrated to React
+  // LogView renders the full React log viewer (streaming + snapshot); it falls
+  // back to an information panel only when logging is disabled for the container.
   .component(
     'containerLogView',
     r2a(withUIRouter(withReactQuery(withCurrentUser(LogView))), [])
