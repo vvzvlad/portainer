@@ -14,7 +14,6 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
-	dockerclient "github.com/docker/docker/client"
 	"github.com/rs/zerolog/log"
 )
 
@@ -234,7 +233,7 @@ func (s *Service) stackLookupForEndpoint(endpointID portainer.EndpointID) func(p
 // Sequence: capture old image id + original ref + healthcheck -> recreate(pull)
 // -> [health gate] -> on healthy: cleanup (if enabled); on unhealthy: rollback
 // (never cleanup).
-func (s *Service) updateStandalone(cli *dockerclient.Client, endpoint *portainer.Endpoint, c UpdateCandidate, opts updateOptions) {
+func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoint, c UpdateCandidate, opts updateOptions) {
 	endpointID := int(endpoint.ID)
 
 	// Loop-guard safety: the rolled-back map is keyed by endpoint+name (the only
@@ -476,7 +475,7 @@ func (s *Service) shouldSkipRolledBack(key string, rec rolledBackTarget) bool {
 // image that still carries tags or is referenced by any container, so this only
 // succeeds when the old image has become genuinely dangling (untagged and
 // unused). It never touches a tagged image still in use.
-func (s *Service) cleanupOldImage(cli *dockerclient.Client, endpoint *portainer.Endpoint, oldImageID string) {
+func (s *Service) cleanupOldImage(cli dockerClient, endpoint *portainer.Endpoint, oldImageID string) {
 	if oldImageID == "" {
 		return
 	}
@@ -510,7 +509,7 @@ func (s *Service) cleanupOldImage(cli *dockerclient.Client, endpoint *portainer.
 // On a successful file-stack redeploy it emits one EventUpdated per member
 // container that triggered the update (not a single aggregate stack event), each
 // carrying the stack name and a best-effort post-redeploy new image id.
-func (s *Service) updateStack(cli *dockerclient.Client, endpoint *portainer.Endpoint, st StackUpdate) {
+func (s *Service) updateStack(cli dockerClient, endpoint *portainer.Endpoint, st StackUpdate) {
 	if st.IsGit {
 		// Detect-only: leave git bookkeeping to the git redeploy path. Logged at
 		// debug so it does not repeat at info on every tick (it would otherwise
@@ -579,7 +578,7 @@ func (s *Service) updateStack(cli *dockerclient.Client, endpoint *portainer.Endp
 // best-effort: any failure (or an empty name) yields "", and the caller degrades the
 // message to "image updated" rather than blocking delivery. The inspect is bounded
 // like every other engine call so a hung engine cannot stall the tick.
-func (s *Service) inspectImageID(cli *dockerclient.Client, containerName string) string {
+func (s *Service) inspectImageID(cli dockerClient, containerName string) string {
 	if containerName == "" {
 		return ""
 	}
