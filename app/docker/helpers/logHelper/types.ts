@@ -36,9 +36,19 @@ export type Span = {
   fontWeight?: FontWeight;
 };
 
-export type FormattedLine = {
+// A rendered log line without its stable id. Internal formatters build these,
+// and `formatLogs` assigns the `id` once, centrally, on the way out.
+export type FormattedLineContent = {
   spans: Span[];
   line: string;
+};
+
+// A rendered log line with a stable, monotonically increasing id. The id lets
+// the AngularJS template use `track by log.id`, so already-rendered rows are
+// never re-bound (their text nodes are not rewritten) — which is what keeps a
+// live text selection from collapsing while new lines stream in.
+export type FormattedLine = FormattedLineContent & {
+  id: number;
 };
 
 export const TIMESTAMP_LENGTH = 31; // 30 for timestamp + 1 for trailing space

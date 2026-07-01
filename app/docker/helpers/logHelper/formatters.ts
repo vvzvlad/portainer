@@ -1,7 +1,13 @@
 import { format } from 'date-fns';
 import { takeRight } from 'lodash';
 
-import { Span, Level, Colors, JSONStackTrace, FormattedLine } from './types';
+import {
+  Span,
+  Level,
+  Colors,
+  JSONStackTrace,
+  FormattedLineContent,
+} from './types';
 
 const spaceSpan: Span = { text: ' ' };
 
@@ -141,7 +147,7 @@ export function formatKeyValuePair(
 
 export function formatStackTrace(
   stackTrace: JSONStackTrace | undefined,
-  lines: FormattedLine[]
+  lines: FormattedLineContent[]
 ) {
   if (stackTrace) {
     stackTrace.forEach(({ func, line: lineNumber, source }) => {

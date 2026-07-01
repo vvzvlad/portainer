@@ -1,6 +1,11 @@
 import { without } from 'lodash';
 
-import { FormattedLine, Span, JSONLogs, TIMESTAMP_LENGTH } from './types';
+import {
+  FormattedLineContent,
+  Span,
+  JSONLogs,
+  TIMESTAMP_LENGTH,
+} from './types';
 import {
   formatCaller,
   formatKeyValuePair,
@@ -17,14 +22,23 @@ function removeKnownKeys(keys: string[]) {
 export function formatJSONLine(
   rawText: string,
   withTimestamps?: boolean
-): FormattedLine[] {
+): FormattedLineContent[] {
   const spans: Span[] = [];
-  const lines: FormattedLine[] = [];
+  const lines: FormattedLineContent[] = [];
   let line = '';
 
   const text = withTimestamps ? rawText.substring(TIMESTAMP_LENGTH) : rawText;
 
-  const json: JSONLogs = JSON.parse(text);
+  const parsed: unknown = JSON.parse(text);
+  // Only treat the line as a structured JSON log when it actually parses to a
+  // plain object. A line serialized as a bare JSON string (e.g. `"hello"`)
+  // parses to a string, whose `Object.keys` is `['0','1',...]` — which used to
+  // render as `0=h 1=e ...`. Fall back to the plain-text path in that case.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    const plain = rawText;
+    return [{ line: plain, spans: [{ text: plain }] }];
+  }
+  const json = parsed as JSONLogs;
   const { time, level, caller, message, stack_trace: stackTrace } = json;
   const keys = removeKnownKeys(Object.keys(json));
 

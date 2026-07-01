@@ -124,7 +124,38 @@ func (proxy *dockerLocalProxy) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	w.WriteHeader(res.StatusCode)
 
-	if _, err := io.Copy(w, res.Body); err != nil {
-		log.Debug().Err(err).Msg("proxy error")
+	streamResponse(w, res.Body)
+}
+
+// streamResponse copies body to w, flushing after every chunk instead of using
+// io.Copy. io.Copy buffers into the http.ResponseWriter (~2KB) and only flushes
+// when the buffer fills or the handler returns, so low-throughput streaming
+// docker responses (container logs follow, events, stats, attach) would arrive
+// in multi-second batches instead of live; flushing per chunk delivers them as
+// they are produced. Behaviour otherwise matches io.Copy: the n>0 chunk is
+// written BEFORE the readErr check so a simultaneous Read -> (n>0, io.EOF)
+// still emits the final chunk; a write error or a non-EOF read error breaks the
+// loop with a Debug log; and a writer that does not implement http.Flusher
+// degrades to the old buffered behaviour rather than panicking.
+func streamResponse(w http.ResponseWriter, body io.Reader) {
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				log.Debug().Err(writeErr).Msg("proxy error")
+				break
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				log.Debug().Err(readErr).Msg("proxy error")
+			}
+			break
+		}
 	}
 }

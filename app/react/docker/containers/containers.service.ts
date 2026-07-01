@@ -1,8 +1,17 @@
 import _ from 'lodash';
+import { InternalAxiosRequestConfig } from 'axios';
 
 import { EnvironmentId } from '@/react/portainer/environments/types';
 import PortainerError from '@/portainer/error';
-import axios, { parseAxiosError } from '@/portainer/services/axios/axios';
+import axios, {
+  agentTargetHeader,
+  parseAxiosError,
+} from '@/portainer/services/axios/axios';
+import {
+  portainerAgentManagerOperation,
+  portainerAgentTargetHeader,
+} from '@/portainer/services/http-request.helper';
+import { dockerMaxAPIVersionInterceptor } from '@/portainer/services/dockerMaxApiVersionInterceptor';
 
 import { withAgentTargetHeader } from '../proxy/queries/utils';
 import { buildDockerProxyUrl } from '../proxy/queries/buildDockerProxyUrl';
@@ -188,5 +197,131 @@ export async function getContainerLogs(
     return data;
   } catch (e) {
     throw parseAxiosError(e, 'Unable to get container logs');
+  }
+}
+
+export type StreamLogsParams = ContainerLogsParams & {
+  /** follow=1 — keep the connection open and stream new lines as they arrive */
+  follow?: boolean;
+};
+
+// Memoize the Docker max-API-version pinning per proxy path for the session. The
+// pinning interceptor only rewrites the URL based on the environment's Docker API
+// version (cached and stable for the session), so resolving it once avoids an
+// extra `/version` round-trip on every reconnect. Caching the Promise also
+// dedupes concurrent reconnect attempts.
+const pinnedLogPathCache = new Map<string, Promise<string>>();
+
+function resolvePinnedLogPath(path: string): Promise<string> {
+  let cached = pinnedLogPathCache.get(path);
+  if (!cached) {
+    cached = dockerMaxAPIVersionInterceptor({
+      url: path,
+    } as InternalAxiosRequestConfig).then((config) => config.url ?? path);
+    pinnedLogPathCache.set(path, cached);
+  }
+  return cached;
+}
+
+/**
+ * Live-tail a container's logs over HTTP.
+ *
+ * Unlike `getContainerLogs` (axios, buffers the whole body), this uses `fetch`
+ * so we can read the response body as a `ReadableStream` and surface the raw
+ * byte chunks to the caller as they arrive (`follow=1`). Bytes are handed over
+ * undecoded so the caller can demux Docker's binary multiplexed frames at the
+ * byte level (UTF-8-decoding the whole stream would corrupt frame headers). The
+ * backend already
+ * streams `follow=1` transparently through the Docker proxy — including for
+ * Agent/Edge environments — so no backend change is needed.
+ *
+ * Auth: the API uses an httpOnly JWT cookie (SameSite=Strict), so a same-origin
+ * `fetch` with `credentials: 'include'` carries it automatically — no
+ * `Authorization` header. CSRF middleware only guards mutating methods; logs is
+ * a GET, so it is unaffected. The agent-target / manager-operation headers
+ * (normally added by the axios `agentInterceptor`) are replicated here so the
+ * stream also resolves the correct node on Agent/Edge environments.
+ *
+ * The caller drives lifetime via `signal`: aborting it (unmount, container
+ * switch, pausing Live) cancels the in-flight fetch and ends the read loop.
+ */
+export async function streamContainerLogs(
+  environmentId: EnvironmentId,
+  containerId: ContainerId,
+  params: StreamLogsParams,
+  onChunk: (bytes: Uint8Array) => void,
+  signal: AbortSignal,
+  onOpen?: () => void
+): Promise<void> {
+  const path = buildDockerProxyUrl(
+    environmentId,
+    'containers',
+    containerId,
+    'logs'
+  );
+
+  // The fetch path bypasses the axios request interceptors, so apply the same
+  // Docker max-API-version pinning axios applies to getContainerLogs. Resolve it
+  // once per session (memoized below) instead of hitting `/version` on every 3s
+  // reconnect — the pinning only depends on the environment's Docker API version,
+  // which is stable for the session.
+  const effectivePath = await resolvePinnedLogPath(path);
+
+  const query = new URLSearchParams();
+  // _.pickBy drops undefined/0/'' the same way the axios path does
+  Object.entries(_.pickBy(params)).forEach(([key, value]) => {
+    query.set(key, String(typeof value === 'boolean' ? Number(value) : value));
+  });
+
+  // axios baseURL is 'api'; mirror it here since fetch doesn't share it.
+  const url = `api${effectivePath}?${query.toString()}`;
+
+  const headers: Record<string, string> = {};
+  const target = portainerAgentTargetHeader();
+  if (target) {
+    headers[agentTargetHeader] = target;
+  }
+  if (portainerAgentManagerOperation()) {
+    headers['X-PortainerAgent-ManagerOperation'] = '1';
+  }
+
+  const response = await fetch(url, {
+    signal,
+    credentials: 'include',
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new PortainerError(
+      `Unable to stream container logs (HTTP ${response.status})`
+    );
+  }
+
+  // Stream is open (headers received, HTTP ok). Signal it before reading so the
+  // caller can clear a stale error even if the container is idle and never emits.
+  onOpen?.();
+
+  if (!response.body) {
+    return;
+  }
+
+  const reader = response.body.getReader();
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value) {
+        // Hand over the raw bytes undecoded; the caller demuxes Docker's binary
+        // frames and decodes complete lines itself. UTF-8 chars split across
+        // chunks are reassembled there before decoding, so no decoder flush is
+        // needed here. The caller flushes its own trailing partial line on end.
+        onChunk(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
   }
 }

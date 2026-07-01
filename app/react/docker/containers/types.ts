@@ -54,6 +54,12 @@ export type ContainerLogsParams = {
   stdout?: boolean;
   stderr?: boolean;
   timestamps?: boolean;
-  since?: number;
+  // Unix timestamp. The live-stream path sends a "<seconds>.<nanos>" string so a
+  // reconnect can resume at exact nanosecond precision (which a number cannot
+  // hold); the buffered axios path passes a plain number.
+  since?: number | string;
+  // Unix timestamp upper bound. Only relevant for a bounded snapshot fetch (Auto
+  // refresh off with a from–to range selected); the live-tail path never sets it.
+  until?: number | string;
   tail?: number;
 };

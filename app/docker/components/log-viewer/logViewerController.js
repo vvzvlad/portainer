@@ -16,24 +16,31 @@ angular.module('portainer.docker').controller('LogViewerController', [
         { desc: 'Last 10 minutes', value: moment().subtract(10, 'minutes').format() },
       ],
       copySupported: clipboard.supported,
-      logCollection: true,
       autoScroll: true,
       wrapLines: true,
       search: '',
       filteredLogs: [],
-      selectedLines: [],
     };
 
-    this.handleLogsCollectionChange = handleLogsCollectionChange.bind(this);
     this.handleLogsWrapLinesChange = handleLogsWrapLinesChange.bind(this);
     this.handleDisplayTimestampsChange = handleDisplayTimestampsChange.bind(this);
+    this.applyFilter = applyFilter.bind(this);
 
-    function handleLogsCollectionChange(enabled) {
-      $scope.$evalAsync(() => {
-        this.state.logCollection = enabled;
-        this.state.autoScroll = enabled;
-        this.logCollectionChange(enabled);
-      });
+    this.$onInit = function () {
+      this.applyFilter();
+      // Compute the filtered list in the controller (not in the template) so we
+      // do not rebuild `filteredLogs` on every digest. `$watchCollection` only
+      // fires when lines are actually appended; combined with `track by log.id`
+      // in the template, already-rendered rows are never re-bound — so a live
+      // text selection survives incoming log lines.
+      $scope.$watchCollection(() => this.data, this.applyFilter);
+      $scope.$watch(() => this.state.search, this.applyFilter);
+    };
+
+    function applyFilter() {
+      const data = this.data || [];
+      const search = (this.state.search || '').toLowerCase();
+      this.state.filteredLogs = search ? data.filter((log) => log.line && log.line.toLowerCase().indexOf(search) > -1) : data;
     }
 
     function handleLogsWrapLinesChange(enabled) {
@@ -52,25 +59,6 @@ angular.module('portainer.docker').controller('LogViewerController', [
       clipboard.copyText(this.state.filteredLogs.map((log) => log.line).join(NEW_LINE_BREAKER));
       $('#refreshRateChange').show();
       $('#refreshRateChange').fadeOut(2000);
-    };
-
-    this.copySelection = function () {
-      clipboard.copyText(this.state.selectedLines.join(NEW_LINE_BREAKER));
-      $('#refreshRateChange').show();
-      $('#refreshRateChange').fadeOut(2000);
-    };
-
-    this.clearSelection = function () {
-      this.state.selectedLines = [];
-    };
-
-    this.selectLine = function (line) {
-      var idx = this.state.selectedLines.indexOf(line);
-      if (idx === -1) {
-        this.state.selectedLines.push(line);
-      } else {
-        this.state.selectedLines.splice(idx, 1);
-      }
     };
 
     this.downloadLogs = function () {

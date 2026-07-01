@@ -14,14 +14,6 @@ angular.module('portainer.docker').controller('ServiceLogsController', [
       displayTimestamps: false,
     };
 
-    $scope.changeLogCollection = function (logCollectionStatus) {
-      if (!logCollectionStatus) {
-        stopRepeater();
-      } else {
-        setUpdateRepeater();
-      }
-    };
-
     $scope.$on('$destroy', function () {
       stopRepeater();
     });
@@ -38,7 +30,17 @@ angular.module('portainer.docker').controller('ServiceLogsController', [
       $scope.repeater = $interval(function () {
         ServiceService.logs($transition$.params().id, 1, 1, $scope.state.displayTimestamps ? 1 : 0, moment($scope.state.sinceTimestamp).unix(), $scope.state.lineCount)
           .then(function success(data) {
-            $scope.logs = data;
+            // NOTE: service logs still poll and replace the whole array. Because
+            // formatLogs assigns fresh line ids per poll, `track by log.id` in
+            // the viewer re-renders every row each poll (a live text selection
+            // can collapse). The append-only live stream that fixes this exists
+            // only for container logs (issue #2); converting service/task logs
+            // to a live stream is out of scope here. Assign positionally-stable
+            // ids (0..N) so `track by log.id` reuses rows across polls (like the
+            // old `track by $index`) and a live text selection survives.
+            $scope.logs = data.map(function (line, i) {
+              return { ...line, id: i };
+            });
           })
           .catch(function error(err) {
             stopRepeater();
@@ -50,7 +52,11 @@ angular.module('portainer.docker').controller('ServiceLogsController', [
     function startLogPolling() {
       ServiceService.logs($transition$.params().id, 1, 1, $scope.state.displayTimestamps ? 1 : 0, moment($scope.state.sinceTimestamp).unix(), $scope.state.lineCount)
         .then(function success(data) {
-          $scope.logs = data;
+          // Positionally-stable ids so `track by log.id` reuses rows (see the
+          // poll handler above).
+          $scope.logs = data.map(function (line, i) {
+            return { ...line, id: i };
+          });
           setUpdateRepeater();
         })
         .catch(function error(err) {
