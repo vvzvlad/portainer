@@ -4,7 +4,6 @@ import { saveAs } from 'file-saver';
 import DateTimeRangePicker from '@wojtekmaj/react-datetimerange-picker';
 import {
   Calendar,
-  Check,
   Clock,
   Copy,
   Download,
@@ -24,35 +23,15 @@ import { concatLogsToString } from '@/docker/helpers/logHelper';
 import { FormattedLine } from '@/docker/helpers/logHelper/types';
 
 import { useCopy } from '@@/buttons/CopyButton/useCopy';
+import { Button } from '@@/buttons';
+import { Icon } from '@@/Icon';
+import { Input } from '@@/form-components/Input';
+import { Checkbox } from '@@/form-components/Checkbox';
 
 import { StreamLogsFn } from './types';
 import { useLogViewer } from './useLogViewer';
 import { LogLine } from './LogLine';
 import { ToggleButton } from './ToggleButton';
-
-// The maintainer's mockup palette. This is a deliberately dark, self-contained
-// design (log viewers are conventionally dark), so — unlike the rest of the app —
-// this one component carries its colours inline instead of theme tokens. Only
-// fonts/sizes are pulled back to the project scale (his one explicit ask).
-const C = {
-  card: '#0c0c0d',
-  cardBorder: '#1e1f22',
-  row: '#161719',
-  rowBorder: '#202124',
-  field: '#202124',
-  fieldBorder: '#2c2e32',
-  logBg: '#0b0b0c',
-  text: '#e6e9ea',
-  strong: '#f2f4f5',
-  muted: '#9aa1a8',
-  faint: '#6a7178',
-  logText: '#c8d0ca',
-  iconBox: '#1e2023',
-  iconBoxBorder: '#2a2c30',
-  downloadBg: '#2a2c30',
-  downloadBorder: '#383b40',
-  danger: '#e5484d',
-};
 
 interface Props {
   /** Opens the (optionally following) log stream — see StreamLogsFn. */
@@ -122,8 +101,7 @@ export function LogViewer({
     [displayedLogs]
   );
 
-  // Copy uses the project's secure-context-safe clipboard wrapper (rendered with
-  // the mockup's own button styling below).
+  // Copy uses the project's secure-context-safe clipboard wrapper.
   const { handleCopy } = useCopy(logsAsString);
 
   // Keep the newest line in view while tailing, but only if the user has not
@@ -140,8 +118,7 @@ export function LogViewer({
     if (!el) {
       return;
     }
-    const distanceFromBottom =
-      el.scrollHeight - el.scrollTop - el.clientHeight;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < 24;
   }
 
@@ -152,250 +129,140 @@ export function LogViewer({
   const hasLogs = displayedLogs.length > 0;
 
   return (
-    // Only the maintainer's card is rendered here; Portainer's page provides the
-    // breadcrumb and page title around it.
-    <div className="w-full">
+    // Fill the available page height so the viewer reaches down toward the
+    // viewport bottom instead of leaving a dead white void below a fixed card.
+    // The 150px offset accounts for Portainer's top nav + the page
+    // header/breadcrumb rendered above this component.
+    <div
+      className="flex w-full flex-col"
+      style={{ height: 'calc(100vh - 150px)' }}
+    >
+      {/* Themed card surface — mirrors the project's Card/Widget tokens so it
+          adapts to light / dark / high-contrast like every other Portainer
+          view. It is a flex column whose log body grows to fill the height. */}
       <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          background: C.card,
-          border: `1px solid ${C.cardBorder}`,
-          borderRadius: 12,
-          overflow: 'hidden',
-        }}
+        className={clsx(
+          'flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-solid',
+          'border-gray-5 bg-white',
+          'th-dark:border-legacy-grey-3 th-dark:bg-gray-iron-11',
+          'th-highcontrast:border-white th-highcontrast:bg-black'
+        )}
       >
         {/* Header row: file icon + "Logs" left, search / filter / copy / download right */}
         <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: 14,
-            padding: '13px 16px',
-            background: C.row,
-            borderBottom: `1px solid ${C.rowBorder}`,
-          }}
+          className={clsx(
+            'flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3',
+            'border-0 border-b border-solid border-gray-5 bg-gray-iron-2',
+            'th-dark:border-legacy-grey-3 th-dark:bg-gray-iron-10',
+            'th-highcontrast:border-white th-highcontrast:bg-gray-warm-10'
+          )}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-            <span
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: 9,
-                background: C.iconBox,
-                border: `1px solid ${C.iconBoxBorder}`,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#c7cdd2',
-              }}
-            >
-              <File size={17} />
-            </span>
-            <span className="text-sm font-semibold" style={{ color: C.strong }}>
+          <div className="flex items-center gap-2">
+            <Icon
+              icon={File}
+              size="md"
+              className="text-gray-7 th-dark:text-gray-4 th-highcontrast:text-white"
+            />
+            <span className="text-sm font-semibold text-gray-9 th-dark:text-gray-2 th-highcontrast:text-white">
               Logs
             </span>
-            <button
-              type="button"
+            <Button
+              color="link"
+              size="xsmall"
+              icon={RefreshCw}
               onClick={() => setReloadNonce((n) => n + 1)}
               title="Reload logs"
               aria-label="Reload logs"
+              className="!m-0 !p-0"
               data-cy="log-viewer-reload"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: C.muted,
-              }}
-            >
-              <RefreshCw size={15} />
-            </button>
+            />
           </div>
 
-          <div style={{ flex: '1 1 auto' }} />
+          <div className="flex-1" />
 
           {/* Search box */}
-          <div style={{ position: 'relative', width: 230, maxWidth: '100%' }}>
+          <div className="relative w-56 max-w-full">
             <Search
               size={14}
-              style={{
-                position: 'absolute',
-                left: 12,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                color: C.faint,
-              }}
+              aria-hidden="true"
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted"
             />
-            <input
+            <Input
               id="log-viewer-search"
               type="text"
               value={search}
               placeholder="Search..."
               onChange={(e) => setSearch(e.target.value)}
               data-cy="log-viewer-search"
-              className="text-xs"
-              style={{
-                width: '100%',
-                height: 36,
-                background: C.field,
-                border: `1px solid ${C.fieldBorder}`,
-                borderRadius: 8,
-                padding: '0 32px 0 34px',
-                color: C.text,
-                outline: 'none',
-                boxSizing: 'border-box',
-              }}
+              className="!pl-8 !pr-8"
             />
             {search && (
               <button
                 type="button"
                 onClick={() => setSearch('')}
                 aria-label="Clear search"
-                style={{
-                  position: 'absolute',
-                  right: 10,
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  display: 'flex',
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: C.faint,
-                }}
+                className="absolute right-2 top-1/2 flex -translate-y-1/2 border-0 bg-transparent p-0 text-muted"
               >
                 <X size={14} />
               </button>
             )}
           </div>
 
-          {/* Filter search results — custom checkbox in the mockup's style */}
-          <button
-            type="button"
-            onClick={() => setFilterResults((v) => !v)}
-            aria-pressed={filterResults}
+          {/* Filter search results — project themed checkbox */}
+          <Checkbox
+            id="log-viewer-filter-results"
+            label="Filter search results"
+            checked={filterResults}
+            onChange={(e) => setFilterResults(e.target.checked)}
+            bold={false}
             data-cy="log-viewer-filter-results"
-            className="text-xs"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 9,
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              padding: 0,
-              color: C.text,
-            }}
-          >
-            <span
-              style={{
-                width: 18,
-                height: 18,
-                borderRadius: 5,
-                flex: '0 0 auto',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                border: `1.5px solid ${filterResults ? '#e6e9ea' : '#3a3d42'}`,
-                background: filterResults ? '#e6e9ea' : 'transparent',
-              }}
-            >
-              {filterResults && (
-                <Check size={12} strokeWidth={3.5} color="#0a0a0b" />
-              )}
-            </span>
-            <span style={{ whiteSpace: 'nowrap', fontWeight: 500 }}>
-              Filter search results
-            </span>
-          </button>
+          />
 
           {/* Copy */}
-          <button
-            type="button"
+          <Button
+            color="default"
+            size="small"
+            icon={Copy}
             onClick={handleCopy}
+            className="!m-0"
             data-cy="log-viewer-copy"
-            className="text-xs"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 7,
-              height: 36,
-              padding: '0 13px',
-              background: C.field,
-              border: `1px solid ${C.fieldBorder}`,
-              borderRadius: 8,
-              color: C.text,
-              fontWeight: 500,
-              cursor: 'pointer',
-              whiteSpace: 'nowrap',
-            }}
           >
-            <Copy size={15} />
             Copy
-          </button>
+          </Button>
 
           {/* Download logs */}
-          <button
-            type="button"
+          <Button
+            color="primary"
+            size="small"
+            icon={Download}
             onClick={downloadLogs}
             disabled={!hasLogs}
+            className="!m-0"
             data-cy="log-viewer-download"
-            className="text-xs"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 7,
-              height: 36,
-              padding: '0 13px',
-              background: C.downloadBg,
-              border: `1px solid ${C.downloadBorder}`,
-              borderRadius: 8,
-              color: C.strong,
-              fontWeight: 500,
-              cursor: hasLogs ? 'pointer' : 'not-allowed',
-              opacity: hasLogs ? 1 : 0.5,
-              whiteSpace: 'nowrap',
-            }}
           >
-            <Download size={15} />
             Download logs
-          </button>
+          </Button>
         </div>
 
         {/* Toolbar row: datetime range / lines / toggles */}
         <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: 11,
-            padding: '11px 16px',
-            background: C.row,
-            borderBottom: `1px solid ${C.rowBorder}`,
-          }}
+          className={clsx(
+            'flex flex-wrap items-center gap-2 px-4 py-2.5',
+            'border-0 border-b border-solid border-gray-5 bg-gray-iron-2',
+            'th-dark:border-legacy-grey-3 th-dark:bg-gray-iron-10',
+            'th-highcontrast:border-white th-highcontrast:bg-gray-warm-10'
+          )}
         >
           {/* One combined "from – to" datetime range control (with time). The
-              functional @wojtekmaj picker is dropped into a frame styled like the
-              mockup's range control; clearing it (null) drops the time window. */}
-          <div
-            data-cy="log-viewer-datetime-range"
-            className="text-xs"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              height: 36,
-              background: C.field,
-              border: `1px solid ${C.fieldBorder}`,
-              borderRadius: 8,
-              padding: '0 6px 0 12px',
-              color: C.text,
-            }}
-          >
+              functional @wojtekmaj picker is dropped into the project's themed
+              form-control frame — the same approach as the app's DateRangePicker
+              — so it reads correctly in both themes; clearing it (null) drops
+              the time window. */}
+          <div data-cy="log-viewer-datetime-range" className="text-xs">
             <DateTimeRangePicker
-              // Strip the picker's own wrapper border so only the frame shows.
-              className="h-full [&>div]:border-0"
+              // Wrap in a themed form-control and strip the picker's own inner
+              // border so only the project frame shows.
+              className="form-control h-9 [&>div]:border-0"
               format="y-MM-dd HH:mm"
               value={since || until ? [since, until] : null}
               onChange={(value) => {
@@ -413,33 +280,14 @@ export function LogViewer({
           </div>
 
           {/* Lines (historical-backfill tail request) */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              height: 36,
-              background: C.field,
-              border: `1px solid ${C.fieldBorder}`,
-              borderRadius: 8,
-              overflow: 'hidden',
-            }}
-          >
+          <div className="flex items-center gap-2">
             <label
               htmlFor="log-viewer-lines"
-              className="text-xs !mb-0"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                height: '100%',
-                padding: '0 12px',
-                color: '#8a9198',
-                borderRight: `1px solid ${C.fieldBorder}`,
-                fontWeight: 400,
-              }}
+              className="!mb-0 text-xs text-muted"
             >
               Lines
             </label>
-            <input
+            <Input
               id="log-viewer-lines"
               type="number"
               min={1}
@@ -453,28 +301,12 @@ export function LogViewer({
                 setLineCount(Number.isNaN(n) ? 0 : n);
               }}
               data-cy="log-viewer-lines"
-              className="text-xs"
-              style={{
-                width: 64,
-                height: '100%',
-                background: 'none',
-                border: 'none',
-                outline: 'none',
-                color: C.text,
-                padding: '0 12px',
-              }}
+              className="!w-24"
             />
           </div>
 
           {/* Display toggles */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: 7,
-            }}
-          >
+          <div className="flex flex-wrap items-center gap-2">
             <ToggleButton
               active={lineNumbers}
               onChange={setLineNumbers}
@@ -503,16 +335,15 @@ export function LogViewer({
         </div>
 
         {error && (
-          <div
-            className="text-xs"
-            style={{ padding: '8px 16px', background: C.logBg, color: C.danger }}
-          >
+          <div className="border-0 border-b border-solid border-gray-5 px-4 py-2 text-xs text-error-8 th-dark:border-legacy-grey-3 th-dark:text-error-6">
             {error}
           </div>
         )}
 
-        {/* Log body — project monospace (log_viewer font-mono); the dark palette
-            is intentional. */}
+        {/* Log body — project monospace + themed `.log_viewer` background/text
+            (from app.css, which follows the theme). Grows to fill the card so
+            there is no dead space below; overrides `.log_viewer`'s height:100%
+            with a flex fill. */}
         <div
           ref={scrollRef}
           onScroll={onScroll}
@@ -521,9 +352,10 @@ export function LogViewer({
             wrapLines ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'
           )}
           style={{
-            height: '60vh',
-            background: C.logBg,
-            color: C.logText,
+            flex: '1 1 auto',
+            minHeight: 0,
+            height: 'auto',
+            overflowY: 'auto',
             padding: '12px 4px 18px 0',
           }}
           data-cy="log-viewer-body"
@@ -539,7 +371,7 @@ export function LogViewer({
               />
             ))
           ) : (
-            <div className="text-xs" style={{ padding: '8px 16px', color: C.muted }}>
+            <div className="px-4 py-2 text-xs text-muted">
               {search
                 ? `No log line matching the '${search}' filter`
                 : 'No logs available'}
