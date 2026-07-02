@@ -8,8 +8,6 @@ import {
 } from '@/react/docker/containers/queries/useContainerImageStatus';
 import { useApplyContainerImageUpdate } from '@/react/docker/containers/update';
 
-import { TooltipWithChildren } from '@@/Tip/TooltipWithChildren';
-
 import { UpdateStatusBadge } from '../../../components/UpdateStatusBadge';
 
 import { columnHelper } from './helper';
@@ -45,13 +43,11 @@ function UpdateAvailableCell({
   );
 
   // Same shared apply flow as the details-view "Update now" button (confirm +
-  // standalone/stack/external routing + permission gating). No `onSuccess`: the
-  // mutation's query invalidation refreshes this row's badge in place.
+  // single-container recreate). No `onSuccess`: the mutation's query
+  // invalidation refreshes this row's badge in place.
   const {
     apply,
     isLoading: isUpdating,
-    isExternal,
-    stackUpdateForbidden,
     canApply,
   } = useApplyContainerImageUpdate({
     environmentId,
@@ -69,9 +65,8 @@ function UpdateAvailableCell({
     <UpdateStatusBadge
       status={status}
       isLoading={statusQuery.isLoading}
-      // Externally-managed / permission-gated updates stay non-actionable: no
-      // click handler, so the badge renders as a plain span (wrapped below in a
-      // tooltip that explains why).
+      // Clicking recreates just this one container (Watchtower-style). Disabled
+      // only for Portainer's own container, which can't recreate itself.
       onUpdateClick={
         status === 'outdated' && canApply ? () => apply() : undefined
       }
@@ -82,24 +77,6 @@ function UpdateAvailableCell({
       isRechecking={recheckMutation.isLoading}
     />
   );
-
-  // Mirror the details-view button's explanations for the two gated cases so a
-  // user understands why the "Update available" badge isn't clickable here.
-  if (status === 'outdated' && isExternal) {
-    return (
-      <TooltipWithChildren message="This container belongs to a compose project that is managed outside Portainer, so it can't be updated from here.">
-        <span>{badge}</span>
-      </TooltipWithChildren>
-    );
-  }
-
-  if (status === 'outdated' && stackUpdateForbidden) {
-    return (
-      <TooltipWithChildren message="Updating this container redeploys its stack, which requires stack update permission you don't have.">
-        <span>{badge}</span>
-      </TooltipWithChildren>
-    );
-  }
 
   return badge;
 }

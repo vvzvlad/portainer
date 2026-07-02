@@ -18,7 +18,6 @@ import (
 	dockerclient "github.com/portainer/portainer/api/docker/client"
 	"github.com/portainer/portainer/api/docker/images"
 	"github.com/portainer/portainer/api/scheduler"
-	"github.com/portainer/portainer/api/stacks/deployments"
 
 	"github.com/rs/zerolog/log"
 )
@@ -37,7 +36,7 @@ const (
 type Service struct {
 	// baseCtx is the application shutdown context. It is the base for every
 	// per-operation timeout context, so a server shutdown cancels in-flight heal
-	// restarts and update redeploys instead of letting them run detached.
+	// restarts and update recreates instead of letting them run detached.
 	baseCtx context.Context
 
 	scheduler     *scheduler.Scheduler
@@ -50,7 +49,6 @@ type Service struct {
 	// an interface so the standalone update/rollback recreate step can be faked in
 	// tests. See containerRecreator.
 	containerService containerRecreator
-	stackDeployer    deployments.StackDeployer
 
 	// notifier receives automation events (update/rollback/failure/heal). The
 	// default is logNotifier; the field is the seam external senders plug into.
@@ -87,16 +85,14 @@ type Service struct {
 // NewService creates a new container automation service. Call Start to schedule
 // the jobs according to the persisted settings. baseCtx is the application
 // shutdown context: it bounds the job operation contexts so a shutdown cancels
-// any in-flight heal/update. The stackDeployer and containerService are used by
-// the auto-update job; they may be nil only in tests that do not exercise
-// auto-update.
+// any in-flight heal/update. containerService is used by the auto-update job; it
+// may be nil only in tests that do not exercise auto-update.
 func NewService(
 	baseCtx context.Context,
 	scheduler *scheduler.Scheduler,
 	dataStore dataservices.DataStore,
 	clientFactory *dockerclient.ClientFactory,
 	containerService *docker.ContainerService,
-	stackDeployer deployments.StackDeployer,
 ) *Service {
 	if baseCtx == nil {
 		baseCtx = context.Background()
@@ -109,7 +105,6 @@ func NewService(
 		clientFactory:    clientFactory,
 		digestClient:     images.NewClientWithRegistry(images.NewRegistryClient(dataStore), clientFactory),
 		containerService: containerService,
-		stackDeployer:    stackDeployer,
 		// Compose the always-on log notifier with the optional webhook notifier.
 		// The webhook reads the current settings per-event from the datastore, so a
 		// URL change in the UI takes effect without a restart; logNotifier keeps the

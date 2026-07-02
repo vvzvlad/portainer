@@ -338,7 +338,7 @@ func (s *Service) gateDeadlineResult() gateResult {
 // If any step fails the previous image cannot be safely restored, so the
 // (unhealthy) new container is left running rather than destroyed, and a loud
 // failure notification is emitted.
-func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newContainerID, oldImageID, originalRef, containerName string) {
+func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newContainerID, oldImageID, originalRef, containerName, stackName string) {
 	endpointID := int(endpoint.ID)
 
 	log.Warn().Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
@@ -355,7 +355,7 @@ func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newCo
 			Msg("auto-update: rollback failed to re-tag the previous image, leaving the unhealthy container in place")
 		s.notifier.Notify(Event{
 			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
-			Image: originalRef, Message: "rollback failed: could not re-tag previous image", Err: err,
+			StackName: stackName, Image: originalRef, Message: "rollback failed: could not re-tag previous image", Err: err,
 		})
 
 		return
@@ -366,7 +366,7 @@ func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newCo
 			Msg("auto-update: rollback recreate failed, leaving the unhealthy container in place")
 		s.notifier.Notify(Event{
 			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
-			Image: originalRef, Message: "rollback failed: could not recreate on previous image", Err: err,
+			StackName: stackName, Image: originalRef, Message: "rollback failed: could not recreate on previous image", Err: err,
 		})
 
 		return
@@ -376,7 +376,7 @@ func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newCo
 		Msg("auto-update: rolled back to the previous image after a failed update")
 	s.notifier.Notify(Event{
 		Kind: EventRollback, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
-		Image: originalRef, Message: "rolled back to previous image after failed health check",
+		StackName: stackName, Image: originalRef, Message: "rolled back to previous image after failed health check",
 	})
 
 	// Record the failed target so the next poll does not immediately re-pull the

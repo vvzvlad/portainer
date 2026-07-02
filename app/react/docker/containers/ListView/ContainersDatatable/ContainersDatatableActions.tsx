@@ -29,7 +29,6 @@ import {
   stopContainer,
 } from '@/react/docker/containers/containers.service';
 import type { EnvironmentId } from '@/react/portainer/environments/types';
-import { useStacks } from '@/react/common/stacks/queries/useStacks';
 import {
   ContainerUpdateContext,
   useBulkUpdateContainerImages,
@@ -84,14 +83,7 @@ export function ContainersDatatableActions({
     'DockerContainerCreate',
   ]);
 
-  // Stack redeploys triggered by "Update" need stack-update rights, gated
-  // separately so we never fire a redeploy the user would get a 403 on.
-  const { authorized: canUpdateStack } = useAuthorizations(
-    'PortainerStackUpdate'
-  );
-
   const router = useRouter();
-  const stacksQuery = useStacks();
   const bulkUpdateMutation = useBulkUpdateContainerImages();
 
   if (!authorized) {
@@ -190,7 +182,7 @@ export function ContainersDatatableActions({
             color="light"
             data-cy="update-selected-docker-container-button"
             onClick={() => onUpdateClick(selectedItems)}
-            disabled={selectedItemCount === 0 || stacksQuery.isLoading}
+            disabled={selectedItemCount === 0}
             isLoading={bulkUpdateMutation.isLoading}
             loadingText="Updating..."
             icon={Download}
@@ -278,8 +270,8 @@ export function ContainersDatatableActions({
   }
 
   function onUpdateClick(selectedItems: ContainerListViewModel[]) {
-    // Apply the shared image-update primitive to every outdated container,
-    // skipping up-to-date/unknown ones and redeploying each owning stack once.
+    // Recreate every outdated container individually (Watchtower-style),
+    // skipping up-to-date/unknown ones.
     const contexts: ContainerUpdateContext[] = selectedItems.map(
       (container) => ({
         id: container.Id,
@@ -293,7 +285,7 @@ export function ContainersDatatableActions({
     );
 
     bulkUpdateMutation.mutate(
-      { contexts, stacks: stacksQuery.data ?? [], canUpdateStack },
+      { contexts },
       {
         onSettled: () => {
           router.stateService.reload();

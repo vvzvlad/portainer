@@ -19,8 +19,11 @@ const (
 )
 
 // Event is a structured container-automation notification. Optional fields are
-// left zero when not applicable to the event (e.g. StackID for a standalone
-// update, ContainerID for a stack redeploy).
+// left zero when not applicable to the event (e.g. StackName for a standalone
+// container that is not a compose stack member, or OldDigest/NewDigest when the
+// pre/post image identity could not be resolved). Every event is per-container:
+// the update path recreates each container individually, so there is no
+// whole-stack redeploy event.
 type Event struct {
 	Kind        EventKind
 	EndpointID  int
