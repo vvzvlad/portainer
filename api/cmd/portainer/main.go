@@ -579,7 +579,7 @@ func buildServer(flags *portainer.CLIFlags, shutdownCtx context.Context, shutdow
 	}
 
 	containerService := docker.NewContainerService(dockerClientFactory, dataStore)
-	containerAutomationService := containerautomation.NewService(shutdownCtx, scheduler, dataStore, dockerClientFactory, containerService, stackDeployer)
+	containerAutomationService := containerautomation.NewService(shutdownCtx, scheduler, dataStore, dockerClientFactory, containerService)
 	containerAutomationService.Start()
 
 	sslDBSettings, err := dataStore.SSLSettings().Settings()

@@ -9,8 +9,6 @@ import (
 	portainer "github.com/portainer/portainer/api"
 	"github.com/portainer/portainer/api/docker/images"
 	"github.com/portainer/portainer/api/internal/endpointutils"
-	"github.com/portainer/portainer/api/stacks/deployments"
-	"github.com/portainer/portainer/api/stacks/stackutils"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -24,8 +22,6 @@ const (
 	// recreateTimeout bounds a standalone recreate (pull + stop + create + start).
 	// Pulls can be slow, so it is generous.
 	recreateTimeout = 10 * time.Minute
-	// stackRedeployTimeout bounds a single stack redeploy-with-pull.
-	stackRedeployTimeout = 15 * time.Minute
 )
 
 // update runs a single auto-update pass over every reachable Docker endpoint.
@@ -112,15 +108,15 @@ func parseRollbackTimeout(raw string) time.Duration {
 }
 
 // updateEndpoint applies image updates to the in-scope, outdated containers of a
-// single endpoint, routing each container to the standalone / stack / external
-// apply path. Stack-managed candidates are grouped so each owning stack is
-// redeployed at most once per tick.
+// single endpoint. Every candidate is recreated individually with a re-pull of
+// its image (Watchtower-style), so a compose stack member keeps its labels and
+// stays part of its project without redeploying the owning stack.
 func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, opts updateOptions) {
 	endpointID := int(endpoint.ID)
 
 	// Swarm note (M4 limitation, mirrors auto-heal): we connect to the endpoint's
 	// primary node only (nodeName ""). Containers scheduled on other Swarm nodes
-	// are not updated here; stacks are redeployed cluster-wide by the swarm engine.
+	// are not updated here.
 	clientTimeout := endpointTimeout
 	cli, err := s.clientFactory.CreateClient(endpoint, "", &clientTimeout)
 	if err != nil {
@@ -179,51 +175,15 @@ func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, opt
 		candidates = append(candidates, UpdateCandidate{ID: c.ID, Name: containerName(c.Names), ImageID: c.ImageID, Image: c.Image, Labels: c.Labels})
 	}
 
-	// Route and de-duplicate: one redeploy per stack per tick.
-	grouped := groupContainersForUpdate(candidates, s.stackLookupForEndpoint(endpoint.ID))
-
-	for _, ext := range grouped.External {
-		log.Debug().Str("container_id", ext.ID).Int("endpoint_id", endpointID).
-			Msg("auto-update: outdated externally-managed compose container, detect only")
-	}
-
-	for _, c := range grouped.Standalone {
+	// Recreate every candidate individually with a re-pull of its image, exactly
+	// like the standalone path. A stack member keeps its compose labels through the
+	// recreate, so it stays part of its project without redeploying the stack.
+	for _, c := range candidates {
 		s.updateStandalone(cli, endpoint, c, opts)
 	}
-
-	for _, st := range grouped.Stacks {
-		s.updateStack(cli, endpoint, st)
-	}
 }
 
-// stackLookupForEndpoint builds a compose-project-name -> Portainer compose stack
-// resolver for a single endpoint. Only Docker Compose stacks on this endpoint
-// match; a same-named swarm/kubernetes stack is treated as external (mirrors
-// M3's resolveContainerUpdatePath).
-func (s *Service) stackLookupForEndpoint(endpointID portainer.EndpointID) func(project string) *StackMatch {
-	stacks, err := s.dataStore.Stack().ReadAll()
-	if err != nil {
-		log.Warn().Err(err).Int("endpoint_id", int(endpointID)).
-			Msg("auto-update: unable to read stacks, treating compose containers as external")
-		return func(string) *StackMatch { return nil }
-	}
-
-	byName := make(map[string]*StackMatch)
-	for i := range stacks {
-		st := &stacks[i]
-		if st.EndpointID != endpointID || st.Type != portainer.DockerComposeStack {
-			continue
-		}
-
-		byName[st.Name] = &StackMatch{StackID: int(st.ID), IsGit: st.WorkflowID != 0}
-	}
-
-	return func(project string) *StackMatch {
-		return byName[project]
-	}
-}
-
-// updateStandalone recreates a standalone container with a re-pull of its image,
+// updateStandalone recreates a container with a re-pull of its image,
 // then (when rollback is enabled and the container has a healthcheck) holds a
 // health gate over the new container and rolls back to the previous image if it
 // fails to become healthy. The old-image cleanup is deliberately ordered AFTER
@@ -245,7 +205,7 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 	// unaffected. (With rollback off there is no rollback to loop, so we proceed.)
 	if skipUnnamedForRollback(opts.rollback, c.Name) {
 		log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).
-			Msg("auto-update: skipping unnamed standalone container, rollback is enabled but there is no stable name to key the loop guard")
+			Msg("auto-update: skipping unnamed container, rollback is enabled but there is no stable name to key the loop guard")
 		return
 	}
 
@@ -313,16 +273,16 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 		// Recreate preserves config and rolls back on a create failure; a pull or
 		// create failure leaves the original container running.
 		log.Warn().Err(err).Str("container_id", c.ID).Int("endpoint_id", endpointID).
-			Msg("auto-update: failed to recreate standalone container")
+			Msg("auto-update: failed to recreate container")
 		s.notifier.Notify(Event{
 			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
-			Message: "failed to recreate standalone container", Err: err,
+			Message: "failed to recreate container", Err: err,
 		})
 		return
 	}
 
 	log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).
-		Msg("auto-update: recreated standalone container with updated image")
+		Msg("auto-update: recreated container with updated image")
 	newImage := ""
 	if newContainer != nil {
 		newImage = newContainer.Config.Image
@@ -353,7 +313,7 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 	s.notifier.Notify(Event{
 		Kind: EventUpdated, EndpointID: endpointID, ContainerID: newContainer.ID, ContainerName: c.Name,
 		Image: newImage, OldDigest: oldImageID, NewDigest: newContainer.Image,
-		Message: "updated standalone container",
+		Message: "updated container",
 	})
 
 	if opts.cleanup && newContainer != nil && newContainer.Image != oldImageID {
@@ -491,107 +451,4 @@ func (s *Service) cleanupOldImage(cli dockerClient, endpoint *portainer.Endpoint
 
 	log.Info().Str("image_id", oldImageID).Int("endpoint_id", int(endpoint.ID)).
 		Msg("auto-update: removed dangling old image after update")
-}
-
-// updateStack applies an image update to a Portainer-managed compose stack so its
-// containers are recreated by the stack engine and stay part of the stack. It is
-// called at most once per stack per tick.
-//
-//   - git stacks: detect-only here. A git stack's source of truth is its commit;
-//     this tick's trigger is an image-only update (same compose manifest, newer
-//     upstream digest), which the git redeploy path (RedeployWhenChanged) would
-//     short-circuit without applying — while still doing a real git fetch every
-//     tick. So we skip git stacks: the image update lands on the stack's next git
-//     change or via a manual "Update now", and we do not fetch git every tick.
-//   - file stacks: the deployer is driven directly with forcePullImage=true,
-//     applying the image update immediately.
-//
-// On a successful file-stack redeploy it emits one EventUpdated per member
-// container that triggered the update (not a single aggregate stack event), each
-// carrying the stack name and a best-effort post-redeploy new image id.
-func (s *Service) updateStack(cli dockerClient, endpoint *portainer.Endpoint, st StackUpdate) {
-	if st.IsGit {
-		// Detect-only: leave git bookkeeping to the git redeploy path. Logged at
-		// debug so it does not repeat at info on every tick (it would otherwise
-		// fire for an unchanged git stack indefinitely).
-		log.Debug().Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
-			Msg("auto-update: outdated git stack image detected, detect only (applied on next git change or manual update)")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(s.baseCtx, stackRedeployTimeout)
-	defer cancel()
-
-	stack, err := s.dataStore.Stack().Read(portainer.StackID(st.StackID))
-	if err != nil {
-		log.Warn().Err(err).Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
-			Msg("auto-update: unable to read stack for redeploy")
-		return
-	}
-
-	// Resolve registries the same way the established userless/system redeploy does
-	// (RedeployWhenChanged): scope them to the stack author's access on the endpoint
-	// and refresh ECR tokens, so an ECR-backed stack authenticates with fresh
-	// credentials instead of the stale token a raw ReadAll() would pass.
-	registries, err := deployments.ResolveStackRegistries(s.dataStore, stack, endpoint.ID)
-	if err != nil {
-		log.Warn().Err(err).Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
-			Msg("auto-update: unable to resolve registries for stack redeploy")
-		return
-	}
-
-	// prune=false (conservative: do not remove resources the user may rely on),
-	// forcePullImage=true (the whole point), forceRecreate=false.
-	if stackutils.IsRelativePathStack(stack) {
-		err = s.stackDeployer.DeployRemoteComposeStack(ctx, stack, endpoint, registries, false, true, false)
-	} else {
-		err = s.stackDeployer.DeployComposeStack(ctx, stack, endpoint, registries, false, true, false)
-	}
-
-	if err != nil {
-		log.Warn().Err(err).Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
-			Msg("auto-update: failed to redeploy compose stack with re-pull")
-		return
-	}
-
-	log.Info().Int("stack_id", st.StackID).Int("endpoint_id", int(endpoint.ID)).
-		Msg("auto-update: redeployed compose stack with updated images")
-
-	// One notification PER updated container (the maintainer's requirement), each
-	// showing the container's stack name. The stack was redeployed as a whole, so the
-	// per-container new image id is not in hand; re-inspect each container by its
-	// (compose-stable) name to fill in the "new" digest best-effort. A failed inspect
-	// leaves NewDigest empty and the message falls back to "image updated" — never a
-	// blocked delivery.
-	for _, c := range st.Containers {
-		s.notifier.Notify(Event{
-			Kind: EventUpdated, EndpointID: int(endpoint.ID), StackID: st.StackID,
-			StackName: c.Labels[composeProjectLabel], ContainerName: c.Name,
-			Image: c.Image, OldDigest: c.ImageID, NewDigest: s.inspectImageID(cli, c.Name),
-			Message: "updated stack container",
-		})
-	}
-}
-
-// inspectImageID re-inspects a container by its (compose-stable) name after a stack
-// redeploy to recover the new local image id for the update notification. It is
-// best-effort: any failure (or an empty name) yields "", and the caller degrades the
-// message to "image updated" rather than blocking delivery. The inspect is bounded
-// like every other engine call so a hung engine cannot stall the tick.
-func (s *Service) inspectImageID(cli dockerClient, containerName string) string {
-	if containerName == "" {
-		return ""
-	}
-
-	ctx, cancel := context.WithTimeout(s.baseCtx, endpointTimeout)
-	defer cancel()
-
-	inspect, err := cli.ContainerInspect(ctx, containerName)
-	if err != nil {
-		log.Debug().Err(err).Str("container", containerName).
-			Msg("auto-update: unable to inspect stack container for its new image id, notifying without it")
-		return ""
-	}
-
-	return inspect.Image
 }

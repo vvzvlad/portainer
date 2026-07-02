@@ -6,7 +6,6 @@ import { useContainerImageStatus } from '@/react/docker/containers/queries/useCo
 import { useApplyContainerImageUpdate } from '@/react/docker/containers/update';
 
 import { ButtonGroup, LoadingButton } from '@@/buttons';
-import { TooltipWithChildren } from '@@/Tip/TooltipWithChildren';
 
 import { ContainerId } from '../../../types';
 
@@ -22,14 +21,11 @@ interface UpdateNowButtonProps {
 
 /**
  * "Update now" surfaces a discoverable per-container apply action ONLY when the
- * image is `outdated`. It routes through the shared update primitive:
- * standalone -> recreate-with-pull, stack-managed -> stack redeploy-with-pull
- * (container stays in its stack). Externally-managed compose containers are
- * shown disabled with an explanatory tooltip, never recreated out-of-band.
- *
- * A stack redeploy is gated by `PortainerStackUpdate` (as everywhere else in the
- * app): a user with container-create but without stack-update rights sees the
- * button disabled with a tooltip rather than getting a 403 on click.
+ * image is `outdated`. It routes through the shared update primitive, which
+ * always recreates just this one container with a fresh image pull (the recreate
+ * endpoint preserves config + compose labels, so a stack member stays part of
+ * its project). The button is disabled only for Portainer's own container, which
+ * can't recreate itself.
  */
 export function UpdateNowButton({
   environmentId,
@@ -46,19 +42,18 @@ export function UpdateNowButton({
     containerId,
     nodeName
   );
-  const { apply, isLoading, isExternal, stackUpdateForbidden, canApply } =
-    useApplyContainerImageUpdate({
-      environmentId,
-      containerId,
-      nodeName,
-      containerImage,
-      containerName,
-      labels,
-      isPortainer,
-      // The details view reloads to reflect the recreated/redeployed container.
-      onSuccess: () =>
-        router.stateService.go('docker.containers', {}, { reload: true }),
-    });
+  const { apply, isLoading, canApply } = useApplyContainerImageUpdate({
+    environmentId,
+    containerId,
+    nodeName,
+    containerImage,
+    containerName,
+    labels,
+    isPortainer,
+    // The details view reloads to reflect the recreated container.
+    onSuccess: () =>
+      router.stateService.go('docker.containers', {}, { reload: true }),
+  });
 
   // Only meaningful when a newer image is actually available.
   if (statusQuery.data?.Status !== 'outdated') {
@@ -79,26 +74,6 @@ export function UpdateNowButton({
       Update now
     </LoadingButton>
   );
-
-  if (isExternal) {
-    return (
-      <ButtonGroup>
-        <TooltipWithChildren message="This container belongs to a compose project that is managed outside Portainer, so it can't be updated from here.">
-          {button}
-        </TooltipWithChildren>
-      </ButtonGroup>
-    );
-  }
-
-  if (stackUpdateForbidden) {
-    return (
-      <ButtonGroup>
-        <TooltipWithChildren message="Updating this container redeploys its stack, which requires stack update permission you don't have.">
-          {button}
-        </TooltipWithChildren>
-      </ButtonGroup>
-    );
-  }
 
   return <ButtonGroup>{button}</ButtonGroup>;
 }
