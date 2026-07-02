@@ -2,7 +2,11 @@ import { Form, useFormikContext } from 'formik';
 import { JSONSchema7 } from 'json-schema';
 import { useCallback } from 'react';
 
-import { Stack, StackType } from '@/react/common/stacks/types';
+import {
+  Stack,
+  StackFileVersionInfo,
+  StackType,
+} from '@/react/common/stacks/types';
 import { PruneField } from '@/react/common/stacks/PruneField';
 import { EnvironmentType } from '@/react/portainer/environments/types';
 import { Authorized, useAuthorizations } from '@/react/hooks/useUser';
@@ -25,6 +29,7 @@ interface StackEditorTabInnerProps {
   schema: JSONSchema7;
   isOrphaned: boolean;
   versions?: Array<number>;
+  versionsInfo?: StackFileVersionInfo[];
   stackId: Stack['Id'];
   isSaved: boolean;
   isSubmitting: boolean;
@@ -38,6 +43,7 @@ export function StackEditorTabInner({
   schema,
   isOrphaned,
   versions,
+  versionsInfo,
   stackId,
   isSaved,
   isSubmitting,
@@ -120,6 +126,7 @@ export function StackEditorTabInner({
             data-cy="stack-editor"
             onVersionChange={handleVersionChange}
             versions={versions}
+            versionsInfo={versionsInfo}
           />
         </div>
       </div>

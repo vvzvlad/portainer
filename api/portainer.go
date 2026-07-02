@@ -324,6 +324,19 @@ type (
 		SourceID SourceID `json:"SourceID,omitempty"`
 	}
 
+	// StackFileVersionInfo records one entry in the append-only file version history
+	// of a file-based (non-git) Compose/Swarm stack.
+	StackFileVersionInfo struct {
+		// Version is the v{N} folder number holding this version's files
+		Version int `json:"Version"`
+		// CreatedAt is the unix time (seconds) when this version was deployed
+		CreatedAt int64 `json:"CreatedAt"`
+		// CreatedBy is the username/id that deployed this version
+		CreatedBy string `json:"CreatedBy,omitempty"`
+		// Note is an optional description (e.g. "rollback from v5", "migrated")
+		Note string `json:"Note,omitempty"`
+	}
+
 	// EdgeStack represents an edge stack
 	EdgeStack struct {
 		// EdgeStack Identifier
@@ -1355,6 +1368,14 @@ type (
 		// DeploymentStatus records the status progression of the current deployment.
 		// Cleared when a new deployment starts.
 		DeploymentStatus []StackDeploymentStatus `json:"DeploymentStatus,omitempty"`
+		// StackFileVersion is the current (monotonic) file version number for file-based
+		// (non-git) Compose/Swarm stacks. Zero for git/kubernetes/edge stacks.
+		StackFileVersion int `json:"StackFileVersion,omitempty"`
+		// PreviousDeploymentInfo records the deployment info captured before the last update,
+		// used by the frontend to display the prior file version.
+		PreviousDeploymentInfo *StackDeploymentInfo `json:"PreviousDeploymentInfo,omitempty"`
+		// Versions is the append-only file version history (source of truth) for file-based stacks.
+		Versions []StackFileVersionInfo `json:"Versions,omitempty"`
 	}
 
 	// StackOption represents the options for stack deployment
@@ -2105,7 +2126,7 @@ type (
 
 const (
 	// APIVersion is the version number of the Portainer API
-	APIVersion = "2.43.0"
+	APIVersion = "2.44.0"
 	// Support annotation for the API version ("STS" for Short-Term Support or "LTS" for Long-Term Support)
 	APIVersionSupport = "STS"
 	// Edition is what this edition of Portainer is called

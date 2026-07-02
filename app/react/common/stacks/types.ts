@@ -113,6 +113,20 @@ export type StackFile = {
   StackFileContent: string;
 };
 
+/**
+ * Metadata describing a single stored version of a stack file, as returned by
+ * `GET /stacks/{id}/versions`. Field casing mirrors the backend JSON.
+ */
+export interface StackFileVersionInfo {
+  Version: number;
+  /**
+   * Creation time of the version, as a Unix timestamp in seconds.
+   */
+  CreatedAt: number;
+  CreatedBy: string;
+  Note: string;
+}
+
 export interface GitStackPayload {
   env: Array<EnvVar>;
   prune?: boolean;

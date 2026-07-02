@@ -5,4 +5,6 @@ export const queryKeys = {
   stack: (stackId?: StackId) => [...queryKeys.base(), stackId] as const,
   stackFile: (stackId?: StackId, params?: unknown) =>
     [...queryKeys.stack(stackId), 'file', params] as const,
+  stackVersions: (stackId?: StackId) =>
+    [...queryKeys.stack(stackId), 'versions'] as const,
 };

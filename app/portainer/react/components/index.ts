@@ -224,6 +224,7 @@ export const ngModule = angular
       'height',
       'data-cy',
       'versions',
+      'versionsInfo',
       'onVersionChange',
       'schema',
       'fileName',

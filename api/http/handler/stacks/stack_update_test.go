@@ -40,7 +40,7 @@ func Test_updateStackInTx(t *testing.T) {
 
 		// Execute updateStackInTx within a successful transaction
 		err := setup.store.UpdateTx(func(tx dataservices.DataStoreTx) error {
-			_, handlerErr := setup.handler.updateStackInTx(tx, setup.req, setup.stack.ID, setup.endpoint.ID)
+			_, _, handlerErr := setup.handler.updateStackInTx(tx, setup.req, setup.stack.ID, setup.endpoint.ID)
 			if handlerErr != nil {
 				return handlerErr
 			}
@@ -70,7 +70,7 @@ func Test_updateStackInTx(t *testing.T) {
 
 		// Execute updateStackInTx within a transaction that we force to fail
 		err := setup.store.UpdateTx(func(tx dataservices.DataStoreTx) error {
-			updatedStack, handlerErr := setup.handler.updateStackInTx(tx, setup.req, setup.stack.ID, setup.endpoint.ID)
+			updatedStack, _, handlerErr := setup.handler.updateStackInTx(tx, setup.req, setup.stack.ID, setup.endpoint.ID)
 			if handlerErr != nil {
 				return handlerErr
 			}
@@ -109,7 +109,7 @@ func Test_updateStackInTx(t *testing.T) {
 
 		var handlerErr *httperror.HandlerError
 		_ = setup.store.UpdateTx(func(tx dataservices.DataStoreTx) error {
-			_, handlerErr = setup.handler.updateStackInTx(tx, setup.req, 9999, setup.endpoint.ID)
+			_, _, handlerErr = setup.handler.updateStackInTx(tx, setup.req, 9999, setup.endpoint.ID)
 			return handlerErr
 		})
 
@@ -132,7 +132,7 @@ func Test_updateStackInTx(t *testing.T) {
 
 		var handlerErr *httperror.HandlerError
 		_ = setup.store.UpdateTx(func(tx dataservices.DataStoreTx) error {
-			_, handlerErr = setup.handler.updateStackInTx(tx, setup.req, stack.ID, 2999) // Non-existent endpoint ID
+			_, _, handlerErr = setup.handler.updateStackInTx(tx, setup.req, stack.ID, 2999) // Non-existent endpoint ID
 			return nil
 		})
 
@@ -162,7 +162,7 @@ func Test_updateStackInTx(t *testing.T) {
 
 		var handlerErr *httperror.HandlerError
 		_ = setup.store.UpdateTx(func(tx dataservices.DataStoreTx) error {
-			_, handlerErr = setup.handler.updateStackInTx(tx, setup.req, stack.ID, stack.EndpointID)
+			_, _, handlerErr = setup.handler.updateStackInTx(tx, setup.req, stack.ID, stack.EndpointID)
 			return nil
 		})
 
@@ -187,7 +187,7 @@ func Test_updateStackInTx(t *testing.T) {
 
 		var handlerErr *httperror.HandlerError
 		_ = setup.store.UpdateTx(func(tx dataservices.DataStoreTx) error {
-			_, handlerErr = setup.handler.updateStackInTx(tx, setup.req, stack.ID, stack.EndpointID)
+			_, _, handlerErr = setup.handler.updateStackInTx(tx, setup.req, stack.ID, stack.EndpointID)
 			return nil
 		})
 
@@ -423,7 +423,7 @@ func Test_updateSwarmStack_Prune(t *testing.T) {
 	setup.handler.StackDeployer = deployer
 
 	err := setup.store.UpdateTx(func(tx dataservices.DataStoreTx) error {
-		_, handlerErr := setup.handler.updateStackInTx(tx, setup.req, setup.stack.ID, setup.endpoint.ID)
+		_, _, handlerErr := setup.handler.updateStackInTx(tx, setup.req, setup.stack.ID, setup.endpoint.ID)
 		if handlerErr != nil {
 			return handlerErr
 		}
@@ -462,7 +462,7 @@ func Test_updateComposeStack_Prune(t *testing.T) {
 	setup.handler.StackDeployer = deployer
 
 	err := setup.store.UpdateTx(func(tx dataservices.DataStoreTx) error {
-		_, handlerErr := setup.handler.updateStackInTx(tx, setup.req, setup.stack.ID, setup.endpoint.ID)
+		_, _, handlerErr := setup.handler.updateStackInTx(tx, setup.req, setup.stack.ID, setup.endpoint.ID)
 		if handlerErr != nil {
 			return handlerErr
 		}

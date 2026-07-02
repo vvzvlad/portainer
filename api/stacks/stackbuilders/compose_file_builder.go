@@ -38,7 +38,7 @@ func (b *ComposeStackFileBuilder) prepare(_ context.Context, payload *StackPaylo
 		return err
 	}
 
-	return b.storeStackFile(payload.StackFileContent)
+	return b.storeStackFileVersioned(payload.StackFileContent)
 }
 
 func (b *ComposeStackFileBuilder) deploy(ctx context.Context, endpoint *portainer.Endpoint) error {

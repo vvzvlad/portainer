@@ -2,6 +2,7 @@ package stacks
 
 import (
 	"net/http"
+	"strconv"
 
 	portainer "github.com/portainer/portainer/api"
 	gittypes "github.com/portainer/portainer/api/git/types"
@@ -107,12 +108,45 @@ func (handler *Handler) stackFile(w http.ResponseWriter, r *http.Request) *httpe
 		return httperror.Conflict("Stack git settings have changed. Redeploy the stack to apply the new configuration.", errors.New("git settings updated without redeploy"))
 	}
 
-	stackFileContent, err := handler.FileService.GetFileContent(stack.ProjectPath, stack.EntryPoint)
+	projectPath := stack.ProjectPath
+
+	// Optional ?version= selects a specific past file version of a file-based (non-git) stack.
+	version, err := request.RetrieveNumericQueryParameter(r, "version", true)
+	if err != nil {
+		return httperror.BadRequest("Invalid query parameter: version", err)
+	}
+	// A negative version is never valid (0/absent means "current"); reject it explicitly
+	// rather than silently falling through to the current version.
+	if version < 0 {
+		return httperror.BadRequest("Invalid query parameter: version", errors.New("version must be a positive integer"))
+	}
+
+	if version > 0 && stack.WorkflowID == 0 {
+		if !stackFileVersionExists(stack, version) {
+			return httperror.BadRequest("Invalid stack file version", errors.Errorf("version %d not found in stack history", version))
+		}
+
+		projectPath = handler.FileService.GetStackProjectPathByVersion(strconv.Itoa(int(stack.ID)), version, "")
+	}
+
+	stackFileContent, err := handler.FileService.GetFileContent(projectPath, stack.EntryPoint)
 	if err != nil {
 		return httperror.InternalServerError("Unable to retrieve Compose file from disk", err)
 	}
 
 	return response.JSON(w, &stackFileResponse{StackFileContent: string(stackFileContent)})
+}
+
+// stackFileVersionExists reports whether the given version is present in the stack's file
+// version history (or, for stacks predating the history seed, is within the current range).
+func stackFileVersionExists(stack *portainer.Stack, version int) bool {
+	for _, v := range stack.Versions {
+		if v.Version == version {
+			return true
+		}
+	}
+
+	return len(stack.Versions) == 0 && version >= 1 && version <= stack.StackFileVersion
 }
 
 // gitStackPendingRedeploy returns true when the stack's git settings (URL or config file path)
