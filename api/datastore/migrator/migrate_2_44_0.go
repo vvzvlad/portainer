@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/filesystem"
 
 	"github.com/rs/zerolog/log"
 )
@@ -160,7 +161,11 @@ func (m *Migrator) materializeStackVersion(stack *portainer.Stack, stackID strin
 
 	// Remove the old base-level copies now that they live under v{v} and ProjectPath points there.
 	for _, fileName := range fileNames {
-		oldPath := filepath.Join(basePath, fileName)
+		// Clamp the path to the trusted base root, consistent with the clamped read
+		// (GetFileContent) and write (StoreStackFileFromBytesByVersion) above, so an
+		// attacker-influenceable fileName (stack.EntryPoint/AdditionalFiles via DB
+		// restore/import) cannot escape basePath in this file-deleting path.
+		oldPath := filesystem.JoinPaths(basePath, fileName)
 		if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
 			log.Warn().Err(err).Int("stack_id", int(stack.ID)).Str("file", fileName).Msg("unable to remove old stack file after version migration")
 		}

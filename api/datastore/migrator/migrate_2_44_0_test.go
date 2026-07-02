@@ -340,6 +340,71 @@ func TestMigrateStackFileVersions_2_44_0_CompleteExistingVersionNoDoubleWrite(t 
 	require.Equal(t, []byte("v2-content"), got)
 }
 
+// TestMigrateStackFileVersions_2_44_0_AdoptCompleteVDirStaleMetadata covers the crash-recovery
+// adopt branch: a COMPLETE v{N} folder is on disk but the DB metadata is stale — exactly the
+// state left if a crash happened between materialization (v{N} written + base files deleted) and
+// the DB persist. ProjectPath still points at the (now-deleted) flat base, StackFileVersion is 0
+// and Versions is empty. The migration's whole crash-safety guarantee is that a re-run repoints
+// this stack to v{N} and seeds its metadata WITHOUT touching the already-complete files. The
+// stale metadata (ProjectPath != vDir, len(Versions)==0) must skip the no-op short-circuit and
+// hit the repoint; this test would fail if the adopt branch didn't persist the metadata.
+func TestMigrateStackFileVersions_2_44_0_AdoptCompleteVDirStaleMetadata(t *testing.T) {
+	t.Parallel()
+
+	m, stackSvc, fileSvc := newStackVersionTestMigrator(t)
+
+	stackFolder := "1"
+	// A COMPLETE v1 is already on disk (entrypoint + additional file); this is what the
+	// pre-crash materialize wrote before the process died prior to the DB persist.
+	_, err := fileSvc.StoreStackFileFromBytesByVersion(stackFolder, "docker-compose.yml", 1, []byte("v1-content"))
+	require.NoError(t, err)
+	_, err = fileSvc.StoreStackFileFromBytesByVersion(stackFolder, "override.yml", 1, []byte("v1-override"))
+	require.NoError(t, err)
+
+	// The base files were already deleted by the pre-crash materialize, so we deliberately never
+	// seed the flat base here: only v1 exists on disk, reproducing the post-materialize state.
+	basePath := fileSvc.GetStackProjectPath(stackFolder)
+
+	// Stale DB metadata: ProjectPath still on the (now-gone) flat base, StackFileVersion 0 and no
+	// Versions — so the no-op short-circuit is skipped and the adopt/repoint branch runs.
+	fileStack := &portainer.Stack{
+		ID:              1,
+		Name:            "crash-recovered-stack",
+		Type:            portainer.DockerComposeStack,
+		EntryPoint:      "docker-compose.yml",
+		AdditionalFiles: []string{"override.yml"},
+		ProjectPath:     basePath,
+		CreationDate:    4242,
+		CreatedBy:       "admin",
+	}
+	require.NoError(t, stackSvc.Create(fileStack))
+
+	require.NoError(t, m.migrateStackFileVersions_2_44_0())
+
+	// Metadata must be repointed to v1 and the history seeded — the crash-safety guarantee.
+	v1Path := fileSvc.GetStackProjectPathByVersion(stackFolder, 1, "")
+	migrated, err := stackSvc.Read(1)
+	require.NoError(t, err)
+	require.Equal(t, v1Path, migrated.ProjectPath, "ProjectPath must be repointed to v1")
+	require.Equal(t, 1, migrated.StackFileVersion)
+	require.Len(t, migrated.Versions, 1)
+	require.Equal(t, 1, migrated.Versions[0].Version)
+	require.Equal(t, "migrated", migrated.Versions[0].Note)
+
+	// The adopt branch must NOT rewrite or touch the already-complete v1 files.
+	got, err := fileSvc.GetFileContent(v1Path, "docker-compose.yml")
+	require.NoError(t, err)
+	require.Equal(t, []byte("v1-content"), got)
+	got, err = fileSvc.GetFileContent(v1Path, "override.yml")
+	require.NoError(t, err)
+	require.Equal(t, []byte("v1-override"), got)
+
+	// It must not have recreated the flat base copies either.
+	exists, err := fileSvc.FileExists(filesystem.JoinPaths(basePath, "docker-compose.yml"))
+	require.NoError(t, err)
+	require.False(t, exists, "adopt branch must not recreate the flat base files")
+}
+
 // TestMigrateStackFileVersions_2_44_0_IncompleteExistingV1 verifies that a pre-existing but
 // INCOMPLETE v1 directory (e.g. left by an interrupted earlier migration) is not adopted as
 // authoritative: the stack stays un-migrated rather than being repointed to a partial v1.
