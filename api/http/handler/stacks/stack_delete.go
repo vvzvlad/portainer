@@ -139,11 +139,23 @@ func (handler *Handler) stackDelete(w http.ResponseWriter, r *http.Request) *htt
 		}
 	}
 
-	if err := handler.FileService.RemoveDirectory(stack.ProjectPath); err != nil {
+	if err := handler.removeStackProjectDir(stack); err != nil {
 		log.Warn().Err(err).Msg("Unable to remove stack files from disk")
 	}
 
 	return response.Empty(w)
+}
+
+// removeStackProjectDir deletes a stack's files from disk. For file-based (non-git) stacks the
+// whole stack root (compose/{id}) is removed so every versioned subfolder (v1..vN) is cleaned up,
+// because stack.ProjectPath only points at the current version directory (compose/{id}/v{N}).
+// Git stacks keep a ProjectPath of compose/{id}, so removing it directly preserves their behavior.
+func (handler *Handler) removeStackProjectDir(stack *portainer.Stack) error {
+	if stack.WorkflowID == 0 {
+		return handler.FileService.RemoveDirectory(handler.FileService.GetStackProjectPath(strconv.Itoa(int(stack.ID))))
+	}
+
+	return handler.FileService.RemoveDirectory(stack.ProjectPath)
 }
 
 func (handler *Handler) deleteExternalStack(r *http.Request, w http.ResponseWriter, stackName string, securityContext *security.RestrictedRequestContext) *httperror.HandlerError {
@@ -355,7 +367,7 @@ func (handler *Handler) stackDeleteKubernetesByName(w http.ResponseWriter, r *ht
 			continue
 		}
 
-		if err := handler.FileService.RemoveDirectory(stack.ProjectPath); err != nil {
+		if err := handler.removeStackProjectDir(&stack); err != nil {
 			errs = errors.Join(errs, err)
 			log.Warn().Err(err).Msg("Unable to remove stack files from disk")
 		}

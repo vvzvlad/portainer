@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Formik } from 'formik';
 import { vi } from 'vitest';
@@ -17,7 +17,10 @@ import { server } from '@/setup-tests/server';
 
 import { usePreventExit } from '@@/WebEditorForm';
 
-import { StackEditorTabInner } from './StackEditorTabInner';
+import {
+  StackEditorTabInner,
+  resolveRollbackTarget,
+} from './StackEditorTabInner';
 import { StackEditorFormValues } from './StackEditorTab.types';
 import { useVersionedStackFile } from './useVersionedStackFile';
 
@@ -380,6 +383,178 @@ describe('version rollback', () => {
       // Check that the form value was updated (through Formik)
       expect(versionSelect).toHaveValue('2');
     });
+  });
+});
+
+// F6: the version selector must not silently discard manual edits. The backend
+// ignores the client buffer whenever rollbackTo is set, so rollbackTo must only
+// be set for a genuinely older version and must be cleared once the user either
+// re-selects the current version or edits the buffer by hand.
+describe('resolveRollbackTarget (F6 decision)', () => {
+  it('returns undefined when the current/top version is picked', () => {
+    // versions[0] is the latest -> picking it is not a rollback
+    expect(resolveRollbackTarget(3, [3, 2, 1])).toBeUndefined();
+  });
+
+  it('returns the version when a genuinely older version is picked', () => {
+    expect(resolveRollbackTarget(2, [3, 2, 1])).toBe(2);
+    expect(resolveRollbackTarget(1, [3, 2, 1])).toBe(1);
+  });
+
+  it('returns undefined when only a single version exists', () => {
+    expect(resolveRollbackTarget(1, [1])).toBeUndefined();
+  });
+
+  it('returns undefined when versions are unavailable', () => {
+    expect(resolveRollbackTarget(1, undefined)).toBeUndefined();
+    expect(resolveRollbackTarget(1, [])).toBeUndefined();
+  });
+});
+
+describe('version selector edit trap (F6)', () => {
+  // The `version` passed to useVersionedStackFile mirrors values.rollbackTo, so
+  // we assert on the latest call to observe how rollbackTo evolves.
+  function lastRollbackTo() {
+    const { calls } = vi.mocked(useVersionedStackFile).mock;
+    return calls[calls.length - 1][0].version;
+  }
+
+  beforeEach(() => {
+    vi.mocked(useVersionedStackFile).mockReturnValue({
+      content: '',
+      isLoading: false,
+    });
+  });
+
+  it('should set rollbackTo when an older version is selected', async () => {
+    renderComponent({ versions: [3, 2, 1] });
+    const user = userEvent.setup();
+
+    const versionSelect = screen.getByRole('combobox', { name: /version/i });
+    await user.selectOptions(versionSelect, '2');
+
+    await waitFor(() => {
+      expect(lastRollbackTo()).toBe(2);
+    });
+  });
+
+  it('should clear rollbackTo when the current/top version is re-selected', async () => {
+    renderComponent({ versions: [3, 2, 1] });
+    const user = userEvent.setup();
+
+    const versionSelect = screen.getByRole('combobox', { name: /version/i });
+
+    // First roll back to an older version...
+    await user.selectOptions(versionSelect, '2');
+    await waitFor(() => {
+      expect(lastRollbackTo()).toBe(2);
+    });
+
+    // ...then return to the current version: this is not a rollback, so
+    // rollbackTo must be cleared to restore normal edit-and-deploy.
+    await user.selectOptions(versionSelect, '3');
+    await waitFor(() => {
+      expect(lastRollbackTo()).toBeUndefined();
+    });
+  });
+
+  it('should clear rollbackTo when the user edits the buffer', async () => {
+    renderComponent(
+      { versions: [3, 2, 1] },
+      { initialValues: { ...defaultInitialValues, rollbackTo: 2 } }
+    );
+    const user = userEvent.setup();
+
+    // rollbackTo starts at 2 (an older version pre-selected)
+    expect(lastRollbackTo()).toBe(2);
+
+    const editor = screen.getByTestId('stack-editor');
+    await waitFor(() => {
+      expect(editor).not.toHaveAttribute('readonly');
+    });
+
+    // A genuine user edit should reset rollbackTo so the edits are honored.
+    await user.type(editor, ' # manual edit');
+
+    await waitFor(() => {
+      expect(lastRollbackTo()).toBeUndefined();
+    });
+  });
+
+  it('should NOT clear rollbackTo when a version is loaded programmatically', async () => {
+    let capturedOnLoad: ((content: string) => void) | undefined;
+    vi.mocked(useVersionedStackFile).mockImplementation(({ onLoad }) => {
+      capturedOnLoad = onLoad;
+      return { content: '', isLoading: false };
+    });
+
+    renderComponent(
+      { versions: [3, 2, 1] },
+      { initialValues: { ...defaultInitialValues, rollbackTo: 2 } }
+    );
+
+    expect(capturedOnLoad).toBeDefined();
+
+    // The programmatic version-load goes through handleLoadFile (setFieldValue
+    // on stackFileContent), NOT the CodeEditor onChange, so rollbackTo must
+    // stay set — otherwise the rollback would immediately cancel itself.
+    act(() => {
+      capturedOnLoad?.('version: "2"\nservices:\n  db:\n    image: postgres');
+    });
+
+    // Wait past the CodeEditor's 300ms onChange debounce: if the programmatic
+    // load ever leaked into handleContentChange it would clear rollbackTo only
+    // after the debounce fires, so asserting at t≈0 would pass vacuously. By
+    // waiting beyond the window we ensure the assertion fails if a load ever
+    // clears rollbackTo.
+    await act(async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 350);
+      });
+    });
+
+    expect(lastRollbackTo()).toBe(2);
+  });
+
+  it('should restore the current content when returning to the current/top version', async () => {
+    let capturedOnLoad: ((content: string) => void) | undefined;
+    vi.mocked(useVersionedStackFile).mockImplementation(({ onLoad }) => {
+      capturedOnLoad = onLoad;
+      return { content: '', isLoading: false };
+    });
+
+    renderComponent({ versions: [3, 2, 1] });
+    const user = userEvent.setup();
+
+    const editor = screen.getByTestId('stack-editor');
+    await waitFor(() => {
+      expect(editor).not.toHaveAttribute('readonly');
+    });
+
+    const versionSelect = screen.getByRole('combobox', { name: /version/i });
+
+    // Roll back to an older version: rollbackTo is set and its content is loaded
+    // into the buffer (simulating useVersionedStackFile's fetch via onLoad).
+    const olderContent = 'version: "2"\nservices:\n  db:\n    image: postgres';
+    await user.selectOptions(versionSelect, '2');
+    await waitFor(() => {
+      expect(lastRollbackTo()).toBe(2);
+    });
+    act(() => {
+      capturedOnLoad?.(olderContent);
+    });
+    await waitFor(() => {
+      expect(editor).toHaveValue(olderContent);
+    });
+
+    // Return to the current/top version: rollbackTo must clear AND the editor
+    // must show the current content again, not the older version's leftover
+    // content (which would otherwise be deployed as a brand-new version).
+    await user.selectOptions(versionSelect, '3');
+    await waitFor(() => {
+      expect(lastRollbackTo()).toBeUndefined();
+    });
+    expect(editor).toHaveValue(defaultInitialValues.stackFileContent);
   });
 });
 

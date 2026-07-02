@@ -30,6 +30,7 @@ type stackFileResponse struct {
 // @security jwt
 // @produce json
 // @param id path int true "Stack identifier"
+// @param version query int false "return this file version (file-based stacks)"
 // @success 200 {object} stackFileResponse "Success"
 // @failure 400 "Invalid request"
 // @failure 403 "Permission denied"
