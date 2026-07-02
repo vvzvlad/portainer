@@ -7,6 +7,7 @@ import (
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/docker/consts"
 	"github.com/portainer/portainer/api/docker/images"
 	"github.com/portainer/portainer/api/internal/endpointutils"
 
@@ -196,6 +197,12 @@ func (s *Service) updateEndpoint(endpoint *portainer.Endpoint, scope string, opt
 func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoint, c UpdateCandidate, opts updateOptions) {
 	endpointID := int(endpoint.ID)
 
+	// A recreated container keeps its compose labels, so a stack member stays part
+	// of its project. Source the stack name from the compose-project label here so
+	// the notification prints "Stack [name]" for a member (empty for a standalone
+	// container, which the webhook formatter renders as "Container [name]").
+	stackName := c.Labels[consts.ComposeStackNameLabel]
+
 	// Loop-guard safety: the rolled-back map is keyed by endpoint+name (the only
 	// identifier that survives a recreate). An unnamed container cannot be recorded
 	// (recordRolledBack skips it), so with rollback enabled a container that keeps
@@ -276,7 +283,7 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 			Msg("auto-update: failed to recreate container")
 		s.notifier.Notify(Event{
 			Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
-			Message: "failed to recreate container", Err: err,
+			StackName: stackName, Message: "failed to recreate container", Err: err,
 		})
 		return
 	}
@@ -301,7 +308,7 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 			// back and do not emit an event (we never observed a real failure).
 			return
 		case gateRollback:
-			s.rollback(cli, endpoint, newContainer.ID, oldImageID, originalRef, c.Name)
+			s.rollback(cli, endpoint, newContainer.ID, oldImageID, originalRef, c.Name, stackName)
 			return
 		case gateHealthy:
 			// Confirmed healthy: fall through to emit "updated" and clean up.
@@ -312,7 +319,7 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 	// as before), or the gate confirmed the new container is healthy.
 	s.notifier.Notify(Event{
 		Kind: EventUpdated, EndpointID: endpointID, ContainerID: newContainer.ID, ContainerName: c.Name,
-		Image: newImage, OldDigest: oldImageID, NewDigest: newContainer.Image,
+		StackName: stackName, Image: newImage, OldDigest: oldImageID, NewDigest: newContainer.Image,
 		Message: "updated container",
 	})
 

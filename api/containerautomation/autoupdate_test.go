@@ -136,4 +136,9 @@ func TestUpdateEndpointRecreatesComposeStackMemberIndividually(t *testing.T) {
 	require.Equal(t, containerID, rec.events[0].ContainerName)
 	require.Contains(t, rec.events[0].Message, "recreate", "the event reflects the individual recreate path")
 	require.Zero(t, rec.events[0].StackID, "no whole-stack redeploy path is taken for a managed stack member")
+	// The recreated member is still notified as its stack: the producer threads the
+	// container's compose-project label into Event.StackName (no StackID needed), so
+	// the webhook renders "Stack [regression-stack]" rather than a bare container.
+	require.Equal(t, "regression-stack", rec.events[0].StackName,
+		"a recreated stack member carries its compose project name in StackName")
 }

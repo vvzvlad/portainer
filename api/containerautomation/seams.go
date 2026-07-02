@@ -18,8 +18,7 @@ import (
 // satisfies it unchanged at the call sites.
 type dockerClient interface {
 	// ContainerInspect backs the pre-update image-identity capture
-	// (updateStandalone), the health-gate poll (healthGate) and the post-redeploy
-	// new-image re-inspect (inspectImageID).
+	// (updateStandalone) and the health-gate poll (healthGate).
 	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
 	// ContainerRestart backs the auto-heal restart of an unhealthy container.
 	ContainerRestart(ctx context.Context, containerID string, options container.StopOptions) error

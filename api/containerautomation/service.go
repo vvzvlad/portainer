@@ -36,7 +36,7 @@ const (
 type Service struct {
 	// baseCtx is the application shutdown context. It is the base for every
 	// per-operation timeout context, so a server shutdown cancels in-flight heal
-	// restarts and update redeploys instead of letting them run detached.
+	// restarts and update recreates instead of letting them run detached.
 	baseCtx context.Context
 
 	scheduler     *scheduler.Scheduler

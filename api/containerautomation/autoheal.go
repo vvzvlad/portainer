@@ -5,6 +5,7 @@ import (
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/docker/consts"
 	"github.com/portainer/portainer/api/internal/endpointutils"
 
 	"github.com/docker/docker/api/types/container"
@@ -195,7 +196,7 @@ func (s *Service) healContainers(cli dockerClient, endpoint *portainer.Endpoint,
 			Msg("auto-heal: restarted unhealthy container")
 		s.notifier.Notify(Event{
 			Kind: EventHealRestarted, EndpointID: endpointID, ContainerID: c.ID, ContainerName: containerName(c.Names),
-			Message: "restarted unhealthy container",
+			StackName: c.Labels[consts.ComposeStackNameLabel], Message: "restarted unhealthy container",
 		})
 	}
 }
