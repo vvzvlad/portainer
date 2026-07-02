@@ -434,6 +434,7 @@ function setupMswHandlers({
         },
       })
     ),
+    http.get('/api/stacks/:id/versions', () => HttpResponse.json([])),
     http.put('/api/stacks/:id', async ({ request, params }) => {
       const body = await request.json();
 

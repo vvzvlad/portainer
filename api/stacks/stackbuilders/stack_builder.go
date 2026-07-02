@@ -117,6 +117,27 @@ func (b *StackBuilder) storeStackFile(content []byte) error {
 	return nil
 }
 
+// storeStackFileVersioned stores the initial file of a file-based (non-git) Compose/Swarm stack
+// into the v1 version folder and seeds the append-only version history. Note that
+// StoreStackFileFromBytesByVersion returns the base path (not the version path), so ProjectPath
+// is set explicitly via GetStackProjectPathByVersion.
+func (b *StackBuilder) storeStackFileVersioned(content []byte) error {
+	stackFolder := strconv.Itoa(int(b.stack.ID))
+	if _, err := b.fileService.StoreStackFileFromBytesByVersion(stackFolder, b.stack.EntryPoint, 1, content); err != nil {
+		return err
+	}
+
+	b.stack.ProjectPath = b.fileService.GetStackProjectPathByVersion(stackFolder, 1, "")
+	b.stack.StackFileVersion = 1
+	b.stack.Versions = []portainer.StackFileVersionInfo{{
+		Version:   1,
+		CreatedAt: time.Now().Unix(),
+		CreatedBy: b.stack.CreatedBy,
+	}}
+
+	return nil
+}
+
 func (b *StackBuilder) initComposeDeployment(secCtx *security.RestrictedRequestContext, endpoint *portainer.Endpoint) error {
 	config, err := deployments.CreateComposeStackDeploymentConfigTx(b.dataStore, secCtx, b.stack, endpoint, b.fileService, b.stackDeployer, false, false, false)
 	if err != nil {

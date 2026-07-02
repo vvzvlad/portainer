@@ -39,7 +39,7 @@ func (b *SwarmStackFileBuilder) prepare(_ context.Context, payload *StackPayload
 		return err
 	}
 
-	return b.storeStackFile(payload.StackFileContent)
+	return b.storeStackFileVersioned(payload.StackFileContent)
 }
 
 func (b *SwarmStackFileBuilder) deploy(ctx context.Context, endpoint *portainer.Endpoint) error {

@@ -1,9 +1,37 @@
+import { isoDateFromTimestamp } from '@/portainer/filters/filters';
+import { StackFileVersionInfo } from '@/react/common/stacks/types';
+
 interface Props {
   versions?: number[];
+  /**
+   * Optional richer metadata (date/author/note) used to build the option
+   * labels. Looked up by version number; falls back to the bare version when a
+   * given version has no metadata.
+   */
+  versionsInfo?: StackFileVersionInfo[];
   onChange(value: number): void;
 }
 
-export function StackVersionSelector({ versions, onChange }: Props) {
+/**
+ * Build a human-readable label for a version, e.g. `v3 · 2026-07-02 14:12 · admin`.
+ * Falls back to just the version number when no metadata is available.
+ */
+function buildVersionLabel(version: number, info?: StackFileVersionInfo) {
+  const parts = [`v${version}`];
+  if (info?.CreatedAt) {
+    parts.push(isoDateFromTimestamp(info.CreatedAt));
+  }
+  if (info?.CreatedBy) {
+    parts.push(info.CreatedBy);
+  }
+  return parts.join(' · ');
+}
+
+export function StackVersionSelector({
+  versions,
+  versionsInfo,
+  onChange,
+}: Props) {
   if (!versions || versions.length === 0) {
     return null;
   }
@@ -12,7 +40,10 @@ export function StackVersionSelector({ versions, onChange }: Props) {
 
   const versionOptions = versions.map((version) => ({
     value: version,
-    label: version.toString(),
+    label: buildVersionLabel(
+      version,
+      versionsInfo?.find((info) => info.Version === version)
+    ),
   }));
 
   return (
@@ -23,7 +54,7 @@ export function StackVersionSelector({ versions, onChange }: Props) {
             <span>Version:</span>
           </label>
           <span className="text-muted" id="version_id">
-            {versions[0]}
+            {versionOptions[0].label}
           </span>
         </>
       )}
@@ -38,7 +69,6 @@ export function StackVersionSelector({ versions, onChange }: Props) {
             data-cy="version-selector"
             id="version_id"
             style={{
-              width: '60px',
               height: '24px',
               borderRadius: '4px',
               borderColor: 'hsl(0, 0%, 80%)',
@@ -48,7 +78,7 @@ export function StackVersionSelector({ versions, onChange }: Props) {
           >
             {versionOptions.map((option) => (
               <option key={option.value} value={option.value}>
-                {option.value}
+                {option.label}
               </option>
             ))}
           </select>

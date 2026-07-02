@@ -6,6 +6,7 @@ import type { JSONSchema7 } from 'json-schema';
 import clsx from 'clsx';
 
 import { AutomationTestingProps } from '@/types';
+import { StackFileVersionInfo } from '@/react/common/stacks/types';
 
 import { CopyButton } from '@@/buttons/CopyButton';
 
@@ -29,6 +30,7 @@ interface Props extends AutomationTestingProps {
   value: string;
   height?: string;
   versions?: number[];
+  versionsInfo?: StackFileVersionInfo[];
   onVersionChange?: (version: number) => void;
   schema?: JSONSchema7;
   fileName?: string;
@@ -73,6 +75,7 @@ export function CodeEditor({
   readonly,
   value,
   versions,
+  versionsInfo,
   onVersionChange,
   height = '500px',
   type,
@@ -128,6 +131,7 @@ export function CodeEditor({
               <div className="ml-auto mr-2">
                 <StackVersionSelector
                   versions={versions}
+                  versionsInfo={versionsInfo}
                   onChange={handleVersionChange}
                 />
               </div>

@@ -80,6 +80,8 @@ func NewHandler(bouncer security.BouncerService) *Handler {
 		bouncer.AuthenticatedAccess(httperror.LoggerHandler(h.stackGitRedeploy))).Methods(http.MethodPut)
 	h.Handle("/stacks/{id}/file",
 		bouncer.AuthenticatedAccess(httperror.LoggerHandler(h.stackFile))).Methods(http.MethodGet)
+	h.Handle("/stacks/{id}/versions",
+		bouncer.AuthenticatedAccess(httperror.LoggerHandler(h.stackVersions))).Methods(http.MethodGet)
 	h.Handle("/stacks/{id}/migrate",
 		bouncer.AuthenticatedAccess(httperror.LoggerHandler(h.stackMigrate))).Methods(http.MethodPost)
 	h.Handle("/stacks/{id}/start",
