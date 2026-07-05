@@ -1187,6 +1187,15 @@ type (
 		// recreated back on the previous image. Standalone-only (M5).
 		RollbackOnFailure bool   `json:"RollbackOnFailure"`
 		RollbackTimeout   string `json:"RollbackTimeout" example:"120s"`
+		// WebhookToken is the secret path segment of the inbound registry-push
+		// webhook (POST /api/webhooks/container-automation/{token}). A push to the
+		// registry can call that endpoint to trigger an immediate auto-update pass
+		// instead of waiting for the next poll. It is SERVER-generated only (a uuid,
+		// never accepted from the client); empty disables the endpoint. It is
+		// returned in the admin GET /settings (the UI renders the URL from it) but is
+		// deliberately excluded from GET /settings/public so it never leaks to
+		// non-admins.
+		WebhookToken string `json:"WebhookToken"`
 	}
 
 	// ContainerAutomationNotificationSettings holds the webhook notification

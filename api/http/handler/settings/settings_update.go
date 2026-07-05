@@ -18,6 +18,7 @@ import (
 	"github.com/portainer/portainer/pkg/libhttp/ssrf"
 	"github.com/portainer/portainer/pkg/validate"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/oauth2"
@@ -104,6 +105,14 @@ type autoUpdateSettingsPayload struct {
 	Cleanup           *bool   `example:"false"`
 	RollbackOnFailure *bool   `example:"false"`
 	RollbackTimeout   *string `example:"120s"`
+	// RegenerateWebhookToken, when true, (re)generates the inbound registry-push
+	// webhook token server-side. The client never supplies the token value itself;
+	// it only requests this action, so the secret is always a fresh server uuid.
+	RegenerateWebhookToken *bool `example:"false"`
+	// ClearWebhookToken, when true, removes the webhook token and thereby disables
+	// the inbound trigger endpoint. RegenerateWebhookToken takes precedence if both
+	// are set.
+	ClearWebhookToken *bool `example:"false"`
 }
 
 func (payload *settingsUpdatePayload) Validate(r *http.Request) error {
@@ -373,6 +382,21 @@ func (handler *Handler) updateSettings(tx dataservices.DataStoreTx, payload sett
 		current.Cleanup = *cmp.Or(autoUpdate.Cleanup, &current.Cleanup)
 		current.RollbackOnFailure = *cmp.Or(autoUpdate.RollbackOnFailure, &current.RollbackOnFailure)
 		current.RollbackTimeout = *cmp.Or(autoUpdate.RollbackTimeout, &current.RollbackTimeout)
+
+		// Webhook token actions. The token value is never accepted from the client:
+		// regenerate mints a fresh server-side uuid (enabling/rotating the inbound
+		// trigger endpoint), clear removes it (disabling the endpoint). Regenerate wins
+		// if both are set.
+		switch {
+		case autoUpdate.RegenerateWebhookToken != nil && *autoUpdate.RegenerateWebhookToken:
+			token, err := uuid.NewRandom()
+			if err != nil {
+				return nil, httperror.InternalServerError("Unable to generate a webhook token", err)
+			}
+			current.WebhookToken = token.String()
+		case autoUpdate.ClearWebhookToken != nil && *autoUpdate.ClearWebhookToken:
+			current.WebhookToken = ""
+		}
 	}
 
 	if payload.ContainerAutomation != nil && payload.ContainerAutomation.Notification != nil {

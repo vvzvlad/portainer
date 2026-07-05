@@ -4,7 +4,7 @@ import { Field, Form, Formik, useFormikContext } from 'formik';
 import { notifySuccess } from '@/portainer/services/notifications';
 
 import { Widget } from '@@/Widget';
-import { LoadingButton } from '@@/buttons';
+import { LoadingButton, Button, CopyButton } from '@@/buttons';
 import { FormControl } from '@@/form-components/FormControl';
 import { Input, Select } from '@@/form-components/Input';
 import { SwitchField } from '@@/form-components/SwitchField';
@@ -68,6 +68,10 @@ export function AutoUpdatePanel() {
         >
           <InnerForm isLoading={mutation.isLoading} />
         </Formik>
+
+        <hr />
+
+        <WebhookTriggerSection token={autoUpdate.WebhookToken} />
       </Widget.Body>
     </Widget>
   );
@@ -93,6 +97,102 @@ export function AutoUpdatePanel() {
       }
     );
   }
+}
+
+// WebhookTriggerSection renders the inbound registry-push webhook controls: the
+// trigger URL (readonly, with a copy button) plus Generate/Regenerate and Clear
+// actions. The token itself is server-generated — the client only requests an
+// action — so this section never edits the URL, it just displays and rotates it.
+function WebhookTriggerSection({ token }: { token?: string }) {
+  const mutation = useUpdateSettingsMutation();
+
+  const webhookUrl = token
+    ? `${window.location.origin}/api/webhooks/container-automation/${token}`
+    : '';
+
+  function regenerate() {
+    mutation.mutate(
+      { ContainerAutomation: { AutoUpdate: { RegenerateWebhookToken: true } } },
+      {
+        onSuccess() {
+          notifySuccess('Success', 'Update trigger webhook token generated');
+        },
+      }
+    );
+  }
+
+  function clear() {
+    mutation.mutate(
+      { ContainerAutomation: { AutoUpdate: { ClearWebhookToken: true } } },
+      {
+        onSuccess() {
+          notifySuccess('Success', 'Update trigger webhook disabled');
+        },
+      }
+    );
+  }
+
+  return (
+    <div className="form-horizontal">
+      <div className="form-group">
+        <div className="col-sm-12">
+          <TextTip color="blue">
+            Configure this URL as a push/package webhook on your registry (e.g.
+            Gitea &quot;Package&quot; webhook or a GHCR{' '}
+            <code>registry_package</code> webhook, or a{' '}
+            <code>curl -X POST</code> step at the end of your publish workflow).
+            Any POST to it immediately runs a full auto-update pass instead of
+            waiting for the next poll. The token is secret — treat the URL as a
+            credential.
+          </TextTip>
+        </div>
+      </div>
+
+      <FormControl label="Update trigger webhook" inputId="autoupdate_webhook_url">
+        <div className="flex items-center gap-2">
+          <Input
+            id="autoupdate_webhook_url"
+            readOnly
+            value={webhookUrl}
+            placeholder="No webhook token generated"
+            data-cy="settings-autoUpdateWebhookUrl"
+          />
+          <CopyButton
+            copyText={webhookUrl}
+            data-cy="settings-autoUpdateWebhookCopy"
+          >
+            Copy
+          </CopyButton>
+        </div>
+      </FormControl>
+
+      <div className="form-group">
+        <div className="col-sm-12 flex gap-2">
+          <LoadingButton
+            type="button"
+            color="default"
+            isLoading={mutation.isLoading}
+            loadingText="Saving..."
+            onClick={regenerate}
+            data-cy="settings-autoUpdateWebhookRegenerate"
+          >
+            {token ? 'Regenerate' : 'Generate'}
+          </LoadingButton>
+          {token && (
+            <Button
+              type="button"
+              color="dangerlight"
+              disabled={mutation.isLoading}
+              onClick={clear}
+              data-cy="settings-autoUpdateWebhookClear"
+            >
+              Clear
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function InnerForm({ isLoading }: { isLoading: boolean }) {

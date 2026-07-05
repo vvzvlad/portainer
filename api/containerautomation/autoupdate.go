@@ -26,20 +26,41 @@ const (
 )
 
 // update runs a single auto-update pass over every reachable Docker endpoint.
-// It is registered with the scheduler and guarded against overlapping ticks by
-// the Service. Errors are logged per endpoint/container so one failure does not
-// abort the whole pass; it always returns nil so the scheduler keeps the job.
+// It is the scheduler entry point (poll timer): it delegates to runUpdatePass and
+// always returns nil so the scheduler keeps the job regardless of the outcome.
 func (s *Service) update() error {
+	s.runUpdatePass()
+	return nil
+}
+
+// runUpdatePass performs a single auto-update pass over every reachable Docker
+// endpoint. It is guarded against overlapping runs by the updateRunning CAS: if a
+// pass (scheduled or webhook-triggered) is already in progress it returns false
+// WITHOUT running, so the caller can decide what to do (the poll timer drops the
+// tick; the webhook worker waits and re-runs so a mid-pass kick is not lost).
+// Errors are logged per endpoint/container so one failure does not abort the whole
+// pass. Returns true when this call actually acquired the lock and ran the pass.
+func (s *Service) runUpdatePass() bool {
 	if !s.updateRunning.CompareAndSwap(false, true) {
 		log.Debug().Msg("auto-update: previous run still in progress, skipping tick")
-		return nil
+		return false
 	}
 	defer s.updateRunning.Store(false)
 
 	settings, err := s.dataStore.Settings().Settings()
 	if err != nil {
 		log.Warn().Err(err).Msg("auto-update: unable to read settings")
-		return nil
+		return true
+	}
+
+	// Defense-in-depth: auto-update may have been disabled during the webhook
+	// debounce/backoff window (the handler's 409 gate and the scheduler removal on
+	// Reload both act earlier, but neither covers a kick already in flight). Re-read
+	// the live flag and no-op if it was turned off. Returns true (lock acquired,
+	// nothing to retry).
+	if !settings.ContainerAutomation.AutoUpdate.Enabled {
+		log.Debug().Msg("auto-update: disabled, skipping pass")
+		return true
 	}
 
 	scope := ScopeLabeled
@@ -56,7 +77,7 @@ func (s *Service) update() error {
 	endpoints, err := s.dataStore.Endpoint().Endpoints()
 	if err != nil {
 		log.Warn().Err(err).Msg("auto-update: unable to list environments")
-		return nil
+		return true
 	}
 
 	for i := range endpoints {
@@ -84,7 +105,7 @@ func (s *Service) update() error {
 	// pruneRetries), so the loop-guard map cannot grow unbounded.
 	s.pruneRolledBack(time.Now())
 
-	return nil
+	return true
 }
 
 // updateOptions carries the per-pass auto-update toggles resolved from settings.
