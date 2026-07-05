@@ -29,6 +29,16 @@ const (
 	// It is conservative (hours) to stay within registry rate limits; the image-status cache is
 	// short-lived (keyed by the local imageID), so each poll re-checks the remote digest.
 	defaultPollInterval = 6 * time.Hour
+	// webhookDebounceWindow collapses a burst of inbound registry-push webhooks into a
+	// single update pass. A multi-arch / multi-tag push fires several deliveries in a
+	// row; after the first kick the worker waits this long, draining any further kicks,
+	// so the burst runs one pass instead of one per delivery.
+	webhookDebounceWindow = 10 * time.Second
+	// webhookRetryBackoff is how long the webhook worker waits before re-running a pass
+	// that could not acquire the update lock because a scheduled pass was already in
+	// progress. It keeps the retry from spinning while ensuring a mid-pass kick is not
+	// lost until the next poll.
+	webhookRetryBackoff = 5 * time.Second
 )
 
 // Service manages the lifecycle of the auto-heal and auto-update scheduler jobs
@@ -53,6 +63,19 @@ type Service struct {
 	// notifier receives automation events (update/rollback/failure/heal). The
 	// default is logNotifier; the field is the seam external senders plug into.
 	notifier Notifier
+
+	// kickCh signals the webhook worker to run an out-of-band update pass. It has a
+	// buffer of 1 and TriggerUpdate sends non-blockingly, so a burst of concurrent
+	// triggers naturally coalesces into at most one pending kick.
+	kickCh chan struct{}
+	// debounceWindow / retryBackoff are the worker timings, held as fields (defaulted
+	// from the package constants in NewService) so tests can shrink them.
+	debounceWindow time.Duration
+	retryBackoff   time.Duration
+	// updatePass is the seam the webhook worker runs; it defaults to runUpdatePass and
+	// is overridable in tests to observe the kick/debounce/retry behaviour without a
+	// live engine. It returns whether the pass acquired the update lock and ran.
+	updatePass func() bool
 
 	mu          sync.Mutex
 	healJobID   string
@@ -98,7 +121,7 @@ func NewService(
 		baseCtx = context.Background()
 	}
 
-	return &Service{
+	s := &Service{
 		baseCtx:          baseCtx,
 		scheduler:        scheduler,
 		dataStore:        dataStore,
@@ -109,9 +132,113 @@ func NewService(
 		// The webhook reads the current settings per-event from the datastore, so a
 		// URL change in the UI takes effect without a restart; logNotifier keeps the
 		// existing structured log output unchanged.
-		notifier:   multiNotifier{logNotifier{}, newWebhookNotifier(dataStore)},
-		retries:    make(map[string]retryState),
-		rolledBack: make(map[string]rolledBackTarget),
+		notifier:       multiNotifier{logNotifier{}, newWebhookNotifier(dataStore)},
+		kickCh:         make(chan struct{}, 1),
+		debounceWindow: webhookDebounceWindow,
+		retryBackoff:   webhookRetryBackoff,
+		retries:        make(map[string]retryState),
+		rolledBack:     make(map[string]rolledBackTarget),
+	}
+	s.updatePass = s.runUpdatePass
+
+	// The webhook worker lives for the whole application lifetime (bounded by
+	// baseCtx), independently of whether the poll job is scheduled: a kick must be
+	// serviceable even between polls.
+	go s.triggerWorker()
+
+	return s
+}
+
+// TriggerUpdate requests an immediate auto-update pass out of band from the poll
+// timer. It is called by the inbound registry-push webhook handler so a container
+// updates within seconds of a push instead of waiting up to a full poll interval.
+// The send is non-blocking onto the buffer-1 kick channel: a burst of concurrent
+// triggers coalesces into at most one pending kick, and the worker then debounces
+// the burst and, if a scheduled pass is already running, waits and re-runs so a
+// kick that lands mid-pass is not lost. Safe to call on a zero-value Service (a
+// nil kick channel makes it a no-op).
+func (s *Service) TriggerUpdate() {
+	select {
+	case s.kickCh <- struct{}{}:
+	default:
+		// A kick is already pending (or the channel is nil on a zero-value service):
+		// the coming pass will cover this trigger too, so drop the duplicate.
+	}
+}
+
+// triggerWorker services webhook-driven update kicks for the life of baseCtx. It
+// waits for a kick, debounces the burst, then runs an update pass — re-running
+// after a short backoff if a scheduled pass currently holds the update lock, so a
+// kick that arrives mid-pass is not dropped until the next poll.
+func (s *Service) triggerWorker() {
+	for {
+		// Block until the first kick of a burst (or shutdown).
+		select {
+		case <-s.baseCtx.Done():
+			return
+		case <-s.kickCh:
+		}
+
+		if !s.debounceKicks() {
+			return // shutdown during the debounce window
+		}
+
+		// Run the pass, retrying while a scheduled pass holds the lock. runUpdatePass
+		// returns false only when the CAS is not acquired (another pass in progress);
+		// backing off and retrying guarantees this kick eventually runs a fresh pass
+		// that observes the just-pushed image, rather than being silently dropped.
+		//
+		// runPassRecovered wraps each attempt in a recover(): the poll path runs under
+		// the scheduler's cron.Recover, so a panic there is logged and the daemon
+		// survives. This webhook worker is a bare goroutine, so without its own
+		// recover an unrelated panic in the update pass (reachable by a token holder)
+		// would crash the whole process. Match the poll path's guarantee.
+		for !s.runPassRecovered() {
+			log.Debug().Msg("auto-update: webhook-triggered pass deferred, a scheduled pass is running; will retry")
+			select {
+			case <-s.baseCtx.Done():
+				return
+			case <-time.After(s.retryBackoff):
+			}
+		}
+	}
+}
+
+// runPassRecovered runs one update pass with a recover() so a panic in the pass
+// cannot crash the process from this bare worker goroutine (the poll path is
+// already protected by the scheduler's cron.Recover). It returns whatever the
+// pass returned; on a recovered panic it returns true ("done") so the retry loop
+// does not spin on a deterministically-panicking pass — the next kick starts
+// fresh. runUpdatePass releases the updateRunning CAS via defer even on panic, so
+// no lock is leaked here.
+func (s *Service) runPassRecovered() (done bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Msg("auto-update: recovered from panic in webhook-triggered update pass")
+			done = true
+		}
+	}()
+
+	return s.updatePass()
+}
+
+// debounceKicks waits a fixed window after the first kick, draining any further
+// kicks that arrive during it, so a burst of registry deliveries collapses into a
+// single pass. It returns false if baseCtx is cancelled while waiting.
+func (s *Service) debounceKicks() bool {
+	timer := time.NewTimer(s.debounceWindow)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-s.baseCtx.Done():
+			return false
+		case <-s.kickCh:
+			// Additional kick within the window: coalesce it (fixed window from the
+			// first kick, not reset — a bounded, single collapsed pass).
+		case <-timer.C:
+			return true
+		}
 	}
 }
 

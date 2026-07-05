@@ -36,8 +36,18 @@ export async function getSettings() {
 type OptionalSettings = Omit<Partial<Settings>, 'Edge' | 'ContainerAutomation'> & {
   Edge?: Partial<Settings['Edge']>;
   // ContainerAutomation blocks (AutoHeal / AutoUpdate) are saved independently
-  // by their own settings panels, so each may be sent on its own.
-  ContainerAutomation?: Partial<Settings['ContainerAutomation']>;
+  // by their own settings panels, so each may be sent on its own. AutoUpdate also
+  // accepts the write-only webhook-token actions (regenerate / clear); the token
+  // value itself is never sent from the client, only the requested action.
+  ContainerAutomation?: Omit<
+    Partial<Settings['ContainerAutomation']>,
+    'AutoUpdate'
+  > & {
+    AutoUpdate?: Partial<Settings['ContainerAutomation']['AutoUpdate']> & {
+      RegenerateWebhookToken?: boolean;
+      ClearWebhookToken?: boolean;
+    };
+  };
 };
 
 export async function updateSettings(settings: OptionalSettings) {

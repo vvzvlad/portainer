@@ -299,6 +299,7 @@ func (server *Server) Start(ctx context.Context) error {
 	var webhookHandler = webhooks.NewHandler(requestBouncer)
 	webhookHandler.DataStore = server.DataStore
 	webhookHandler.DockerClientFactory = server.DockerClientFactory
+	webhookHandler.ContainerAutomationService = server.ContainerAutomationService
 
 	server.Handler = &handler.Handler{
 		RoleHandler:            roleHandler,

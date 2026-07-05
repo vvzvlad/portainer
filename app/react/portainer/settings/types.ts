@@ -158,6 +158,11 @@ export interface AutoUpdateSettings {
   // previous image when the new container does not become healthy in time.
   RollbackOnFailure: boolean;
   RollbackTimeout: string;
+  // WebhookToken is the secret path segment of the inbound registry-push webhook
+  // (POST /api/webhooks/container-automation/{token}) that triggers an immediate
+  // update pass. Server-generated only; empty/undefined means the endpoint is
+  // disabled. Returned only in the admin GET /settings, never in public settings.
+  WebhookToken?: string;
 }
 
 // NotificationSettings holds the per-mechanism webhooks for container-automation

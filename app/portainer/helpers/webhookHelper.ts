@@ -14,6 +14,10 @@ export function dockerWebhookUrl(token: string) {
   return `${baseUrl}${API_ENDPOINT_WEBHOOKS}/${token}`;
 }
 
+export function containerAutomationWebhookUrl(token: string) {
+  return `${baseUrl}${API_ENDPOINT_WEBHOOKS}/container-automation/${token}`;
+}
+
 export function baseStackWebhookUrl() {
   return `${baseUrl}${API_ENDPOINT_STACKS}/webhooks`;
 }
