@@ -6,6 +6,7 @@ import { withTestRouter } from '@/react/test-utils/withRouter';
 import { withTestQueryProvider } from '@/react/test-utils/withTestQuery';
 import { withUserProvider } from '@/react/test-utils/withUserProvider';
 import { server } from '@/setup-tests/server';
+import { containerAutomationWebhookUrl } from '@/portainer/helpers/webhookHelper';
 
 import { AutoUpdatePanel } from './AutoUpdatePanel';
 
@@ -115,14 +116,14 @@ describe('AutoUpdatePanel', () => {
     expect(screen.getByLabelText(/Rollback timeout/i)).toHaveValue('120s');
   });
 
-  function seedSettings(token?: string) {
+  function seedSettings(token?: string, enabled = true) {
     server.use(
       http.get('/api/settings', () =>
         HttpResponse.json({
           ContainerAutomation: {
             AutoHeal: { Enabled: false, CheckInterval: '30s', Scope: 'labeled' },
             AutoUpdate: {
-              Enabled: true,
+              Enabled: enabled,
               PollInterval: '6h',
               Scope: 'labeled',
               Cleanup: false,
@@ -143,16 +144,38 @@ describe('AutoUpdatePanel', () => {
     renderComponent();
 
     const urlField = await screen.findByLabelText(/Update trigger webhook/i);
+    // The URL is built via the shared helper (sub-path / base-href aware), not a
+    // bare origin — assert against the same helper.
     await waitFor(() =>
-      expect(urlField).toHaveValue(
-        `${window.location.origin}/api/webhooks/container-automation/${token}`
-      )
+      expect(urlField).toHaveValue(containerAutomationWebhookUrl(token))
     );
 
     expect(
       screen.getByRole('button', { name: /Regenerate/i })
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Clear/i })).toBeInTheDocument();
+  });
+
+  it('warns that the trigger is inactive when a token exists but auto-update is disabled', async () => {
+    seedSettings('abc-123-token', false);
+
+    renderComponent();
+
+    // The disabled-state note (a POST would 409) must be shown so the UI does not
+    // contradict the server.
+    expect(
+      await screen.findByText(/trigger is inactive/i)
+    ).toBeInTheDocument();
+  });
+
+  it('does NOT show the inactive note when auto-update is enabled', async () => {
+    seedSettings('abc-123-token', true);
+
+    renderComponent();
+
+    // Wait for the section to render, then confirm the note is absent.
+    await screen.findByLabelText(/Update trigger webhook/i);
+    expect(screen.queryByText(/trigger is inactive/i)).not.toBeInTheDocument();
   });
 
   it('shows Generate and no Clear when no token exists', async () => {

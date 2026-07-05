@@ -49,7 +49,7 @@ func (handler *Handler) webhookContainerAutomation(w http.ResponseWriter, r *htt
 	// The token is valid but auto-update is turned off: report a conflict rather than
 	// silently accepting a kick that would never do anything.
 	if !autoUpdate.Enabled {
-		return httperror.NewError(http.StatusConflict, "Container auto-update is disabled", errors.New("container auto-update is disabled"))
+		return httperror.Conflict("Container auto-update is disabled", errors.New("container auto-update is disabled"))
 	}
 
 	if handler.ContainerAutomationService == nil {

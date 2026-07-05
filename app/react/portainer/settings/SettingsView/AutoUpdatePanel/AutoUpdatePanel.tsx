@@ -2,6 +2,7 @@ import { RefreshCw } from 'lucide-react';
 import { Field, Form, Formik, useFormikContext } from 'formik';
 
 import { notifySuccess } from '@/portainer/services/notifications';
+import { containerAutomationWebhookUrl } from '@/portainer/helpers/webhookHelper';
 
 import { Widget } from '@@/Widget';
 import { LoadingButton, Button, CopyButton } from '@@/buttons';
@@ -71,7 +72,10 @@ export function AutoUpdatePanel() {
 
         <hr />
 
-        <WebhookTriggerSection token={autoUpdate.WebhookToken} />
+        <WebhookTriggerSection
+          token={autoUpdate.WebhookToken}
+          enabled={autoUpdate.Enabled}
+        />
       </Widget.Body>
     </Widget>
   );
@@ -103,12 +107,18 @@ export function AutoUpdatePanel() {
 // trigger URL (readonly, with a copy button) plus Generate/Regenerate and Clear
 // actions. The token itself is server-generated — the client only requests an
 // action — so this section never edits the URL, it just displays and rotates it.
-function WebhookTriggerSection({ token }: { token?: string }) {
+function WebhookTriggerSection({
+  token,
+  enabled,
+}: {
+  token?: string;
+  enabled: boolean;
+}) {
   const mutation = useUpdateSettingsMutation();
 
-  const webhookUrl = token
-    ? `${window.location.origin}/api/webhooks/container-automation/${token}`
-    : '';
+  // Build the URL via the shared helper so it honours the reverse-proxy sub-path
+  // (`<base href>`) and the desktop file:// build, rather than a bare origin.
+  const webhookUrl = token ? containerAutomationWebhookUrl(token) : '';
 
   function regenerate() {
     mutation.mutate(
@@ -147,6 +157,19 @@ function WebhookTriggerSection({ token }: { token?: string }) {
           </TextTip>
         </div>
       </div>
+
+      {token && !enabled && (
+        <div className="form-group">
+          <div className="col-sm-12">
+            <TextTip color="orange">
+              The trigger is inactive while container auto-update is disabled —
+              a POST to this URL returns HTTP 409 and runs no pass. Enable
+              auto-update above to activate it. The token is kept and can still
+              be rotated or cleared here.
+            </TextTip>
+          </div>
+        </div>
+      )}
 
       <FormControl label="Update trigger webhook" inputId="autoupdate_webhook_url">
         <div className="flex items-center gap-2">

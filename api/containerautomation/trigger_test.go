@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portainer/portainer/api/datastore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -177,4 +178,30 @@ func TestRunUpdatePassCASGuard(t *testing.T) {
 	// Simulate an in-progress pass by holding the CAS as runUpdatePass would.
 	require.True(t, s.updateRunning.CompareAndSwap(false, true))
 	require.False(t, s.runUpdatePass(), "runUpdatePass must return false when a pass is already running")
+}
+
+// TestRunUpdatePassReleasesLock pins the CAS-RELEASE contract of the real
+// runUpdatePass (not the stub): after a pass completes, the updateRunning lock
+// MUST be released, or every future pass — poll tick AND webhook kick — would be
+// permanently wedged (the poll drops the tick, the webhook worker spins its retry
+// loop forever) while the rest of the suite stays green. A test store with
+// auto-update enabled and no endpoints runs a trivial pass to completion.
+func TestRunUpdatePassReleasesLock(t *testing.T) {
+	_, store := datastore.MustNewTestStore(t, true, false)
+
+	settings, err := store.Settings().Settings()
+	require.NoError(t, err)
+	settings.ContainerAutomation.AutoUpdate.Enabled = true
+	require.NoError(t, store.Settings().UpdateSettings(settings))
+
+	s := &Service{baseCtx: context.Background(), dataStore: store}
+
+	// First pass: acquires the lock and runs to completion (no endpoints → no work).
+	require.True(t, s.runUpdatePass(), "the pass should acquire the lock and run")
+	require.False(t, s.updateRunning.Load(), "the lock MUST be released after the pass")
+
+	// A second pass must be able to acquire the lock again — proves the release,
+	// not just the flag read.
+	require.True(t, s.runUpdatePass(), "a subsequent pass must re-acquire the released lock")
+	require.False(t, s.updateRunning.Load())
 }
