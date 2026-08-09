@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"strings"
+	"time"
 
 	portainer "github.com/portainer/portainer/api"
 	"github.com/portainer/portainer/api/dataservices"
@@ -17,6 +18,13 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 )
+
+// restoreTimeout bounds the best-effort restore of the original container after a
+// failed recreate. The restore runs on a context detached from the caller's (see
+// restoreContext), so it needs a deadline of its own: long enough for a rename, a
+// handful of network connects and a start against a healthy engine, short enough
+// that an unresponsive engine cannot pin the caller's goroutine for minutes.
+const restoreTimeout = 30 * time.Second
 
 type ContainerService struct {
 	factory   *dockerclient.ClientFactory
@@ -68,8 +76,24 @@ func clearMacAddrs(n network.NetworkingConfig) network.NetworkingConfig {
 	return netConfig
 }
 
-// Recreate a container
-func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.Endpoint, containerId string, forcePullImage bool, imageTag, nodeName string) (*types.ContainerJSON, error) {
+// restoreContext derives the context used by the restore/teardown defers. It is
+// deliberately detached from the caller's context: the most common recreate
+// failure is the caller's own deadline or cancellation (auto-update bounds a
+// recreate with recreateTimeout), and reusing that dead context would make every
+// restore call fail instantly, leaving the original container renamed,
+// disconnected and stopped. The derived context keeps the caller's values but
+// gets its own restoreTimeout deadline.
+func restoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+}
+
+// Recreate a container.
+//
+// The original container is kept until the new one has actually started, so a
+// failure at any step before that rolls back to it. When that rollback itself
+// fails the workload is left down, which is reported to the caller as a
+// *RestoreError wrapping the original failure — never silently logged away.
+func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.Endpoint, containerId string, forcePullImage bool, imageTag, nodeName string) (newContainer *types.ContainerJSON, err error) {
 	cli, err := c.factory.CreateClient(endpoint, nodeName, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "create client error")
@@ -142,25 +166,61 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 
 	restore := true
 
+	// restoreErrs collects everything that goes wrong while putting the original
+	// container back in service, across both defers below. A non-empty slice means
+	// the workload is DOWN, which the restore defer reports as a *RestoreError
+	// instead of swallowing it into a Warn nobody acts on.
+	var restoreErrs []error
+
+	// Restore of the original container. Registered FIRST, so LIFO runs it LAST,
+	// after the teardown defer registered below has removed the new container: the
+	// new container owns the original name, so it has to be gone before the
+	// original can be renamed back.
 	defer func() {
 		if !restore {
 			return
 		}
 
+		restoreCtx, cancel := restoreContext(ctx)
+		defer cancel()
+
 		log.Debug().Str("container_id", containerId).Str("container", container.Name).Msg("restoring the container")
-		if err := cli.ContainerRename(ctx, containerId, container.Name); err != nil {
-			log.Warn().Err(err).Msg("failure to rename container")
+		if err := cli.ContainerRename(restoreCtx, containerId, container.Name); err != nil {
+			restoreErrs = append(restoreErrs, errors.Wrap(err, "rename container back error"))
 		}
 
 		for _, network := range container.NetworkSettings.Networks {
-			if err := cli.NetworkConnect(ctx, network.NetworkID, containerId, network); err != nil {
-				log.Warn().Err(err).Msg("failure to connect container to network")
+			if err := cli.NetworkConnect(restoreCtx, network.NetworkID, containerId, network); err != nil {
+				restoreErrs = append(restoreErrs, errors.Wrapf(err, "connect container to network %s error", network.NetworkID))
 			}
 		}
 
-		if err := cli.ContainerStart(ctx, containerId, dockercontainer.StartOptions{}); err != nil {
-			log.Warn().Err(err).Msg("failure to start container")
+		if err := cli.ContainerStart(restoreCtx, containerId, dockercontainer.StartOptions{}); err != nil {
+			restoreErrs = append(restoreErrs, errors.Wrap(err, "start container error"))
+		} else {
+			// A successful start call is not proof of service: the container may have
+			// exited immediately. Only a running state means the original is back.
+			restored, _, err := cli.ContainerInspectWithRaw(restoreCtx, containerId, false)
+			switch {
+			case err != nil:
+				restoreErrs = append(restoreErrs, errors.Wrap(err, "inspect restored container error"))
+			case restored.ContainerJSONBase == nil || restored.State == nil || !restored.State.Running:
+				restoreErrs = append(restoreErrs, errors.New("restored container is not running"))
+			}
 		}
+
+		if len(restoreErrs) == 0 {
+			return
+		}
+
+		log.Error().Err(err).Errs("restore_errors", restoreErrs).
+			Str("container_id", containerId).
+			Str("container", strings.TrimPrefix(container.Name, "/")).
+			Int("endpoint_id", int(endpoint.ID)).
+			Str("endpoint", endpoint.Name).
+			Msg("recreate failed and the original container could not be restored, it is left down")
+
+		err = &RestoreError{ContainerID: containerId, Name: container.Name, Cause: err, Errs: restoreErrs}
 	}()
 
 	log.Debug().Str("container", strings.Split(container.Name, "/")[1]).Msg("starting to create a new container")
@@ -184,19 +244,30 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 		return nil, errors.Wrap(err, "create container error")
 	}
 
+	// Teardown of the new container. Registered AFTER the restore defer, so LIFO
+	// runs it FIRST and the original name is free by the time the restore defer
+	// renames the original back.
 	defer func() {
 		if !restore {
 			return
 		}
 
+		restoreCtx, cancel := restoreContext(ctx)
+		defer cancel()
+
 		log.Debug().Str("container_id", create.ID).Msg("removing the new container")
 
-		if err := cli.ContainerStop(ctx, create.ID, dockercontainer.StopOptions{}); err != nil {
-			log.Warn().Err(err).Msg("failure to stop container")
+		// A stop failure is not fatal on its own, the forced removal below kills the
+		// container anyway.
+		if err := cli.ContainerStop(restoreCtx, create.ID, dockercontainer.StopOptions{}); err != nil {
+			log.Warn().Err(err).Str("container_id", create.ID).Msg("failure to stop container")
 		}
 
-		if err := cli.ContainerRemove(ctx, create.ID, dockercontainer.RemoveOptions{}); err != nil {
-			log.Warn().Err(err).Msg("failure to remove container")
+		// Forced: the new container holds the original name, so a removal refused
+		// because it is still running would also make the rename of the original
+		// back to that name fail.
+		if err := cli.ContainerRemove(restoreCtx, create.ID, dockercontainer.RemoveOptions{Force: true}); err != nil {
+			restoreErrs = append(restoreErrs, errors.Wrap(err, "remove new container error"))
 		}
 	}()
 
@@ -230,10 +301,10 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 
 	restore = false
 
-	newContainer, _, err := cli.ContainerInspectWithRaw(ctx, newContainerId, true)
+	created, _, err := cli.ContainerInspectWithRaw(ctx, newContainerId, true)
 	if err != nil {
 		return nil, errors.Wrap(err, "fetch container information error")
 	}
 
-	return &newContainer, nil
+	return &created, nil
 }

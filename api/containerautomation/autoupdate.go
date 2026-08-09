@@ -2,11 +2,13 @@ package containerautomation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/docker"
 	"github.com/portainer/portainer/api/docker/consts"
 	"github.com/portainer/portainer/api/docker/images"
 	"github.com/portainer/portainer/api/internal/endpointutils"
@@ -298,8 +300,23 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 
 	newContainer, err := s.containerService.Recreate(ctx, endpoint, c.ID, true, "", "")
 	if err != nil {
-		// Recreate preserves config and rolls back on a create failure; a pull or
-		// create failure leaves the original container running.
+		// Recreate preserves config and keeps the original container until the new
+		// one has started, so a pull, create or start failure normally ends with the
+		// original running again. When that restore ITSELF failed, Recreate reports a
+		// *docker.RestoreError: nothing is running, which is an operator-visible
+		// outage rather than a skipped update.
+		var restoreErr *docker.RestoreError
+		if errors.As(err, &restoreErr) {
+			log.Error().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
+				Msg("auto-update: failed to recreate container and the original could not be restored, it is left down")
+			s.notifier.Notify(Event{
+				Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
+				StackName: stackName, Message: "failed to recreate container and the original container is left down, manual intervention required", Err: err,
+			})
+
+			return
+		}
+
 		log.Warn().Err(err).Str("container_id", c.ID).Int("endpoint_id", endpointID).
 			Msg("auto-update: failed to recreate container")
 		s.notifier.Notify(Event{

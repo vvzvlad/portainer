@@ -1,10 +1,16 @@
 package containerautomation
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
+	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/docker"
+
 	"github.com/docker/docker/api/types/container"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDecideRollback(t *testing.T) {
@@ -329,5 +335,60 @@ func TestPruneRolledBack(t *testing.T) {
 	}
 	if len(s.rolledBack) != 1 {
 		t.Errorf("rolledBack length = %d, want 1", len(s.rolledBack))
+	}
+}
+
+// TestRollbackReportsAContainerLeftDown is the rollback-path twin of
+// TestUpdateStandaloneReportsAContainerLeftDown. A rollback recreate that merely
+// fails leaves the unhealthy-but-live container in place; a *docker.RestoreError
+// means the rollback tore that container down and could not put anything back,
+// so the notification must not promise a still-serving container.
+func TestRollbackReportsAContainerLeftDown(t *testing.T) {
+	recreateErr := errors.New("start container error: boom")
+
+	tests := []struct {
+		name        string
+		err         error
+		wantMessage string
+	}{
+		{
+			name:        "an ordinary rollback failure leaves the unhealthy container running",
+			err:         recreateErr,
+			wantMessage: "rollback failed: could not recreate on previous image",
+		},
+		{
+			name: "a failed restore leaves the container down",
+			err: &docker.RestoreError{
+				ContainerID: "new-id",
+				Name:        "/web",
+				Cause:       recreateErr,
+				Errs:        []error{errors.New("start container error: still boom")},
+			},
+			wantMessage: "rollback failed and the container is left down, manual intervention required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seq := &callSeq{}
+			notif := &seqNotifier{seq: seq}
+
+			s := &Service{
+				baseCtx:          context.Background(),
+				containerService: &fakeRecreator{seq: seq, err: tt.err},
+				notifier:         notif,
+				rolledBack:       map[string]rolledBackTarget{},
+			}
+
+			s.rollback(newFakeDockerClient(seq), &portainer.Endpoint{ID: 1}, "new-id", "sha256:old", "nginx:1.21", "web", "")
+
+			event, n := notif.only(EventUpdateFailed)
+			require.Equal(t, 1, n, "exactly one update-failed event")
+			require.Equal(t, tt.wantMessage, event.Message)
+			require.ErrorIs(t, event.Err, tt.err, "the event carries the failure itself")
+
+			_, rollbacks := notif.only(EventRollback)
+			require.Zero(t, rollbacks, "a failed rollback never reports success")
+		})
 	}
 }

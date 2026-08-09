@@ -7,6 +7,7 @@ import (
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/docker"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/rs/zerolog/log"
@@ -337,7 +338,9 @@ func (s *Service) gateDeadlineResult() gateResult {
 //
 // If any step fails the previous image cannot be safely restored, so the
 // (unhealthy) new container is left running rather than destroyed, and a loud
-// failure notification is emitted.
+// failure notification is emitted. The exception is a *docker.RestoreError from
+// the rollback recreate: there the restore itself failed, nothing is left
+// running, and the notification says so.
 func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newContainerID, oldImageID, originalRef, containerName, stackName string) {
 	endpointID := int(endpoint.ID)
 
@@ -362,6 +365,22 @@ func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newCo
 	}
 
 	if _, err := s.containerService.Recreate(ctx, endpoint, newContainerID, false, "", ""); err != nil {
+		// A *docker.RestoreError means the rollback recreate could not put back even
+		// the container it had torn down: unlike a plain recreate failure, nothing is
+		// left running, so the operator must not be told the unhealthy container is
+		// still serving.
+		var restoreErr *docker.RestoreError
+		if errors.As(err, &restoreErr) {
+			log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
+				Msg("auto-update: rollback recreate failed and the container could not be restored, it is left down")
+			s.notifier.Notify(Event{
+				Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
+				StackName: stackName, Image: originalRef, Message: "rollback failed and the container is left down, manual intervention required", Err: err,
+			})
+
+			return
+		}
+
 		log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
 			Msg("auto-update: rollback recreate failed, leaving the unhealthy container in place")
 		s.notifier.Notify(Event{
