@@ -369,9 +369,24 @@ func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newCo
 		// container it had torn down. Unlike a plain recreate failure, the unhealthy
 		// container is not simply still serving, so the operator must not be told it
 		// is: OriginalRunning false means nothing is running at all, true means it
-		// came back without its name or its networks.
+		// came back without its name or its networks, and StateUnknown means it was
+		// not observed at all, so neither can be claimed.
 		var restoreErr *docker.RestoreError
 		if errors.As(err, &restoreErr) {
+			if restoreErr.StateUnknown {
+				// Acted on as an outage — a workload that may be down is worth waking
+				// somebody for — but never described as one.
+				log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
+					Msg("auto-update: rollback recreate failed and the state of the container could not be read, it needs checking by hand")
+				s.notifier.Notify(Event{
+					Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
+					StackName: stackName, Image: originalRef, Message: "rollback failed and the state of the container could not be read, check it manually", Err: err,
+					ServiceDown: true,
+				})
+
+				return
+			}
+
 			if !restoreErr.OriginalRunning {
 				log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
 					Msg("auto-update: rollback recreate failed and the container could not be restored, it is left down")

@@ -307,9 +307,25 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 		// it reports a *docker.RestoreError, which is an operator-visible problem rather
 		// than a skipped update. Its OriginalRunning tells the two apart: nothing
 		// running is an outage, a running container that did not get its name or its
-		// networks back is a degradation that will not fix itself.
+		// networks back is a degradation that will not fix itself. StateUnknown is
+		// neither: the container was not observed at all, so the operator is told to
+		// go and look rather than told something that may not be true.
 		var restoreErr *docker.RestoreError
 		if errors.As(err, &restoreErr) {
+			if restoreErr.StateUnknown {
+				// Acted on as an outage — a workload that may be down is worth waking
+				// somebody for — but never described as one.
+				log.Error().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
+					Msg("auto-update: failed to recreate container and the state of the original could not be read, it needs checking by hand")
+				s.notifier.Notify(Event{
+					Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
+					StackName: stackName, Message: "failed to recreate container and the state of the original container could not be read, check it manually", Err: err,
+					ServiceDown: true,
+				})
+
+				return
+			}
+
 			if !restoreErr.OriginalRunning {
 				log.Error().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
 					Msg("auto-update: failed to recreate container and the original could not be restored, it is left down")

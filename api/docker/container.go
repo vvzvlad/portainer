@@ -112,7 +112,16 @@ func clearMacAddrs(n network.NetworkingConfig) network.NetworkingConfig {
 // nothing about process shutdown. If the daemon exits mid-restore the sequence
 // is cut at whatever step it had reached, exactly as before.
 func (c *ContainerService) restoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), c.restoreTimeout)
+	// A service built without NewContainerService would carry a zero budget, and a
+	// zero timeout is an already-expired context: every restore call would fail
+	// instantly and the original would be left renamed, disconnected and stopped.
+	// Falling back to the default keeps that from ever being a silent switch-off.
+	budget := c.restoreTimeout
+	if budget <= 0 {
+		budget = defaultRestoreTimeout
+	}
+
+	return context.WithTimeout(context.WithoutCancel(ctx), budget)
 }
 
 // restorePlan is what putting the original back still requires: whether it has
@@ -159,13 +168,18 @@ func missingNetworks(observed *dockercontainer.InspectResponse, attempted []*net
 // harmlessly so: a superfluous step is refused by the engine ("already in that
 // state") and cannot spoil the verdict, which is read off the container at the
 // end of the restore rather than off which calls came back clean.
+//
+// The observed state says what is to be undone, but only among the steps this
+// recreate attempted: a name that does not match while no rename was even issued
+// is somebody ELSE's rename, and putting the container back under the name this
+// recreate happens to remember is not a mandate the restore has.
 func planRestore(observed *dockercontainer.InspectResponse, name string, renameAttempted bool, disconnectAttempted []*network.EndpointSettings) restorePlan {
 	if observed == nil || observed.ContainerJSONBase == nil {
 		return restorePlan{rename: renameAttempted, networks: disconnectAttempted}
 	}
 
 	return restorePlan{
-		rename:   observed.Name != name,
+		rename:   renameAttempted && observed.Name != name,
 		networks: missingNetworks(observed, disconnectAttempted),
 	}
 }
@@ -245,8 +259,16 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 	// "-old" or off its networks for good. Doing too much is safe because the
 	// restore is idempotent — it is planned from the original's observed state, and
 	// a step taken needlessly is refused by the engine without changing anything.
+	//
+	// stopSaidGone is the exception that is read off the ANSWER rather than raised
+	// before the call: a stop refused with "no such container" is the one answer
+	// that proves this recreate did not take the container down, because there was
+	// nothing there to take down. It is what tells a --rm container the engine
+	// reaped on OUR stop from one that had already exited and been reaped before we
+	// asked (the ordinary way a --rm container dies, and none of our doing).
 	var (
 		renameAttempted     bool
+		stopSaidGone        bool
 		disconnectAttempted []*network.EndpointSettings
 	)
 
@@ -375,18 +397,31 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 		}
 
 		// A --rm container disappearing is not a third party's doing: the engine reaps
-		// it the moment it stops, and the restore is armed BEFORE the stop.
-		autoRemoved := gone && container.HostConfig != nil && container.HostConfig.AutoRemove
+		// it the moment it stops, and the restore is armed BEFORE the stop. Unless the
+		// stop itself said the container was already gone — then it exited and was
+		// reaped on its own, which is simply how a --rm container ends, and this
+		// recreate never touched it.
+		autoRemoved := gone && !stopSaidGone && container.HostConfig != nil && container.HostConfig.AutoRemove
 		originalRunning := false
 
 		switch {
 		case gone && !autoRemoved:
 			// A container this recreate did not take down: nothing removes a container on
-			// a stop unless it runs with --rm, so somebody else removed this one. There is
-			// nothing to put back, and no outage to pin on this recreate.
-			log.Warn().Errs("restore_errors", restoreErrs).
-				Str("container_id", containerId).Str("container", strings.TrimPrefix(container.Name, "/")).
-				Msg("the original container no longer exists, there is nothing to restore")
+			// a stop unless it runs with --rm, so somebody else removed this one (or it
+			// was already gone before the stop). There is nothing to put back, and no
+			// outage to pin on this recreate.
+			event := log.Warn().Errs("restore_errors", restoreErrs).
+				Str("container_id", containerId).Str("container", strings.TrimPrefix(container.Name, "/"))
+
+			if newContainerErr != nil {
+				// Nothing to restore, but not nothing to do: the leftover is holding the
+				// name the vanished original had, so it answers to it.
+				event.Msg("the original container no longer exists, there is nothing to restore, but the new container could not be removed and is left holding the original name")
+
+				return
+			}
+
+			event.Msg("the original container no longer exists, there is nothing to restore")
 
 			return
 		case autoRemoved:
@@ -487,6 +522,8 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 	// 2. stop the current container
 	log.Debug().Str("container_id", containerId).Msg("starting to stop the container")
 	if err := cli.ContainerStop(ctx, containerId, dockercontainer.StopOptions{}); err != nil {
+		stopSaidGone = cerrdefs.IsNotFound(err)
+
 		return nil, errors.Wrap(err, "stop container error")
 	}
 

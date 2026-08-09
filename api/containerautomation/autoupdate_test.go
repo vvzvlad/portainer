@@ -188,6 +188,21 @@ func TestUpdateStandaloneReportsAContainerLeftDown(t *testing.T) {
 			},
 			wantMessage: "failed to recreate container and the original container was only partially restored (name or networks), manual intervention required",
 		},
+		{
+			// The state could not be read, so the operator must be sent to look rather
+			// than told the container is down — while the alert is still raised as if it
+			// were, since it may well be.
+			name: "an unreadable state is acted on as an outage but not called one",
+			err: &docker.RestoreError{
+				ContainerID:  "old-id",
+				Name:         "/web",
+				Cause:        recreateErr,
+				Errs:         []error{errors.New("inspect the original container error: boom")},
+				StateUnknown: true,
+			},
+			wantMessage:     "failed to recreate container and the state of the original container could not be read, check it manually",
+			wantServiceDown: true,
+		},
 	}
 
 	for _, tt := range tests {

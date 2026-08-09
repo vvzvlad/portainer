@@ -1432,9 +1432,9 @@ func TestRecreateReportsAnAutoRemovedOriginalAsAnOutage(t *testing.T) {
 
 	svc, stand, endpoint := newRecreateStand(t)
 	stand.withAutoRemove()
-	// Stopping a --rm container is the engine's cue to remove it, so the stop this
-	// recreate issues is what makes the original vanish.
-	stand.hookCall("stop:"+standOldID, func() { stand.forget(standOldID) })
+	// Stopping a --rm container is the engine's cue to remove it: the stop itself is
+	// answered, and the container is gone by the time the next call reaches it.
+	stand.hookCall("rename:"+standOldID+"->"+standName+"-old", func() { stand.forget(standOldID) })
 
 	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
 	require.Error(t, err)
@@ -1447,6 +1447,66 @@ func TestRecreateReportsAnAutoRemovedOriginalAsAnOutage(t *testing.T) {
 	require.ErrorContains(t, err, "--rm", "the message has to say why there is nothing left to restore")
 
 	requireNoCall(t, stand.recorded(), "start:"+standOldID)
+}
+
+// TestRecreateDoesNotBlameAStopThatFoundNothingToStop is the line between the two
+// tests above, drawn where --rm makes it easy to get wrong: a --rm container that
+// was ALREADY gone when the stop reached it exited on its own and was reaped for
+// it — the ordinary way such a container dies — between the scan that picked it
+// as a candidate and this recreate. The stop saying "no such container" is the
+// proof, and without it the operator is paged for an outage this recreate had no
+// part in.
+func TestRecreateDoesNotBlameAStopThatFoundNothingToStop(t *testing.T) {
+	t.Parallel()
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.withAutoRemove()
+	// Gone before the stop lands, so the stand answers the stop itself — and every
+	// call the restore makes afterwards — with "no such container".
+	stand.hookCall("stop:"+standOldID, func() { stand.forget(standOldID) })
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "stop container error")
+
+	var restoreErr *RestoreError
+	require.NotErrorAs(t, err, &restoreErr,
+		"a --rm container that had already exited is not an outage this recreate caused")
+
+	requireNoCall(t, stand.recorded(), "start:"+standOldID)
+}
+
+// TestRecreateDoesNotUndoARenameItNeverMade guards the restore's mandate: it puts
+// back what THIS recreate took away, and nothing else. A recreate that failed at
+// the stop never renamed anything, so a name that does not match by the time the
+// restore looks was set by somebody else — and writing the remembered name over
+// it would be this recreate renaming a container on its own account.
+func TestRecreateDoesNotUndoARenameItNeverMade(t *testing.T) {
+	t.Parallel()
+
+	const (
+		stopError = "connection reset while stopping"
+		byHand    = "/web-by-hand"
+	)
+
+	svc, stand, endpoint := newRecreateStand(t)
+	// The stop fails before anything is renamed, and somebody renames the container
+	// while this recreate is unwinding.
+	stand.hookCall("stop:"+standOldID, func() { stand.setName(standOldID, byHand) })
+	stand.failCall("stop:"+standOldID, stopError)
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "stop container error")
+
+	requireNoCall(t, stand.recorded(), "rename:"+standOldID+"->"+standName)
+	require.Equal(t, byHand, stand.nameOf(standOldID), "the name somebody else set is left alone")
+
+	// Reported, since the container is not the one the recreate started from, but as
+	// a running container rather than an outage.
+	var restoreErr *RestoreError
+	require.ErrorAs(t, err, &restoreErr)
+	require.True(t, restoreErr.OriginalRunning)
 }
 
 // TestRecreateReportsAnUnreadableOriginalStateAsUnknown covers the verdict having
@@ -1480,6 +1540,21 @@ func TestRecreateReportsAnUnreadableOriginalStateAsUnknown(t *testing.T) {
 	require.True(t, stand.isRunning(standOldID), "the restore did put it back, only the reading of it failed")
 }
 
+// observedContainer is an inspect response as the restore reads one: the name the
+// container carries and the networks it is attached to, which is all the plan and
+// the verdict are built from.
+func observedContainer(name string, attachedTo ...string) *container.InspectResponse {
+	networks := make(map[string]*network.EndpointSettings, len(attachedTo))
+	for _, id := range attachedTo {
+		networks[id] = &network.EndpointSettings{NetworkID: id}
+	}
+
+	return &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{Name: name},
+		NetworkSettings:   &container.NetworkSettings{Networks: networks},
+	}
+}
+
 // TestPlanRestore pins the rule the rollback is planned by: what the engine
 // reports about the original decides what has to be undone, and the steps that
 // were attempted are only the fallback for when that cannot be read.
@@ -1487,18 +1562,6 @@ func TestPlanRestore(t *testing.T) {
 	t.Parallel()
 
 	attempted := []*network.EndpointSettings{{NetworkID: "net-a"}, {NetworkID: "net-b"}}
-
-	observed := func(name string, attachedTo ...string) *container.InspectResponse {
-		networks := make(map[string]*network.EndpointSettings, len(attachedTo))
-		for _, id := range attachedTo {
-			networks[id] = &network.EndpointSettings{NetworkID: id}
-		}
-
-		return &container.InspectResponse{
-			ContainerJSONBase: &container.ContainerJSONBase{Name: name},
-			NetworkSettings:   &container.NetworkSettings{Networks: networks},
-		}
-	}
 
 	tests := []struct {
 		name            string
@@ -1509,20 +1572,27 @@ func TestPlanRestore(t *testing.T) {
 	}{
 		{
 			name:            "a container already back where it started needs nothing",
-			observed:        observed(standName, "net-a", "net-b"),
+			observed:        observedContainer(standName, "net-a", "net-b"),
 			renameAttempted: true,
 		},
 		{
 			name:     "a rename whose answer was lost is undone all the same",
-			observed: observed(standName+"-old", "net-a", "net-b"),
+			observed: observedContainer(standName+"-old", "net-a", "net-b"),
 			// The call came back as a failure, so nothing was "confirmed".
 			renameAttempted: true,
 			wantRename:      true,
 		},
 		{
 			name:         "only the networks the original is actually missing come back",
-			observed:     observed(standName, "net-a"),
+			observed:     observedContainer(standName, "net-a"),
 			wantNetworks: []string{"net-b"},
+		},
+		{
+			// Not this recreate's doing and not this recreate's to undo: writing the
+			// remembered name over it would take a name away from whoever set it.
+			name:            "a name this recreate never touched is left alone",
+			observed:        observedContainer("/web-by-hand", "net-a", "net-b"),
+			renameAttempted: false,
 		},
 		{
 			name:            "an unreadable state falls back to every attempted step",
@@ -1557,4 +1627,81 @@ func TestPlanRestore(t *testing.T) {
 			require.ElementsMatch(t, tt.wantNetworks, ids)
 		})
 	}
+}
+
+// TestMissingNetworks pins what "attached" means to the restore, which asks this
+// twice: of the state it starts from, to plan the reconnects, and of the state it
+// leaves behind, to decide whether the container is whole again. A state it could
+// not read — nil, or an engine answer carrying no network settings at all — has
+// to count as attached to NOTHING: reading it the other way would skip every
+// reconnect and then pronounce the container fully restored.
+func TestMissingNetworks(t *testing.T) {
+	t.Parallel()
+
+	attempted := []*network.EndpointSettings{{NetworkID: "net-a"}, {NetworkID: "net-b"}}
+
+	tests := []struct {
+		name      string
+		observed  *container.InspectResponse
+		attempted []*network.EndpointSettings
+		want      []string
+	}{
+		{
+			name:      "a state that could not be read is attached to nothing",
+			observed:  nil,
+			attempted: attempted,
+			want:      []string{"net-a", "net-b"},
+		},
+		{
+			name:      "an answer without network settings is attached to nothing",
+			observed:  &container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{Name: standName}},
+			attempted: attempted,
+			want:      []string{"net-a", "net-b"},
+		},
+		{
+			name:      "only what the container is actually off is missing",
+			observed:  observedContainer(standName, "net-a"),
+			attempted: attempted,
+			want:      []string{"net-b"},
+		},
+		{
+			name:      "a container back on every network is missing nothing",
+			observed:  observedContainer(standName, "net-a", "net-b"),
+			attempted: attempted,
+		},
+		{
+			name:      "a network nothing was detached from is not reconnected",
+			observed:  observedContainer(standName),
+			attempted: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ids := make([]string, 0, len(tt.want))
+			for _, endpointSettings := range missingNetworks(tt.observed, tt.attempted) {
+				ids = append(ids, endpointSettings.NetworkID)
+			}
+
+			require.ElementsMatch(t, tt.want, ids)
+		})
+	}
+}
+
+// TestRestoreContextFallsBackToTheDefaultBudget guards the zero value: a
+// ContainerService built without NewContainerService carries no restore budget,
+// and a zero timeout is an already-expired context — every restore call would
+// fail before it left the process, switching the restore off without a word.
+func TestRestoreContextFallsBackToTheDefaultBudget(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := (&ContainerService{}).restoreContext(t.Context())
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok, "the restore is always bounded")
+	require.Positive(t, time.Until(deadline), "a zero budget must not leave the restore no time at all")
+	require.LessOrEqual(t, time.Until(deadline), defaultRestoreTimeout)
 }
