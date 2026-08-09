@@ -129,6 +129,10 @@ func TestHttpClientStartsContainerThroughHTTP2CapableAgent(t *testing.T) {
 
 	// The Portainer agent: its LocalProxy retargets the *server* request and hands
 	// it straight to a client transport, without normalising the body.
+	//
+	// ssrf.NewTransport, not NewInternalTransport (ruleguard bans it outside
+	// proxy/factory), is only safe while no test in this package calls ssrf.Configure:
+	// an SSRF dialer would refuse the loopback "daemon" below.
 	relay := ssrf.NewTransport(nil)
 	defer relay.CloseIdleConnections()
 
@@ -175,10 +179,7 @@ func TestHttpClientStartsContainerThroughHTTP2CapableAgent(t *testing.T) {
 		client.WithScheme("https"),
 	)
 	require.NoError(t, err)
-	defer func() {
-		err := cli.Close()
-		require.NoError(t, err)
-	}()
+	defer func() { _ = cli.Close() }()
 
 	err = cli.ContainerStart(context.Background(), "probe", container.StartOptions{})
 

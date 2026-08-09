@@ -71,13 +71,9 @@ func (factory *ProxyFactory) newDockerHTTPProxy(endpoint *portainer.Endpoint) (h
 			innerTransport = ssrf.NewInternalTransport(tlsConfig)
 		} else {
 			innerTransport = ssrf.NewTransport(tlsConfig)
-			// This hop reaches either a Portainer agent or a dockerd exposing its TLS
-			// port directly. The agent relays the request to the Docker socket as-is:
-			// over an HTTP/2 hop its handler receives a non-nil body wrapper even for an
-			// empty body, so the relayed request is framed as Transfer-Encoding: chunked,
-			// which Docker rejects on POST /containers/{id}/start. Stick to HTTP/1.1 so an
-			// empty body stays Content-Length: 0. dockerd itself never speaks HTTP/2, so
-			// disabling it is a no-op for the direct case.
+			// An HTTP/2 hop to the agent turns an empty body into Transfer-Encoding:
+			// chunked, which Docker rejects on POST /containers/{id}/start; see
+			// TestHttpClientStartsContainerThroughHTTP2CapableAgent for the mechanics.
 			innerTransport.Protocols = ssrf.HTTP1Only()
 		}
 	} else if endpointutils.IsEdgeEndpoint(endpoint) {
