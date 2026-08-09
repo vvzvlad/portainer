@@ -6,6 +6,16 @@ on:
     tags: ['v*']
   workflow_dispatch: {}
 
+# Two quick pushes to develop start two runs that race, and this build is long
+# (Go + pnpm), so the overlap window is wide. The older run can finish last and
+# publish its `latest` after the newer one, leaving the registry pointing at the
+# previous commit on a perfectly green build. Serialising per ref makes the last
+# push win. Cancellation stays off on purpose — the older run also publishes the
+# version tag, and cancelling it would discard that image.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   # Own Gitea registry. The image name intentionally keeps the historical
   # `portainer-ce` and does not follow the repo name (`portainer`).
@@ -20,7 +30,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -69,7 +79,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to the Gitea container registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: gitea.vvzvlad.xyz
           username: ${{ github.repository_owner }}
@@ -83,6 +93,11 @@ jobs:
           context: .
           file: build/linux/alpine.Dockerfile
           platforms: linux/amd64
+          # Equivalent of `docker build --pull`. The runner is self-hosted with a
+          # long-lived daemon, so without this the alpine base image is served from
+          # a local cache that can be months old and carries an unpatched system
+          # layer into every build.
+          pull: true
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
