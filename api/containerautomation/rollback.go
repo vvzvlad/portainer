@@ -376,6 +376,7 @@ func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newCo
 			s.notifier.Notify(Event{
 				Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
 				StackName: stackName, Image: originalRef, Message: "rollback failed and the container is left down, manual intervention required", Err: err,
+				ServiceDown: true,
 			})
 
 			return

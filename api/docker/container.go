@@ -12,6 +12,7 @@ import (
 	"github.com/portainer/portainer/api/logs"
 
 	"github.com/Masterminds/semver/v3"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
@@ -76,23 +77,33 @@ func clearMacAddrs(n network.NetworkingConfig) network.NetworkingConfig {
 	return netConfig
 }
 
-// restoreContext derives the context used by the restore/teardown defers. It is
-// deliberately detached from the caller's context: the most common recreate
-// failure is the caller's own deadline or cancellation (auto-update bounds a
-// recreate with recreateTimeout), and reusing that dead context would make every
-// restore call fail instantly, leaving the original container renamed,
-// disconnected and stopped. The derived context keeps the caller's values but
-// gets its own restoreTimeout deadline.
+// restoreContext derives the context the restore runs on. It is deliberately
+// detached from the caller's context: the most common recreate failure is the
+// caller's own deadline or cancellation (auto-update bounds a recreate with
+// recreateTimeout), and reusing that dead context would make every restore call
+// fail instantly, leaving the original container renamed, disconnected and
+// stopped. The derived context keeps the caller's values but gets its own
+// restoreTimeout deadline.
+//
+// context.WithoutCancel only detaches the restore from the caller; it promises
+// nothing about process shutdown. If the daemon exits mid-restore the sequence
+// is cut at whatever step it had reached, exactly as before.
 func restoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 }
 
 // Recreate a container.
 //
-// The original container is kept until the new one has actually started, so a
-// failure at any step before that rolls back to it. When that rollback itself
-// fails the workload is left down, which is reported to the caller as a
-// *RestoreError wrapping the original failure — never silently logged away.
+// From the moment the original container is stopped, every failure path rolls
+// back to it: the rename aside is undone, the networks that were actually
+// disconnected are reconnected, the new container (if one was created already)
+// is removed, and the original is started again. A failure before the stop has
+// not touched the original, so there is nothing to roll back.
+//
+// The rollback is not taken on trust: the original is inspected afterwards and
+// must report State.Running. When it does not, the workload is down and the
+// caller is told so with a *RestoreError wrapping the original failure — never
+// silently logged away.
 func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.Endpoint, containerId string, forcePullImage bool, imageTag, nodeName string) (newContainer *types.ContainerJSON, err error) {
 	cli, err := c.factory.CreateClient(endpoint, nodeName, nil)
 	if err != nil {
@@ -139,38 +150,54 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 		return nil, errors.Wrap(err, "stop container error")
 	}
 
-	// 3. rename the current container
-	log.Debug().Str("container_id", containerId).Msg("starting to rename the container")
-	if err := cli.ContainerRename(ctx, containerId, container.Name+"-old"); err != nil {
-		return nil, errors.Wrap(err, "rename container error")
-	}
-
-	initialNetwork := network.NetworkingConfig{
-		EndpointsConfig: make(map[string]*network.EndpointSettings),
-	}
-
-	// 4. disconnect all networks from the current container
-	for name, network := range container.NetworkSettings.Networks {
-		// This allows new container to use the same IP address if specified
-		if err := cli.NetworkDisconnect(ctx, network.NetworkID, containerId, true); err != nil {
-			return nil, errors.Wrap(err, "disconnect network from old container error")
-		}
-
-		// 5. get the first network attached to the current container
-		if len(initialNetwork.EndpointsConfig) == 0 {
-			// Retrieve the first network that is linked to the present container, which
-			// will be utilized when creating the container.
-			initialNetwork.EndpointsConfig[name] = network
-		}
-	}
-
+	// The original container is no longer serving from here on, so every exit path
+	// has to put it back. restore is cleared only once the new container has taken
+	// over for good.
 	restore := true
 
-	// restoreErrs collects everything that goes wrong while putting the original
-	// container back in service, across both defers below. A non-empty slice means
-	// the workload is DOWN, which the restore defer reports as a *RestoreError
-	// instead of swallowing it into a Warn nobody acts on.
-	var restoreErrs []error
+	// What the restore actually has to undo, tracked step by step instead of being
+	// assumed from the original's inspect. A teardown that fails halfway must not
+	// make the restore rename a container that was never renamed or reconnect a
+	// network that was never disconnected: Docker rejects both, and those errors
+	// would then be read as a failed restore.
+	var (
+		renamedAside bool
+		disconnected []*network.EndpointSettings
+	)
+
+	// restoreCtx is ONE time budget for the whole restore, shared by both defers
+	// below, so a dead engine can pin the caller's goroutine for restoreTimeout in
+	// total rather than once per defer. It is built lazily: a recreate that never
+	// rolls back must not pay for a context it does not use.
+	var (
+		sharedRestoreCtx context.Context
+		stopRestore      context.CancelFunc
+	)
+
+	useRestoreCtx := func() context.Context {
+		if sharedRestoreCtx == nil {
+			sharedRestoreCtx, stopRestore = restoreContext(ctx)
+		}
+
+		return sharedRestoreCtx
+	}
+
+	// Registered before both restore defers, so LIFO releases the shared context
+	// only once they are done with it.
+	defer func() {
+		if stopRestore != nil {
+			stopRestore()
+		}
+	}()
+
+	// restoreErrs collects what went wrong putting the ORIGINAL container back in
+	// service. The teardown of the NEW container reports through newContainerErr
+	// instead: a new container that could not be removed is a leftover to clean up,
+	// not by itself proof that the workload is down.
+	var (
+		restoreErrs     []error
+		newContainerErr error
+	)
 
 	// Restore of the original container. Registered FIRST, so LIFO runs it LAST,
 	// after the teardown defer registered below has removed the new container: the
@@ -181,47 +208,123 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 			return
 		}
 
-		restoreCtx, cancel := restoreContext(ctx)
-		defer cancel()
+		restoreCtx := useRestoreCtx()
 
 		log.Debug().Str("container_id", containerId).Str("container", container.Name).Msg("restoring the container")
-		if err := cli.ContainerRename(restoreCtx, containerId, container.Name); err != nil {
-			restoreErrs = append(restoreErrs, errors.Wrap(err, "rename container back error"))
-		}
 
-		for _, network := range container.NetworkSettings.Networks {
-			if err := cli.NetworkConnect(restoreCtx, network.NetworkID, containerId, network); err != nil {
-				restoreErrs = append(restoreErrs, errors.Wrapf(err, "connect container to network %s error", network.NetworkID))
+		if renamedAside {
+			if err := cli.ContainerRename(restoreCtx, containerId, container.Name); err != nil {
+				restoreErrs = append(restoreErrs, errors.Wrap(err, "rename container back error"))
 			}
 		}
+
+		for _, endpointSettings := range disconnected {
+			if err := cli.NetworkConnect(restoreCtx, endpointSettings.NetworkID, containerId, endpointSettings); err != nil {
+				restoreErrs = append(restoreErrs, errors.Wrapf(err, "connect container to network %s error", endpointSettings.NetworkID))
+			}
+		}
+
+		// The verdict is the ORIGINAL's observed state and nothing else. A successful
+		// start call is not proof of service (the container may have exited at once),
+		// and a state that could not be read is not proof either.
+		originalRunning := false
 
 		if err := cli.ContainerStart(restoreCtx, containerId, dockercontainer.StartOptions{}); err != nil {
 			restoreErrs = append(restoreErrs, errors.Wrap(err, "start container error"))
 		} else {
-			// A successful start call is not proof of service: the container may have
-			// exited immediately. Only a running state means the original is back.
 			restored, _, err := cli.ContainerInspectWithRaw(restoreCtx, containerId, false)
 			switch {
 			case err != nil:
 				restoreErrs = append(restoreErrs, errors.Wrap(err, "inspect restored container error"))
 			case restored.ContainerJSONBase == nil || restored.State == nil || !restored.State.Running:
 				restoreErrs = append(restoreErrs, errors.New("restored container is not running"))
+			default:
+				originalRunning = true
 			}
 		}
 
-		if len(restoreErrs) == 0 {
+		if originalRunning {
+			// The workload is serving again, so this is an ordinary failed recreate and
+			// the caller keeps the original error. Whatever else is left over is loud
+			// but is not an outage, and must not be dressed up as one.
+			if newContainerErr != nil {
+				log.Warn().Err(newContainerErr).Str("container_id", containerId).
+					Msg("the new container could not be removed after a failed recreate, the original is running again but the leftover needs cleaning up")
+			}
+
+			if len(restoreErrs) > 0 {
+				log.Error().Errs("restore_errors", restoreErrs).
+					Str("container_id", containerId).
+					Str("container", strings.TrimPrefix(container.Name, "/")).
+					Int("endpoint_id", int(endpoint.ID)).
+					Str("endpoint", endpoint.Name).
+					Msg("recreate failed and the original container is running again, but the restore was not clean")
+			}
+
 			return
 		}
 
-		log.Error().Err(err).Errs("restore_errors", restoreErrs).
+		// The original is down. A new container that could not be removed belongs in
+		// the report: holding the original name, it is a common reason the rename back
+		// could not land.
+		errs := restoreErrs
+		if newContainerErr != nil {
+			errs = append([]error{newContainerErr}, restoreErrs...)
+		}
+
+		if err == nil {
+			// Not reachable on a normal return: restore is only cleared on the path that
+			// returns the new container. A nil error here means Recreate is unwinding
+			// through a panic, and it is the panic — not this named return — that the
+			// caller will see, so there is nothing to wrap.
+			log.Error().Errs("restore_errors", errs).
+				Str("container_id", containerId).
+				Str("container", strings.TrimPrefix(container.Name, "/")).
+				Int("endpoint_id", int(endpoint.ID)).
+				Str("endpoint", endpoint.Name).
+				Msg("recreate panicked and the original container could not be restored, it is left down")
+
+			return
+		}
+
+		log.Error().Err(err).Errs("restore_errors", errs).
 			Str("container_id", containerId).
 			Str("container", strings.TrimPrefix(container.Name, "/")).
 			Int("endpoint_id", int(endpoint.ID)).
 			Str("endpoint", endpoint.Name).
 			Msg("recreate failed and the original container could not be restored, it is left down")
 
-		err = &RestoreError{ContainerID: containerId, Name: container.Name, Cause: err, Errs: restoreErrs}
+		err = &RestoreError{ContainerID: containerId, Name: container.Name, Cause: err, Errs: errs}
 	}()
+
+	// 3. rename the current container
+	log.Debug().Str("container_id", containerId).Msg("starting to rename the container")
+	if err := cli.ContainerRename(ctx, containerId, container.Name+"-old"); err != nil {
+		return nil, errors.Wrap(err, "rename container error")
+	}
+
+	renamedAside = true
+
+	initialNetwork := network.NetworkingConfig{
+		EndpointsConfig: make(map[string]*network.EndpointSettings),
+	}
+
+	// 4. disconnect all networks from the current container
+	for name, endpointSettings := range container.NetworkSettings.Networks {
+		// This allows new container to use the same IP address if specified
+		if err := cli.NetworkDisconnect(ctx, endpointSettings.NetworkID, containerId, true); err != nil {
+			return nil, errors.Wrap(err, "disconnect network from old container error")
+		}
+
+		disconnected = append(disconnected, endpointSettings)
+
+		// 5. get the first network attached to the current container
+		if len(initialNetwork.EndpointsConfig) == 0 {
+			// Retrieve the first network that is linked to the present container, which
+			// will be utilized when creating the container.
+			initialNetwork.EndpointsConfig[name] = endpointSettings
+		}
+	}
 
 	log.Debug().Str("container", strings.Split(container.Name, "/")[1]).Msg("starting to create a new container")
 
@@ -252,22 +355,23 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 			return
 		}
 
-		restoreCtx, cancel := restoreContext(ctx)
-		defer cancel()
+		restoreCtx := useRestoreCtx()
 
 		log.Debug().Str("container_id", create.ID).Msg("removing the new container")
 
 		// A stop failure is not fatal on its own, the forced removal below kills the
 		// container anyway.
-		if err := cli.ContainerStop(restoreCtx, create.ID, dockercontainer.StopOptions{}); err != nil {
+		if err := cli.ContainerStop(restoreCtx, create.ID, dockercontainer.StopOptions{}); err != nil && !cerrdefs.IsNotFound(err) {
 			log.Warn().Err(err).Str("container_id", create.ID).Msg("failure to stop container")
 		}
 
 		// Forced: the new container holds the original name, so a removal refused
 		// because it is still running would also make the rename of the original
-		// back to that name fail.
-		if err := cli.ContainerRemove(restoreCtx, create.ID, dockercontainer.RemoveOptions{Force: true}); err != nil {
-			restoreErrs = append(restoreErrs, errors.Wrap(err, "remove new container error"))
+		// back to that name fail. A container that is already gone — the engine
+		// removed it itself because the original ran with --rm, or the removal did
+		// land and only the answer was lost — is the outcome we wanted, not an error.
+		if err := cli.ContainerRemove(restoreCtx, create.ID, dockercontainer.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) {
+			newContainerErr = errors.Wrap(err, "remove new container error")
 		}
 	}()
 

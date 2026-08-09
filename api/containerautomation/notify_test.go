@@ -27,7 +27,9 @@ func TestLogNotifierDoesNotPanic(t *testing.T) {
 	n.Notify(Event{Kind: EventHealRestarted, EndpointID: 3, ContainerID: "ghi"})
 	n.Notify(Event{Kind: EventUpdateFailed, EndpointID: 4, ContainerID: "jkl", Err: errors.New("boom")})
 	n.Notify(Event{Kind: EventUpdateFailed, EndpointID: 4}) // failure without an error
-	n.Notify(Event{})                                       // zero value
+	// A failure that left nothing running takes the error level branch.
+	n.Notify(Event{Kind: EventUpdateFailed, EndpointID: 4, ContainerID: "jkl", Err: errors.New("boom"), ServiceDown: true})
+	n.Notify(Event{}) // zero value
 }
 
 func TestRecordingNotifierCapturesEvents(t *testing.T) {

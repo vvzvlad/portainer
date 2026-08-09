@@ -15,14 +15,21 @@ var (
 // container back into service, so the workload is left down. It is deliberately
 // distinct from a plain recreate failure: the latter ends with the original
 // container running again, this one ends with nothing running and needs a human.
+//
+// Recreate only builds one after inspecting the original and NOT seeing it
+// running, so it is never the verdict on a service that is merely untidy (a
+// leftover new container, a name or a network that could not be put back).
 type RestoreError struct {
 	// ContainerID is the original container that could not be restored.
 	ContainerID string
 	// Name is the original container name as reported by Docker (e.g. "/web").
 	Name string
-	// Cause is the recreate failure that triggered the restore.
+	// Cause is the recreate failure that triggered the restore. It is never nil:
+	// Recreate only wraps a failure it is already returning.
 	Cause error
-	// Errs is everything that went wrong while restoring.
+	// Errs is everything that went wrong while restoring, including a new container
+	// that could not be removed when one was left behind (holding the original
+	// name, it is a common reason the rename back could not land).
 	Errs []error
 }
 

@@ -116,6 +116,15 @@ func (o standOp) detail() string {
 	}
 }
 
+// standFailure is a scripted daemon error: the message plus the HTTP status it
+// is served with. The status is part of the script because the Docker SDK turns
+// it into a typed error, and Recreate treats a 404 (the object is already gone)
+// differently from a 500.
+type standFailure struct {
+	message string
+	status  int
+}
+
 // dockerStand is a scriptable stand-in for the Docker Engine API, serving just
 // the calls Recreate makes. It is driven through the production ClientFactory
 // and the real Docker SDK client (version negotiation included), so the test
@@ -125,10 +134,11 @@ type dockerStand struct {
 
 	mu       sync.Mutex
 	calls    []string
-	failures map[string]string // call key -> daemon error message
-	hooks    map[string]func() // call key -> side effect run before answering
-	running  map[string]bool   // container id -> state reported by inspect
-	inert    map[string]bool   // ids whose start succeeds but leaves them stopped
+	failures map[string]standFailure // call key or detail -> scripted daemon error
+	hooks    map[string]func()       // call key or detail -> side effect run before answering
+	running  map[string]bool         // container id -> state reported by inspect
+	inert    map[string]bool         // ids whose start succeeds but leaves them stopped
+	networks map[string]string       // network name -> id, as reported by inspect
 }
 
 // newRecreateStand wires a ContainerService to a fresh stand. The data store is
@@ -138,10 +148,11 @@ func newRecreateStand(t *testing.T) (*ContainerService, *dockerStand, *portainer
 	t.Helper()
 
 	stand := &dockerStand{
-		failures: map[string]string{},
+		failures: map[string]standFailure{},
 		hooks:    map[string]func(){},
 		running:  map[string]bool{standOldID: true},
 		inert:    map[string]bool{},
+		networks: map[string]string{standNetwork: standNetworkID},
 	}
 
 	stand.srv = httptest.NewServer(stand)
@@ -157,12 +168,20 @@ func newRecreateStand(t *testing.T) (*ContainerService, *dockerStand, *portainer
 	return NewContainerService(dockerclient.NewClientFactory(nil, nil), nil), stand, endpoint
 }
 
-// failCall makes every call matching key fail with a daemon-style error.
+// failCall makes every call matching key fail with a daemon-style server error.
+// The key is matched against both the coarse call key and the finer detail, so a
+// test can fail every rename of a container or just the rename to one name.
 func (s *dockerStand) failCall(key, message string) {
+	s.failCallStatus(key, message, http.StatusInternalServerError)
+}
+
+// failCallStatus is failCall with a chosen HTTP status, for the cases where the
+// status is what is under test (a 404 meaning "already gone").
+func (s *dockerStand) failCallStatus(key, message string, status int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.failures[key] = message
+	s.failures[key] = standFailure{message: message, status: status}
 }
 
 // hookCall runs fn just before the stand answers a call matching key.
@@ -171,6 +190,15 @@ func (s *dockerStand) hookCall(key string, fn func()) {
 	defer s.mu.Unlock()
 
 	s.hooks[key] = fn
+}
+
+// withNetworks replaces the networks the original container reports. It must be
+// called before the recreate under test, while nothing is being served.
+func (s *dockerStand) withNetworks(networks map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.networks = networks
 }
 
 // startsInert makes a container's start succeed while the container stays
@@ -201,6 +229,11 @@ func (s *dockerStand) inspectResponse(id string) container.InspectResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	networks := make(map[string]*network.EndpointSettings, len(s.networks))
+	for name, id := range s.networks {
+		networks[name] = &network.EndpointSettings{NetworkID: id}
+	}
+
 	return container.InspectResponse{
 		ContainerJSONBase: &container.ContainerJSONBase{
 			ID:         id,
@@ -209,12 +242,8 @@ func (s *dockerStand) inspectResponse(id string) container.InspectResponse {
 			State:      &container.State{Running: s.running[id]},
 			HostConfig: &container.HostConfig{},
 		},
-		Config: &container.Config{Image: standImage},
-		NetworkSettings: &container.NetworkSettings{
-			Networks: map[string]*network.EndpointSettings{
-				standNetwork: {NetworkID: standNetworkID},
-			},
-		},
+		Config:          &container.Config{Image: standImage},
+		NetworkSettings: &container.NetworkSettings{Networks: networks},
 	}
 }
 
@@ -290,8 +319,16 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.calls = append(s.calls, op.detail())
-	message, failed := s.failures[op.key()]
-	hook := s.hooks[op.key()]
+	// The detail is looked up first so a test can single out one call of a verb
+	// (the rename BACK, say) without also scripting its sibling.
+	failure, failed := s.failures[op.detail()]
+	if !failed {
+		failure, failed = s.failures[op.key()]
+	}
+	hook, hooked := s.hooks[op.detail()]
+	if !hooked {
+		hook = s.hooks[op.key()]
+	}
 	s.mu.Unlock()
 
 	if hook != nil {
@@ -300,8 +337,8 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if failed {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"message":` + strconv.Quote(message) + `}`))
+		w.WriteHeader(failure.status)
+		_, _ = w.Write([]byte(`{"message":` + strconv.Quote(failure.message) + `}`))
 
 		return
 	}
@@ -347,6 +384,14 @@ func callIndex(t *testing.T, calls []string, call string) int {
 	require.FailNowf(t, "missing call", "%q was never issued, recorded calls: %v", call, calls)
 
 	return -1
+}
+
+// requireNoCall fails the test when a call was issued at all. It is the mirror of
+// callIndex, for the steps the restore must NOT take.
+func requireNoCall(t *testing.T, calls []string, call string) {
+	t.Helper()
+
+	require.NotContains(t, calls, call, "%q must not have been issued, recorded calls: %v", call, calls)
 }
 
 func countCalls(calls []string, call string) int {
@@ -510,4 +555,194 @@ func TestRecreateRestoresAfterTheCallerContextIsCancelled(t *testing.T) {
 
 	var restoreErr *RestoreError
 	require.NotErrorAs(t, err, &restoreErr, "the restore itself succeeded despite the dead caller context")
+}
+
+// TestRecreateRestoresAfterAFailedRename covers a failure in the teardown itself
+// rather than in the new container: the rename aside is refused, which leaves the
+// original stopped. That is just as much an outage as a failed start, so the
+// restore has to run here too — and it must NOT try to rename a container that
+// was never renamed, since Docker refuses a rename to the name already held.
+func TestRecreateRestoresAfterAFailedRename(t *testing.T) {
+	t.Parallel()
+
+	const renameError = "rename refused by the daemon"
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.failCall("rename:"+standOldID+"->"+standName+"-old", renameError)
+
+	newContainer, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+	require.Nil(t, newContainer)
+	require.ErrorContains(t, err, "rename container error")
+	require.ErrorContains(t, err, renameError)
+
+	var restoreErr *RestoreError
+	require.NotErrorAs(t, err, &restoreErr, "the original is running again, so this is a plain recreate failure")
+
+	calls := stand.recorded()
+	callIndex(t, calls, "start:"+standOldID)
+	requireNoCall(t, calls, "rename:"+standOldID+"->"+standName)
+	requireNoCall(t, calls, "connect:"+standNetworkID+":"+standOldID)
+	requireNoCall(t, calls, "create:"+standName)
+
+	require.True(t, stand.isRunning(standOldID), "the original container is running again")
+}
+
+// TestRecreateRestoresAfterAFailedNetworkDisconnect is the same for the network
+// teardown, with the extra wrinkle that it fails halfway: the original is left
+// stopped, renamed aside, and detached from SOME of its networks. The restore
+// must reconnect exactly the networks it disconnected — reconnecting one that is
+// still attached fails with "already exists" and would be misread as a broken
+// restore.
+func TestRecreateRestoresAfterAFailedNetworkDisconnect(t *testing.T) {
+	t.Parallel()
+
+	const (
+		disconnectError = "disconnect refused by the daemon"
+		netAID          = "net-a"
+		netBID          = "net-b"
+	)
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.withNetworks(map[string]string{"a": netAID, "b": netBID})
+	stand.failCall("disconnect:"+netBID+":"+standOldID, disconnectError)
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "disconnect network from old container error")
+	require.ErrorContains(t, err, disconnectError)
+
+	var restoreErr *RestoreError
+	require.NotErrorAs(t, err, &restoreErr, "the original is running again, so this is a plain recreate failure")
+
+	calls := stand.recorded()
+	callIndex(t, calls, "rename:"+standOldID+"->"+standName)
+	callIndex(t, calls, "start:"+standOldID)
+	require.True(t, stand.isRunning(standOldID), "the original container is running again")
+
+	// Map iteration decides whether net-a was reached before net-b failed, so the
+	// assertion is on the invariant rather than on a fixed sequence: every network
+	// is reconnected exactly as often as it was successfully disconnected.
+	requireNoCall(t, calls, "connect:"+netBID+":"+standOldID)
+	require.Equal(t,
+		countCalls(calls, "disconnect:"+netAID+":"+standOldID),
+		countCalls(calls, "connect:"+netAID+":"+standOldID),
+		"only the networks that were actually disconnected may be reconnected")
+}
+
+// TestRecreateReportsRestoreErrorWhenATeardownFailureLeavesTheOriginalDown is the
+// other half of the two tests above: covering the teardown with a restore is only
+// worth anything if a restore that does not work is still reported. The
+// disconnect fails, and so does the start of the original — nothing is running,
+// which the caller has to hear as a *RestoreError.
+func TestRecreateReportsRestoreErrorWhenATeardownFailureLeavesTheOriginalDown(t *testing.T) {
+	t.Parallel()
+
+	const (
+		disconnectError   = "disconnect refused by the daemon"
+		restoreStartError = "original container refused to start"
+	)
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.failCall("disconnect:"+standNetworkID+":"+standOldID, disconnectError)
+	stand.failCall("start:"+standOldID, restoreStartError)
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+
+	var restoreErr *RestoreError
+	require.ErrorAs(t, err, &restoreErr)
+	require.ErrorContains(t, restoreErr.Cause, disconnectError, "the teardown failure stays the cause")
+	require.Len(t, restoreErr.Errs, 1, "only the start of the original failed")
+	require.ErrorContains(t, restoreErr.Errs[0], restoreStartError)
+
+	require.False(t, stand.isRunning(standOldID))
+}
+
+// TestRecreateKeepsTheVerdictWhenTheNewContainerCannotBeRemoved pins what the
+// verdict is built from: the state of the ORIGINAL, not the tidiness of the
+// rollback. The new container cannot be removed (an engine hiccup, a client
+// timeout on a removal that did land), but the original is back and running, so
+// the caller must get the plain recreate failure. Reporting a *RestoreError here
+// would tell an operator the workload is down while it is serving.
+func TestRecreateKeepsTheVerdictWhenTheNewContainerCannotBeRemoved(t *testing.T) {
+	t.Parallel()
+
+	const removeError = "removal refused by the daemon"
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.failCall("start:"+standNewID, standStartError)
+	stand.failCall("remove:"+standNewID, removeError)
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+	require.ErrorContains(t, err, standStartError)
+
+	var restoreErr *RestoreError
+	require.NotErrorAs(t, err, &restoreErr, "the original is running, so the workload is not down")
+
+	calls := stand.recorded()
+	callIndex(t, calls, "remove:"+standNewID+":force")
+	require.True(t, stand.isRunning(standOldID), "the original container is running again")
+}
+
+// TestRecreateIgnoresAnAlreadyRemovedNewContainer covers the removal answering
+// "no such container": the original may have run with --rm, in which case the
+// engine reaps the new container on its own. That is the outcome the removal was
+// after, so it must not show up among the restore failures. The original is kept
+// down here only to make the reported failures observable.
+func TestRecreateIgnoresAnAlreadyRemovedNewContainer(t *testing.T) {
+	t.Parallel()
+
+	const restoreStartError = "original container refused to start"
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.failCall("start:"+standNewID, standStartError)
+	stand.failCallStatus("remove:"+standNewID, "No such container: "+standNewID, http.StatusNotFound)
+	stand.failCall("start:"+standOldID, restoreStartError)
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+
+	var restoreErr *RestoreError
+	require.ErrorAs(t, err, &restoreErr)
+	require.Len(t, restoreErr.Errs, 1, "a container that is already gone is not a restore failure")
+	require.ErrorContains(t, restoreErr.Errs[0], restoreStartError)
+	require.NotContains(t, err.Error(), "remove new container error")
+}
+
+// TestRecreateReportsRestoreErrorWhenTheLeftoverNewContainerBlocksTheOriginal is
+// the regression guard on the other side of the verdict: dropping the removal
+// failure out of the verdict must not drop it out of the REPORT. Here the new
+// container survives, keeps the original name so the rename back is refused, and
+// the original does not come up — the workload is down, and the operator needs to
+// read why in one place.
+func TestRecreateReportsRestoreErrorWhenTheLeftoverNewContainerBlocksTheOriginal(t *testing.T) {
+	t.Parallel()
+
+	const (
+		removeError       = "removal refused by the daemon"
+		renameBackError   = "container name is already in use"
+		restoreStartError = "original container refused to start"
+	)
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.failCall("start:"+standNewID, standStartError)
+	stand.failCall("remove:"+standNewID, removeError)
+	stand.failCall("rename:"+standOldID+"->"+standName, renameBackError)
+	stand.failCall("start:"+standOldID, restoreStartError)
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+
+	var restoreErr *RestoreError
+	require.ErrorAs(t, err, &restoreErr)
+	require.ErrorContains(t, err, "left down")
+
+	require.Len(t, restoreErr.Errs, 3)
+	require.ErrorContains(t, err, removeError, "the leftover new container explains the refused rename")
+	require.ErrorContains(t, err, renameBackError)
+	require.ErrorContains(t, err, restoreStartError)
+
+	require.False(t, stand.isRunning(standOldID))
 }

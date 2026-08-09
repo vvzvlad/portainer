@@ -48,6 +48,12 @@ type Event struct {
 	Message   string
 	// Err carries the underlying error for failure events; nil otherwise.
 	Err error
+	// ServiceDown marks a failure that left NOTHING running for the container: the
+	// update (or its rollback) tore the original down and could not put it back.
+	// It is what tells the two failure outcomes apart for a consumer that only sees
+	// the event, since both are EventUpdateFailed and otherwise differ in Message
+	// wording alone. Always false for a failure the container survived.
+	ServiceDown bool
 }
 
 // Notifier receives container-automation events. CE has no generic notification
@@ -63,11 +69,17 @@ type Notifier interface {
 type logNotifier struct{}
 
 // Notify logs the event with its kind and context fields. Failure events are
-// logged at warn (with the error), the rest at info.
+// logged at warn (with the error), the rest at info. A failure that left the
+// container down is logged at error instead, matching the level the call site
+// uses: an outage must not read like a skipped update in the daemon log.
 func (logNotifier) Notify(event Event) {
 	entry := log.Info()
 	if event.Kind == EventUpdateFailed {
 		entry = log.Warn()
+		if event.ServiceDown {
+			entry = log.Error()
+		}
+
 		if event.Err != nil {
 			entry = entry.Err(event.Err)
 		}

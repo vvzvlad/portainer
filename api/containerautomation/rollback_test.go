@@ -347,9 +347,10 @@ func TestRollbackReportsAContainerLeftDown(t *testing.T) {
 	recreateErr := errors.New("start container error: boom")
 
 	tests := []struct {
-		name        string
-		err         error
-		wantMessage string
+		name            string
+		err             error
+		wantMessage     string
+		wantServiceDown bool
 	}{
 		{
 			name:        "an ordinary rollback failure leaves the unhealthy container running",
@@ -364,7 +365,8 @@ func TestRollbackReportsAContainerLeftDown(t *testing.T) {
 				Cause:       recreateErr,
 				Errs:        []error{errors.New("start container error: still boom")},
 			},
-			wantMessage: "rollback failed and the container is left down, manual intervention required",
+			wantMessage:     "rollback failed and the container is left down, manual intervention required",
+			wantServiceDown: true,
 		},
 	}
 
@@ -386,6 +388,8 @@ func TestRollbackReportsAContainerLeftDown(t *testing.T) {
 			require.Equal(t, 1, n, "exactly one update-failed event")
 			require.Equal(t, tt.wantMessage, event.Message)
 			require.ErrorIs(t, event.Err, tt.err, "the event carries the failure itself")
+			require.Equal(t, tt.wantServiceDown, event.ServiceDown,
+				"ServiceDown is what tells a consumer the two failure outcomes apart, the wording is not machine-readable")
 
 			_, rollbacks := notif.only(EventRollback)
 			require.Zero(t, rollbacks, "a failed rollback never reports success")

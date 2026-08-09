@@ -154,9 +154,10 @@ func TestUpdateStandaloneReportsAContainerLeftDown(t *testing.T) {
 	recreateErr := errors.New("start container error: boom")
 
 	tests := []struct {
-		name        string
-		err         error
-		wantMessage string
+		name            string
+		err             error
+		wantMessage     string
+		wantServiceDown bool
 	}{
 		{
 			name:        "an ordinary recreate failure leaves the original running",
@@ -171,7 +172,8 @@ func TestUpdateStandaloneReportsAContainerLeftDown(t *testing.T) {
 				Cause:       recreateErr,
 				Errs:        []error{errors.New("start container error: still boom")},
 			},
-			wantMessage: "failed to recreate container and the original container is left down, manual intervention required",
+			wantMessage:     "failed to recreate container and the original container is left down, manual intervention required",
+			wantServiceDown: true,
 		},
 	}
 
@@ -196,6 +198,8 @@ func TestUpdateStandaloneReportsAContainerLeftDown(t *testing.T) {
 			require.Equal(t, 1, n, "exactly one update-failed event")
 			require.Equal(t, tt.wantMessage, event.Message)
 			require.ErrorIs(t, event.Err, tt.err, "the event carries the failure itself")
+			require.Equal(t, tt.wantServiceDown, event.ServiceDown,
+				"ServiceDown is what tells a consumer the two failure outcomes apart, the wording is not machine-readable")
 		})
 	}
 }
