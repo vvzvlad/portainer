@@ -71,6 +71,10 @@ func (factory *ProxyFactory) newDockerHTTPProxy(endpoint *portainer.Endpoint) (h
 			innerTransport = ssrf.NewInternalTransport(tlsConfig)
 		} else {
 			innerTransport = ssrf.NewTransport(tlsConfig)
+			// An HTTP/2 hop to the agent turns an empty body into Transfer-Encoding:
+			// chunked, which Docker rejects on POST /containers/{id}/start; see
+			// TestHttpClientStartsContainerThroughHTTP2CapableAgent for the mechanics.
+			innerTransport.Protocols = ssrf.HTTP1Only()
 		}
 	} else if endpointutils.IsEdgeEndpoint(endpoint) {
 		innerTransport = ssrf.NewInternalTransport(nil)

@@ -105,6 +105,78 @@ func TestNewDockerHTTPProxy_NonEdgeTLS(t *testing.T) {
 	require.NotNil(t, dt.HTTPTransport.DialContext)
 }
 
+// The docker API proxy of a non-edge TLS environment(endpoint) talks to a
+// Portainer agent (or to a dockerd exposing its TLS port directly). The agent
+// relays the request to the Docker socket as-is: over an HTTP/2 hop an empty body
+// reaches the daemon as Transfer-Encoding: chunked and POST /containers/{id}/start
+// is rejected, so the transport must be pinned to HTTP/1.1. dockerd never speaks
+// HTTP/2, so the same pinning is harmless for the direct case.
+//
+// Neither edge branch may pick up Protocols. An edge environment(endpoint) with TLS
+// cannot be created through the API - endpoint_create.go and endpoint_update.go both
+// reject it with "TLS is not supported for Edge Agent environments" - so the real
+// shape is the TLS-less one: a cleartext chisel tunnel, where Go never negotiates h2c
+// without Protocols.SetUnencryptedHTTP2 and the upstream default is kept. The
+// defensive edge+TLS branch is nevertheless present in the code, and it routes to
+// ssrf.NewInternalTransport(tlsConfig), which must stay untouched as well - hence
+// both sub-cases below.
+func TestNewDockerHTTPProxy_TLSDisablesHTTP2(t *testing.T) {
+	enableSSRF(t)
+
+	f := &ProxyFactory{reverseTunnelService: &stubTunnelService{}}
+	endpoint := &portainer.Endpoint{
+		Type: portainer.AgentOnDockerEnvironment,
+		URL:  "tcp://192.168.1.100:9001",
+		TLSConfig: portainer.TLSConfiguration{
+			TLS:           true,
+			TLSSkipVerify: true,
+		},
+	}
+
+	handler, err := f.newDockerHTTPProxy(endpoint)
+	require.NoError(t, err)
+
+	proxy := handler.(*httputil.ReverseProxy)
+	dt := proxy.Transport.(*docker.Transport)
+	require.NotNil(t, dt.HTTPTransport.Protocols, "a nil Protocols means HTTP/1.1 + HTTP/2")
+	require.False(t, dt.HTTPTransport.Protocols.HTTP2())
+	require.True(t, dt.HTTPTransport.Protocols.HTTP1())
+
+	edgeCases := []struct {
+		name      string
+		tlsConfig portainer.TLSConfiguration
+	}{
+		{
+			name:      "edge without TLS",
+			tlsConfig: portainer.TLSConfiguration{},
+		},
+		{
+			name: "edge with TLS",
+			tlsConfig: portainer.TLSConfiguration{
+				TLS:           true,
+				TLSSkipVerify: true,
+			},
+		},
+	}
+
+	for _, tc := range edgeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			edgeEndpoint := &portainer.Endpoint{
+				Type:      portainer.EdgeAgentOnDockerEnvironment,
+				URL:       "tcp://192.168.1.100:9001",
+				TLSConfig: tc.tlsConfig,
+			}
+
+			edgeHandler, err := f.newDockerHTTPProxy(edgeEndpoint)
+			require.NoError(t, err)
+
+			edgeProxy := edgeHandler.(*httputil.ReverseProxy)
+			edgeTransport := edgeProxy.Transport.(*docker.Transport)
+			require.Nil(t, edgeTransport.HTTPTransport.Protocols, "the edge tunnel transport must keep the upstream default")
+		})
+	}
+}
+
 func TestNewDockerHTTPProxy_EdgeNoTLS(t *testing.T) {
 	enableSSRF(t)
 
