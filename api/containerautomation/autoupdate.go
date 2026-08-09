@@ -322,10 +322,11 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 				return
 			}
 
-			// Serving again, so ServiceDown stays false — but under the wrong name or
-			// without a network it is not the service it was, and the next pass would
-			// find and recreate the "-old" container instead of this one.
-			log.Error().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
+			// Serving again, so ServiceDown stays false and this is a warning, the level
+			// the notifier gives it too — but under the wrong name or without a network
+			// it is not the service it was, and the next pass would find and recreate the
+			// "-old" container instead of this one.
+			log.Warn().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
 				Msg("auto-update: failed to recreate container, the original is running again but its name or networks were not restored")
 			s.notifier.Notify(Event{
 				Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,

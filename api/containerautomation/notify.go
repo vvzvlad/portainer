@@ -71,8 +71,9 @@ type logNotifier struct{}
 
 // Notify logs the event with its kind and context fields. Failure events are
 // logged at warn (with the error), the rest at info. A failure that left the
-// container down is logged at error instead, matching the level the call site
-// uses: an outage must not read like a skipped update in the daemon log.
+// container down (ServiceDown) is logged at error instead: an outage must not
+// read like a skipped update in the daemon log. Every call site levels the same
+// event the same way, so one incident does not read at two levels in one log.
 func (logNotifier) Notify(event Event) {
 	entry := log.Info()
 	if event.Kind == EventUpdateFailed {

@@ -20,16 +20,20 @@ var (
 // differently, and it is the field to branch on — the wording of Error() is not
 // machine-readable:
 //
-//   - false: nothing is running. The original was torn down and could not be
-//     started again, which is an outage.
+//   - false: nothing is running, as far as anyone can tell. The original was torn
+//     down and could not be started again, which is an outage. StateUnknown is
+//     the sub-case where the original's state could not be read at all: false
+//     there is a conservative assumption rather than an observation.
 //   - true: the original is serving again, but not as it was — it may still carry
 //     the "-old" name (so a stack peer resolving it by name does not find it, and
 //     the next auto-update pass would recreate the wrong container) or be missing
 //     a network. Degraded, and it stays degraded until someone fixes it.
 //
-// Recreate builds one whenever the restore did not fully land, and NOT for a
-// recreate that merely left something untidy without touching the original (a
-// new container that could not be removed while everything else came back).
+// Recreate builds one whenever the original was not observed back exactly as it
+// was, and NOT for a recreate that merely left something untidy without touching
+// the original (a new container that could not be removed while everything else
+// came back), nor for a restore whose calls were refused while the container
+// nevertheless ended up as it started.
 type RestoreError struct {
 	// ContainerID is the original container that could not be restored.
 	ContainerID string
@@ -46,6 +50,12 @@ type RestoreError struct {
 	// again at the end of the restore. See the type comment: it is what tells an
 	// outage apart from a degraded-but-serving workload.
 	OriginalRunning bool
+	// StateUnknown reports that the original's state could not be read at the end
+	// of the restore, so the workload may be serving or may be down. It only ever
+	// accompanies OriginalRunning false, which is then an assumption: acting on it
+	// as an outage errs on the safe side, claiming it as one in the message would
+	// not.
+	StateUnknown bool
 }
 
 func (e *RestoreError) Error() string {
@@ -59,6 +69,11 @@ func (e *RestoreError) Error() string {
 	if e.OriginalRunning {
 		return fmt.Sprintf("recreate failed and the original container %s (%s) is running again, but the restore was incomplete, these did not roll back: %s (recreate failure: %s)",
 			name, e.ContainerID, strings.Join(reasons, "; "), e.Cause)
+	}
+
+	if e.StateUnknown {
+		return fmt.Sprintf("recreate failed and the state of the original container %s (%s) could not be read, so whether it is running again is unknown: %s (restore errors: %s)",
+			name, e.ContainerID, e.Cause, strings.Join(reasons, "; "))
 	}
 
 	return fmt.Sprintf("recreate failed and the original container %s (%s) was NOT restored, it is left down: %s (restore errors: %s)",

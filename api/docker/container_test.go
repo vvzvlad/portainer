@@ -88,6 +88,20 @@ type standOp struct {
 	container string // container id, for connect/disconnect
 	name      string // rename/create target name
 	force     bool   // removal force flag
+	timeout   string // stop grace period, as sent on the wire ("" when unset)
+}
+
+// containerID is the container a call targets, empty for one that targets none
+// (a create, which has no container yet).
+func (o standOp) containerID() string {
+	switch {
+	case o.container != "":
+		return o.container
+	case o.verb == "create":
+		return ""
+	default:
+		return o.id
+	}
 }
 
 // key is the coarse identity a test scripts a failure or a hook against.
@@ -112,6 +126,8 @@ func (o standOp) detail() string {
 		return o.key() + ":" + o.name
 	case o.verb == "remove" && o.force:
 		return o.key() + ":force"
+	case o.verb == "stop" && o.timeout != "":
+		return o.key() + ":t=" + o.timeout
 	default:
 		return o.key()
 	}
@@ -131,24 +147,28 @@ type standFailure struct {
 // and the real Docker SDK client (version negotiation included), so the test
 // exercises the actual request/response wiring rather than a hand-rolled seam.
 //
-// It keeps the state Recreate reasons about — the name a container carries and
-// the networks it is attached to — so a restore that is planned from what the
-// engine REPORTS is tested against a moving state rather than a fixed inspect.
+// It keeps the state Recreate reasons about — which containers exist, the name
+// each one carries and the networks it is attached to — so a restore that is
+// planned from what the engine REPORTS is tested against a moving state rather
+// than a fixed inspect. A name is a resource here as it is on a real engine:
+// exactly one container can hold it, and taking one that is in use is refused.
 type dockerStand struct {
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	calls    []string
-	failures map[string]standFailure         // call key or detail -> scripted daemon error
-	nth      map[string]map[int]standFailure // verb -> 1-based call number -> scripted error
-	seen     map[string]int                  // verb -> calls of it answered so far
-	hooks    map[string]func()               // call key or detail -> side effect run before answering
-	blocked  map[string]bool                 // call key or detail -> hang until the caller gives up
-	running  map[string]bool                 // container id -> state reported by inspect
-	inert    map[string]bool                 // ids whose start succeeds but leaves them stopped
-	names    map[string]string               // container id -> name reported by inspect
-	networks map[string]string               // network name -> id
-	attached map[string]map[string]bool      // container id -> network ids it is attached to
+	mu         sync.Mutex
+	calls      []string
+	failures   map[string]standFailure         // call key or detail -> scripted daemon error
+	nth        map[string]map[int]standFailure // verb -> 1-based call number -> scripted error
+	seen       map[string]int                  // verb -> calls of it answered so far
+	hooks      map[string]func()               // call key or detail -> side effect run before answering
+	blocked    map[string]bool                 // call key or detail -> hang until the caller gives up
+	blockedNth map[string]map[int]bool         // verb -> 1-based call number -> hang
+	running    map[string]bool                 // container id -> state reported by inspect
+	inert      map[string]bool                 // ids whose start succeeds but leaves them stopped
+	names      map[string]string               // container id -> name, and the set of live containers
+	networks   map[string]string               // network name -> id
+	attached   map[string]map[string]bool      // container id -> network ids it is attached to
+	autoRemove bool                            // the original runs with --rm
 }
 
 // newRecreateStand wires a ContainerService to a fresh stand. The data store is
@@ -158,16 +178,17 @@ func newRecreateStand(t *testing.T) (*ContainerService, *dockerStand, *portainer
 	t.Helper()
 
 	stand := &dockerStand{
-		failures: map[string]standFailure{},
-		nth:      map[string]map[int]standFailure{},
-		seen:     map[string]int{},
-		hooks:    map[string]func(){},
-		blocked:  map[string]bool{},
-		running:  map[string]bool{standOldID: true},
-		inert:    map[string]bool{},
-		names:    map[string]string{standOldID: standName},
-		networks: map[string]string{standNetwork: standNetworkID},
-		attached: map[string]map[string]bool{standOldID: {standNetworkID: true}},
+		failures:   map[string]standFailure{},
+		nth:        map[string]map[int]standFailure{},
+		seen:       map[string]int{},
+		hooks:      map[string]func(){},
+		blocked:    map[string]bool{},
+		blockedNth: map[string]map[int]bool{},
+		running:    map[string]bool{standOldID: true},
+		inert:      map[string]bool{},
+		names:      map[string]string{standOldID: standName},
+		networks:   map[string]string{standNetwork: standNetworkID},
+		attached:   map[string]map[string]bool{standOldID: {standNetworkID: true}},
 	}
 
 	stand.srv = httptest.NewServer(stand)
@@ -239,6 +260,29 @@ func (s *dockerStand) blockCall(key string) {
 	s.blocked[key] = true
 }
 
+// blockNthCall is blockCall for the n-th call of a verb, for the calls a test
+// cannot name — the restore's own inspect looks exactly like the one that opened
+// the recreate.
+func (s *dockerStand) blockNthCall(verb string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.blockedNth[verb] == nil {
+		s.blockedNth[verb] = map[int]bool{}
+	}
+
+	s.blockedNth[verb][n] = true
+}
+
+// withAutoRemove makes the original container report HostConfig.AutoRemove, i.e.
+// it runs with --rm and the engine reaps it the moment it stops.
+func (s *dockerStand) withAutoRemove() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.autoRemove = true
+}
+
 // withNetworks replaces the networks the original container is attached to. It
 // must be called before the recreate under test, while nothing is being served.
 func (s *dockerStand) withNetworks(networks map[string]string) {
@@ -303,6 +347,43 @@ func (s *dockerStand) setName(id, name string) {
 	s.names[id] = name
 }
 
+// forget drops a container the way a removal does: everything it held goes,
+// its name first of all, since the original cannot be renamed back while another
+// container still carries that name. It is also how a hook reproduces a container
+// the engine removed on its own (a --rm container it reaped, a removal whose
+// answer was lost).
+func (s *dockerStand) forget(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.names, id)
+	delete(s.running, id)
+	delete(s.attached, id)
+}
+
+// exists reports whether the stand still knows the container, i.e. whether it
+// holds a name. Everything else about it is gone once it is removed.
+func (s *dockerStand) exists(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, live := s.names[id]
+
+	return live
+}
+
+// nameHolder returns the container currently carrying name, if any. Called with
+// the lock held.
+func (s *dockerStand) nameHolder(name string) (string, bool) {
+	for id, held := range s.names {
+		if held == name {
+			return id, true
+		}
+	}
+
+	return "", false
+}
+
 func (s *dockerStand) inspectResponse(id string) container.InspectResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -320,7 +401,7 @@ func (s *dockerStand) inspectResponse(id string) container.InspectResponse {
 			Name:       s.names[id],
 			Image:      "sha256:" + strings.Repeat("a", 64),
 			State:      &container.State{Running: s.running[id]},
-			HostConfig: &container.HostConfig{},
+			HostConfig: &container.HostConfig{AutoRemove: id == standOldID && s.autoRemove},
 		},
 		Config:          &container.Config{Image: standImage},
 		NetworkSettings: &container.NetworkSettings{Networks: networks},
@@ -354,7 +435,9 @@ func decodeStandOp(r *http.Request, path string) (standOp, bool) {
 			return standOp{verb: "remove", id: id, force: r.URL.Query().Get("force") == "1"}, true
 		case action == "json":
 			return standOp{verb: "inspect", id: id}, true
-		case action == "stop", action == "start":
+		case action == "stop":
+			return standOp{verb: action, id: id, timeout: r.URL.Query().Get("t")}, true
+		case action == "start":
 			return standOp{verb: action, id: id}, true
 		case action == "rename":
 			return standOp{verb: "rename", id: id, name: r.URL.Query().Get("name")}, true
@@ -414,7 +497,7 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !hooked {
 		hook = s.hooks[op.key()]
 	}
-	blocked := s.blocked[op.detail()] || s.blocked[op.key()]
+	blocked := s.blocked[op.detail()] || s.blocked[op.key()] || s.blockedNth[op.verb][s.seen[op.verb]]
 	s.mu.Unlock()
 
 	if hook != nil {
@@ -433,6 +516,15 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A container the stand no longer knows is answered like a container the engine
+	// no longer knows: gone for good, and no call renames or starts it back into
+	// existence.
+	if id := op.containerID(); id != "" && !s.exists(id) {
+		writeStandError(w, "No such container: "+id, http.StatusNotFound)
+
+		return
+	}
+
 	switch op.verb {
 	case "inspect":
 		w.Header().Set("Content-Type", "application/json")
@@ -440,11 +532,25 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case "create":
 		s.mu.Lock()
-		s.names[standNewID] = op.name
+		holder, taken := s.nameHolder(op.name)
+		if !taken {
+			s.names[standNewID] = op.name
+		}
 		s.mu.Unlock()
+
+		if taken {
+			writeStandError(w, nameInUse(op.name, holder), http.StatusConflict)
+
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(container.CreateResponse{ID: standNewID})
+
+	case "remove":
+		s.forget(op.id)
+		w.WriteHeader(http.StatusNoContent)
 
 	case "start":
 		s.mu.Lock()
@@ -459,22 +565,25 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 
 	case "rename":
-		// The engine refuses a rename to the name a container already carries, and
-		// the restore has to read that as "already done" rather than as a failure.
+		// A name is a resource: the engine refuses a rename to the name the container
+		// already carries, and refuses one to a name ANOTHER container holds — which
+		// is what a new container that could not be removed does to the rename back.
 		s.mu.Lock()
 		unchanged := s.names[op.id] == op.name
-		if !unchanged {
+		holder, taken := s.nameHolder(op.name)
+		if !unchanged && !taken {
 			s.names[op.id] = op.name
 		}
 		s.mu.Unlock()
 
-		if unchanged {
+		switch {
+		case unchanged:
 			writeStandError(w, "Renaming a container with the same name as its current name", http.StatusBadRequest)
-
-			return
+		case taken:
+			writeStandError(w, nameInUse(op.name, holder), http.StatusConflict)
+		default:
+			w.WriteHeader(http.StatusNoContent)
 		}
-
-		w.WriteHeader(http.StatusNoContent)
 
 	case "connect":
 		// Same for a network the container is already attached to.
@@ -505,6 +614,12 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// nameInUse is the engine's wording for a name that another container holds.
+func nameInUse(name, holder string) string {
+	return `Conflict. The container name "` + name + `" is already in use by container "` + holder +
+		`". You have to remove (or rename) that container to be able to reuse that name.`
 }
 
 // writeStandError serves a daemon-style error body, the shape the Docker SDK
@@ -649,8 +764,9 @@ func TestRecreateReportsRestoreErrorWhenTheOriginalCannotBeStarted(t *testing.T)
 	require.ErrorContains(t, restoreErr.Cause, "start container error")
 	require.ErrorContains(t, restoreErr.Cause, standStartError)
 
-	require.Len(t, restoreErr.Errs, 1, "only the restore start failed")
+	require.Len(t, restoreErr.Errs, 2, "the refused start, and the state it left the container in")
 	require.ErrorContains(t, restoreErr.Errs[0], restoreStartError)
+	require.ErrorContains(t, restoreErr.Errs[1], "not running")
 	require.ErrorContains(t, err, "left down", "the message must say the workload is down, not merely that a recreate failed")
 
 	require.False(t, stand.isRunning(standOldID))
@@ -818,37 +934,66 @@ func TestRecreateReportsRestoreErrorWhenATeardownFailureLeavesTheOriginalDown(t 
 	var restoreErr *RestoreError
 	require.ErrorAs(t, err, &restoreErr)
 	require.ErrorContains(t, restoreErr.Cause, disconnectError, "the teardown failure stays the cause")
-	require.Len(t, restoreErr.Errs, 1, "only the start of the original failed")
+	require.Len(t, restoreErr.Errs, 2, "the refused start, and the state it left the container in")
 	require.ErrorContains(t, restoreErr.Errs[0], restoreStartError)
+	require.ErrorContains(t, restoreErr.Errs[1], "not running")
 
 	require.False(t, stand.isRunning(standOldID))
 }
 
-// TestRecreateKeepsTheVerdictWhenTheNewContainerCannotBeRemoved pins what the
+// TestRecreateJudgesALeftoverNewContainerByTheOriginalsState pins what the
 // verdict is built from: the state of the ORIGINAL, not the tidiness of the
-// rollback. The new container cannot be removed (an engine hiccup, a client
-// timeout on a removal that did land), but the original is back and running, so
-// the caller must get the plain recreate failure. Reporting a *RestoreError here
-// would tell an operator the workload is down while it is serving.
-func TestRecreateKeepsTheVerdictWhenTheNewContainerCannotBeRemoved(t *testing.T) {
+// rollback. A removal that fails is not itself a verdict — it matters exactly as
+// far as it keeps the original from coming back.
+func TestRecreateJudgesALeftoverNewContainerByTheOriginalsState(t *testing.T) {
 	t.Parallel()
 
 	const removeError = "removal refused by the daemon"
 
-	svc, stand, endpoint := newRecreateStand(t)
-	stand.failCall("start:"+standNewID, standStartError)
-	stand.failCall("remove:"+standNewID, removeError)
+	t.Run("a removal that did land under a lost answer is not a failed restore", func(t *testing.T) {
+		t.Parallel()
 
-	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
-	require.Error(t, err)
-	require.ErrorContains(t, err, standStartError)
+		svc, stand, endpoint := newRecreateStand(t)
+		stand.failCall("start:"+standNewID, standStartError)
+		// The engine removed it, the client only ever saw the failure — so the name is
+		// free and the original comes back whole.
+		stand.hookCall("remove:"+standNewID, func() { stand.forget(standNewID) })
+		stand.failCall("remove:"+standNewID, removeError)
 
-	var restoreErr *RestoreError
-	require.NotErrorAs(t, err, &restoreErr, "the original is running, so the workload is not down")
+		_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+		require.Error(t, err)
+		require.ErrorContains(t, err, standStartError)
 
-	calls := stand.recorded()
-	callIndex(t, calls, "remove:"+standNewID+":force")
-	require.True(t, stand.isRunning(standOldID), "the original container is running again")
+		var restoreErr *RestoreError
+		require.NotErrorAs(t, err, &restoreErr, "the original is back exactly as it was, whatever the removal answered")
+
+		calls := stand.recorded()
+		callIndex(t, calls, "remove:"+standNewID+":force")
+		require.True(t, stand.isRunning(standOldID), "the original container is running again")
+		require.Equal(t, standName, stand.nameOf(standOldID), "under its own name")
+	})
+
+	t.Run("a leftover holding the original name leaves it degraded", func(t *testing.T) {
+		t.Parallel()
+
+		svc, stand, endpoint := newRecreateStand(t)
+		stand.failCall("start:"+standNewID, standStartError)
+		stand.failCall("remove:"+standNewID, removeError)
+
+		_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+		require.Error(t, err)
+
+		// The new container survives holding "/web", so the engine refuses the rename
+		// back with a conflict and the original is left serving under "-old".
+		var restoreErr *RestoreError
+		require.ErrorAs(t, err, &restoreErr, "a container answering under the wrong name is not a plain recreate failure")
+		require.True(t, restoreErr.OriginalRunning, "it is serving, so this is a degradation and not an outage")
+		require.ErrorContains(t, err, removeError, "the leftover explains the refused rename")
+		require.ErrorContains(t, err, "already in use")
+
+		require.True(t, stand.isRunning(standOldID), "the original container is running again")
+		require.Equal(t, standName+"-old", stand.nameOf(standOldID))
+	})
 }
 
 // TestRecreateIgnoresAnAlreadyRemovedNewContainer covers the removal answering
@@ -863,6 +1008,9 @@ func TestRecreateIgnoresAnAlreadyRemovedNewContainer(t *testing.T) {
 
 	svc, stand, endpoint := newRecreateStand(t)
 	stand.failCall("start:"+standNewID, standStartError)
+	// Gone for real, so its name is free again — and answered with a 404 all the
+	// same, which is exactly what the engine does for a container it reaped itself.
+	stand.hookCall("remove:"+standNewID, func() { stand.forget(standNewID) })
 	stand.failCallStatus("remove:"+standNewID, "No such container: "+standNewID, http.StatusNotFound)
 	stand.failCall("start:"+standOldID, restoreStartError)
 
@@ -871,9 +1019,11 @@ func TestRecreateIgnoresAnAlreadyRemovedNewContainer(t *testing.T) {
 
 	var restoreErr *RestoreError
 	require.ErrorAs(t, err, &restoreErr)
-	require.Len(t, restoreErr.Errs, 1, "a container that is already gone is not a restore failure")
+	require.Len(t, restoreErr.Errs, 2, "a container that is already gone is not a restore failure")
 	require.ErrorContains(t, restoreErr.Errs[0], restoreStartError)
+	require.ErrorContains(t, restoreErr.Errs[1], "not running")
 	require.NotContains(t, err.Error(), "remove new container error")
+	require.Equal(t, standName, stand.nameOf(standOldID), "the freed name did go back to the original")
 }
 
 // TestRecreateReportsRestoreErrorWhenTheLeftoverNewContainerBlocksTheOriginal is
@@ -904,10 +1054,12 @@ func TestRecreateReportsRestoreErrorWhenTheLeftoverNewContainerBlocksTheOriginal
 	require.ErrorAs(t, err, &restoreErr)
 	require.ErrorContains(t, err, "left down")
 
-	require.Len(t, restoreErr.Errs, 3)
+	require.Len(t, restoreErr.Errs, 5, "three calls that failed, and the two things the container ended up without")
 	require.ErrorContains(t, err, removeError, "the leftover new container explains the refused rename")
 	require.ErrorContains(t, err, renameBackError)
 	require.ErrorContains(t, err, restoreStartError)
+	require.ErrorContains(t, err, "the original container is not running")
+	require.ErrorContains(t, err, "is named "+standName+"-old")
 
 	require.False(t, stand.isRunning(standOldID))
 }
@@ -950,6 +1102,21 @@ func TestRecreateReportsAnIncompleteRestoreWhileTheOriginalRuns(t *testing.T) {
 			wantReason: connectError,
 			wantName:   standName,
 		},
+		{
+			// A conflict is also how the engine says the container is ALREADY attached,
+			// so a verdict built from the answers to the restore calls would have to
+			// guess which conflict this is — and reading it as "already attached" turns
+			// a container left off its network into a clean rollback. The verdict is
+			// read off the container instead, which cannot be talked into it.
+			name: "the original is refused its network with a conflict",
+			script: func(stand *dockerStand) {
+				stand.failCallStatus("connect:"+standNetworkID+":"+standOldID,
+					"container "+standOldID+" is marked for removal and cannot be connected to network "+standNetworkID,
+					http.StatusConflict)
+			},
+			wantReason: "marked for removal",
+			wantName:   standName,
+		},
 	}
 
 	for _, tt := range tests {
@@ -978,37 +1145,95 @@ func TestRecreateReportsAnIncompleteRestoreWhileTheOriginalRuns(t *testing.T) {
 	}
 }
 
-// TestRecreateKeepsBudgetForTheOriginalWhenTheTeardownHangs guards the split of
-// the restore budget. Both halves of the restore share one deadline, but the
-// teardown of the new container runs FIRST: a stop or a forced removal wedged on
-// a stuck runc would spend the whole window and leave the restore of the
-// original — the half that decides whether the workload is down — without a
-// single call, turning a recoverable failure into an outage.
-func TestRecreateKeepsBudgetForTheOriginalWhenTheTeardownHangs(t *testing.T) {
+// TestRecreateKeepsBudgetForTheOriginalWhenAnEarlyStepHangs guards the split of
+// the restore budget. Everything in a restore shares one deadline, but the
+// teardown of the new container and the inspect that plans the rollback both run
+// BEFORE the calls that put the original back: either one wedged on a stuck runc
+// or an unresponsive engine would otherwise spend the whole window and leave the
+// rename back, the reconnects and the start — the calls that decide whether the
+// workload is down — without a single attempt, turning a recoverable failure into
+// an outage.
+func TestRecreateKeepsBudgetForTheOriginalWhenAnEarlyStepHangs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		script func(*dockerStand)
+		// The wedged teardown never removes the new container, which goes on holding
+		// the original name, so the original comes back up but under "-old": degraded,
+		// and still not the outage it would be without a budget of its own.
+		wantDegraded bool
+	}{
+		{
+			name:         "the teardown of the new container hangs",
+			script:       func(stand *dockerStand) { stand.blockCall("stop:" + standNewID) },
+			wantDegraded: true,
+		},
+		{
+			// The second inspect of the run is the restore's own: the recreate opens
+			// with one, and the verdict takes another at the end. Losing it costs
+			// nothing but precision — the plan falls back to every attempted step.
+			name:   "the inspect that plans the rollback hangs",
+			script: func(stand *dockerStand) { stand.blockNthCall("inspect", 2) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, stand, endpoint := newRecreateStand(t)
+			// Same shares as in production, in milliseconds instead of seconds.
+			svc.restoreTimeout = 900 * time.Millisecond
+
+			stand.failCall("start:"+standNewID, standStartError)
+			tt.script(stand)
+
+			_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+			require.Error(t, err)
+			require.ErrorContains(t, err, standStartError)
+
+			// The invariant is that the original got its calls and came back up — not
+			// that the whole rollback was tidy, which the wedged teardown decides.
+			calls := stand.recorded()
+			callIndex(t, calls, "rename:"+standOldID+"->"+standName)
+			callIndex(t, calls, "connect:"+standNetworkID+":"+standOldID)
+			callIndex(t, calls, "start:"+standOldID)
+
+			require.True(t, stand.isRunning(standOldID), "the original container is running again")
+
+			var restoreErr *RestoreError
+			if !tt.wantDegraded {
+				require.NotErrorAs(t, err, &restoreErr, "the original came back exactly as it was")
+				require.Equal(t, standName, stand.nameOf(standOldID), "under its own name")
+
+				return
+			}
+
+			require.ErrorAs(t, err, &restoreErr)
+			require.True(t, restoreErr.OriginalRunning,
+				"an early step spending its own share is a degradation at worst, never an outage")
+		})
+	}
+}
+
+// TestRecreateStopsTheNewContainerWithoutGrace pins the teardown's stop having no
+// grace period. The engine's default is 10s, the same order as the whole teardown
+// share, so a container that ignores SIGTERM — most of them — would spend the
+// share waiting here and leave the forced removal to run on an expired context,
+// keeping the original name and turning a clean rollback into a degraded one. The
+// stop is best-effort anyway: the forced removal right after it kills whatever is
+// left.
+func TestRecreateStopsTheNewContainerWithoutGrace(t *testing.T) {
 	t.Parallel()
 
 	svc, stand, endpoint := newRecreateStand(t)
-	// Same split as in production, in milliseconds instead of seconds.
-	svc.restoreTimeout = 900 * time.Millisecond
-
 	stand.failCall("start:"+standNewID, standStartError)
-	stand.blockCall("stop:" + standNewID)
 
 	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
 	require.Error(t, err)
-	require.ErrorContains(t, err, standStartError)
 
-	var restoreErr *RestoreError
-	require.NotErrorAs(t, err, &restoreErr,
-		"the teardown must not be able to spend the budget the original needs, a wedged removal is not an outage")
-
-	calls := stand.recorded()
-	callIndex(t, calls, "rename:"+standOldID+"->"+standName)
-	callIndex(t, calls, "connect:"+standNetworkID+":"+standOldID)
-	callIndex(t, calls, "start:"+standOldID)
-
-	require.True(t, stand.isRunning(standOldID), "the original container is running again")
-	require.Equal(t, standName, stand.nameOf(standOldID), "under its own name")
+	callIndex(t, stand.recorded(), "stop:"+standNewID+":t=0")
 }
 
 // TestRecreateUndoesAStepWhoseAnswerWasLost covers the most common way a rollback
@@ -1134,10 +1359,12 @@ func TestRecreateRestoresAfterAFailedStop(t *testing.T) {
 }
 
 // TestRecreateDoesNotReportAVanishedOriginalAsAnOutage is the guard on the
-// restore now covering the stop: a container that is already gone was not taken
-// down by this recreate (the engine reaped it because it ran with --rm, or an
-// operator removed it), and there is nothing to put back. Reporting it as a
-// workload left down would page someone over a container nobody is missing.
+// restore now covering the stop: a container that is already gone and does NOT
+// run with --rm was not taken down by this recreate — nothing removes a container
+// on a stop, so an operator or another tool removed it — and there is nothing to
+// put back. Reporting it as a workload left down would page someone over a
+// container nobody is missing. The --rm case is the opposite and is covered by
+// TestRecreateReportsAnAutoRemovedOriginalAsAnOutage.
 func TestRecreateDoesNotReportAVanishedOriginalAsAnOutage(t *testing.T) {
 	t.Parallel()
 
@@ -1157,6 +1384,9 @@ func TestRecreateDoesNotReportAVanishedOriginalAsAnOutage(t *testing.T) {
 		{
 			name: "gone between the look and the start",
 			script: func(stand *dockerStand) {
+				// Really gone: the start is refused because the container is not there
+				// any more, and the inspect that takes the verdict will not find it either.
+				stand.hookCall("start:"+standOldID, func() { stand.forget(standOldID) })
 				stand.failCallStatus("start:"+standOldID, gone, http.StatusNotFound)
 			},
 			wantStart: true,
@@ -1189,6 +1419,65 @@ func TestRecreateDoesNotReportAVanishedOriginalAsAnOutage(t *testing.T) {
 			requireNoCall(t, calls, "start:"+standOldID)
 		})
 	}
+}
+
+// TestRecreateReportsAnAutoRemovedOriginalAsAnOutage is the other side of the
+// test above: a container running with --rm that is gone after OUR stop is gone
+// BECAUSE of our stop. The engine reaps such a container the moment it stops, the
+// restore is armed before the stop, and no new container has taken over — so
+// nothing is running, nothing ever will be, and calling that a third party's
+// doing would hand the operator an ordinary recreate failure over an outage.
+func TestRecreateReportsAnAutoRemovedOriginalAsAnOutage(t *testing.T) {
+	t.Parallel()
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.withAutoRemove()
+	// Stopping a --rm container is the engine's cue to remove it, so the stop this
+	// recreate issues is what makes the original vanish.
+	stand.hookCall("stop:"+standOldID, func() { stand.forget(standOldID) })
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+
+	var restoreErr *RestoreError
+	require.ErrorAs(t, err, &restoreErr, "our own stop taking the workload down is an outage this recreate caused")
+	require.False(t, restoreErr.OriginalRunning)
+	require.False(t, restoreErr.StateUnknown, "the state is known: the container is gone")
+	require.ErrorContains(t, err, "left down")
+	require.ErrorContains(t, err, "--rm", "the message has to say why there is nothing left to restore")
+
+	requireNoCall(t, stand.recorded(), "start:"+standOldID)
+}
+
+// TestRecreateReportsAnUnreadableOriginalStateAsUnknown covers the verdict having
+// no observation to build on: the inspect that decides it is refused. Nothing can
+// be claimed then — the container may be serving or may be down — so the caller
+// is told exactly that, and told it conservatively (OriginalRunning false, which
+// callers act on as an outage). What it must NOT get is the flat "it is left
+// down" of a real outage, which here would be a page over a running container.
+func TestRecreateReportsAnUnreadableOriginalStateAsUnknown(t *testing.T) {
+	t.Parallel()
+
+	const inspectError = "inspect refused by the daemon"
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.failCall("start:"+standNewID, standStartError)
+	// The third inspect of the run is the verdict's: the recreate opens with one
+	// and the restore plans the rollback with another.
+	stand.failNthCall("inspect", 3, inspectError)
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+
+	var restoreErr *RestoreError
+	require.ErrorAs(t, err, &restoreErr)
+	require.True(t, restoreErr.StateUnknown)
+	require.False(t, restoreErr.OriginalRunning, "an unread state is not a running container")
+	require.ErrorContains(t, err, "could not be read")
+	require.ErrorContains(t, err, inspectError)
+	require.NotContains(t, err.Error(), "left down", "the container is in fact running, the message must not claim otherwise")
+
+	require.True(t, stand.isRunning(standOldID), "the restore did put it back, only the reading of it failed")
 }
 
 // TestPlanRestore pins the rule the rollback is planned by: what the engine

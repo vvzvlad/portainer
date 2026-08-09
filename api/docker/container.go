@@ -28,32 +28,37 @@ import (
 // goroutine for minutes.
 const defaultRestoreTimeout = 30 * time.Second
 
-// restoreTeardownShare is the fraction of the restore budget the teardown of the
-// NEW container may spend. Both halves of the restore draw on ONE budget so a
-// dead engine cannot pin the caller for twice as long, but the teardown must not
-// be able to drink it dry: it runs FIRST (LIFO), and a stop or a forced removal
-// that hangs — a wedged runc, a process in D state, a storage-driver hiccup —
-// would otherwise leave the restore of the original, the part that decides
-// whether the workload is down, without a single call, turning a recoverable
-// failure into an outage. A third is ample for a stop plus a forced removal
-// against an engine that answers at all, and leaves two thirds for the rename
-// back, the reconnects, the start and the verifying inspect.
-const restoreTeardownShare = 3
+// Fractions of the restore budget reserved for the two steps that run BEFORE the
+// calls that put the original back. Everything in a restore draws on ONE budget
+// so a dead engine cannot pin the caller for one deadline per step, which means
+// an early step that hangs would otherwise leave the rename back, the reconnects
+// and the start — the calls that decide whether the workload is down — running on
+// an expired context.
+//
+//   - restoreTeardownShare bounds the teardown of the NEW container, which runs
+//     first (LIFO). A third is ample for a stop plus a forced removal against an
+//     engine that answers at all.
+//   - restorePlanShare bounds the single inspect that plans the rollback.
+const (
+	restoreTeardownShare = 3
+	restorePlanShare     = 6
+)
 
 type ContainerService struct {
 	factory   *dockerclient.ClientFactory
 	dataStore dataservices.DataStore
-	// restoreTimeout is the whole time budget of one restore, defaultRestoreTimeout
-	// when unset. It is a field rather than a constant read at the call site so a
-	// test can drive the budget-exhaustion paths in milliseconds without mutating a
-	// package-level knob shared by every other (parallel) test.
+	// restoreTimeout is the whole time budget of one restore. It is a field rather
+	// than a constant read at the call site so a test can drive the
+	// budget-exhaustion paths in milliseconds without mutating a package-level knob
+	// shared by every other (parallel) test.
 	restoreTimeout time.Duration
 }
 
 func NewContainerService(factory *dockerclient.ClientFactory, dataStore dataservices.DataStore) *ContainerService {
 	return &ContainerService{
-		factory:   factory,
-		dataStore: dataStore,
+		factory:        factory,
+		dataStore:      dataStore,
+		restoreTimeout: defaultRestoreTimeout,
 	}
 }
 
@@ -95,29 +100,19 @@ func clearMacAddrs(n network.NetworkingConfig) network.NetworkingConfig {
 	return netConfig
 }
 
-// restoreBudget is the total time one restore may spend, falling back to
-// defaultRestoreTimeout for a service built without an explicit budget.
-func (c *ContainerService) restoreBudget() time.Duration {
-	if c.restoreTimeout > 0 {
-		return c.restoreTimeout
-	}
-
-	return defaultRestoreTimeout
-}
-
 // restoreContext derives the context the restore runs on. It is deliberately
 // detached from the caller's context: the most common recreate failure is the
 // caller's own deadline or cancellation (auto-update bounds a recreate with
 // recreateTimeout), and reusing that dead context would make every restore call
 // fail instantly, leaving the original container renamed, disconnected and
 // stopped. The derived context keeps the caller's values but gets its own
-// restoreBudget deadline.
+// restoreTimeout deadline.
 //
 // context.WithoutCancel only detaches the restore from the caller; it promises
 // nothing about process shutdown. If the daemon exits mid-restore the sequence
 // is cut at whatever step it had reached, exactly as before.
 func (c *ContainerService) restoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), c.restoreBudget())
+	return context.WithTimeout(context.WithoutCancel(ctx), c.restoreTimeout)
 }
 
 // restorePlan is what putting the original back still requires: whether it has
@@ -127,6 +122,32 @@ type restorePlan struct {
 	networks []*network.EndpointSettings
 }
 
+// missingNetworks returns the networks among attempted that observed is NOT
+// attached to. The restore asks it twice, of two different observations: of the
+// state it starts from, which is what it still has to reconnect, and of the state
+// it leaves behind, which is what it failed to. A state that could not be read
+// counts as attached to nothing, never as a container that is fine.
+func missingNetworks(observed *dockercontainer.InspectResponse, attempted []*network.EndpointSettings) []*network.EndpointSettings {
+	if observed == nil || observed.NetworkSettings == nil {
+		return attempted
+	}
+
+	attached := make(map[string]bool, len(observed.NetworkSettings.Networks))
+	for _, endpointSettings := range observed.NetworkSettings.Networks {
+		attached[endpointSettings.NetworkID] = true
+	}
+
+	var missing []*network.EndpointSettings
+
+	for _, endpointSettings := range attempted {
+		if !attached[endpointSettings.NetworkID] {
+			missing = append(missing, endpointSettings)
+		}
+	}
+
+	return missing
+}
+
 // planRestore works out what the restore still has to undo. It is driven by the
 // original's OBSERVED state, not by which of the teardown calls returned nil: a
 // call whose answer was lost (the caller's deadline firing on a request the
@@ -134,49 +155,19 @@ type restorePlan struct {
 // never landed must not be undone twice.
 //
 // observed is nil when the state could not be read at all. The plan then falls
-// back to every step that was ATTEMPTED, which errs towards doing too much — the
-// restore treats an "already in that state" refusal as success, so an unnecessary
-// step is not reported as a failed restore.
+// back to every step that was ATTEMPTED, which errs towards doing too much — and
+// harmlessly so: a superfluous step is refused by the engine ("already in that
+// state") and cannot spoil the verdict, which is read off the container at the
+// end of the restore rather than off which calls came back clean.
 func planRestore(observed *dockercontainer.InspectResponse, name string, renameAttempted bool, disconnectAttempted []*network.EndpointSettings) restorePlan {
 	if observed == nil || observed.ContainerJSONBase == nil {
 		return restorePlan{rename: renameAttempted, networks: disconnectAttempted}
 	}
 
-	attached := make(map[string]bool)
-	if observed.NetworkSettings != nil {
-		for _, endpointSettings := range observed.NetworkSettings.Networks {
-			attached[endpointSettings.NetworkID] = true
-		}
+	return restorePlan{
+		rename:   observed.Name != name,
+		networks: missingNetworks(observed, disconnectAttempted),
 	}
-
-	plan := restorePlan{rename: observed.Name != name}
-	for _, endpointSettings := range disconnectAttempted {
-		if !attached[endpointSettings.NetworkID] {
-			plan.networks = append(plan.networks, endpointSettings)
-		}
-	}
-
-	return plan
-}
-
-// alreadyNamed reports whether a refused rename back is in fact the outcome the
-// restore wanted: the container already carries the name. The engine answers a
-// rename to the name a container already holds with an invalid-parameter error
-// ("Renaming a container with the same name as its current name"), while a name
-// held by ANOTHER container comes back as a conflict — only the former means the
-// step is done, so the message is checked on top of the error class.
-func alreadyNamed(err error) bool {
-	return cerrdefs.IsInvalidArgument(err) &&
-		strings.Contains(strings.ToLower(err.Error()), "same name as its current name")
-}
-
-// alreadyConnected reports whether a refused network connect is in fact the
-// outcome the restore wanted: the container is already attached. Engines differ
-// on the status they use for it (a conflict, or the forbidden "endpoint with
-// name X already exists in network Y"), so both are recognised.
-func alreadyConnected(err error) bool {
-	return cerrdefs.IsConflict(err) ||
-		strings.Contains(strings.ToLower(err.Error()), "already exists in network")
 }
 
 // Recreate a container.
@@ -189,13 +180,13 @@ func alreadyConnected(err error) bool {
 // merely FAILS is not such a point, since the engine may have carried it out
 // anyway.
 //
-// The rollback is not taken on trust: the original is inspected afterwards and
-// must report State.Running, and what the rollback had to undo is planned from
-// the original's observed state rather than from which calls returned nil. A
-// restore that did not fully land is reported to the caller as a *RestoreError —
-// never silently logged away — which says whether the original is running again
-// (a degraded but serving workload: a name or a network that did not come back)
-// or is left down (an outage).
+// The rollback is not taken on trust, and it is not judged by which of its calls
+// came back clean either: the original is inspected at the end, and the verdict is
+// what that inspect says — running, carrying its own name, attached to the
+// networks it was detached from. A restore that did not fully land is reported to
+// the caller as a *RestoreError — never silently logged away — which says whether
+// the original is running again (a degraded but serving workload: a name or a
+// network that did not come back) or is left down (an outage).
 func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.Endpoint, containerId string, forcePullImage bool, imageTag, nodeName string) (newContainer *types.ContainerJSON, err error) {
 	cli, err := c.factory.CreateClient(endpoint, nodeName, nil)
 	if err != nil {
@@ -253,8 +244,7 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 	// otherwise be recorded as never having happened, leaving the original named
 	// "-old" or off its networks for good. Doing too much is safe because the
 	// restore is idempotent — it is planned from the original's observed state, and
-	// where that cannot be read an "already in that state" refusal counts as
-	// success.
+	// a step taken needlessly is refused by the engine without changing anything.
 	var (
 		renameAttempted     bool
 		disconnectAttempted []*network.EndpointSettings
@@ -307,91 +297,153 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 
 		log.Debug().Str("container_id", containerId).Str("container", container.Name).Msg("restoring the container")
 
-		// Read the original's state first and plan the rollback from it. Where it
-		// cannot be read the plan falls back to every step that was attempted.
-		var observed *dockercontainer.InspectResponse
+		// Read the original's state first and plan the rollback from it, on a small
+		// share of the budget of its own: this inspect runs before every call that
+		// puts the container back, so one that hangs must not leave them to run on an
+		// expired context. Where the state cannot be read the plan falls back to every
+		// step that was attempted.
+		var (
+			observed *dockercontainer.InspectResponse
+			gone     bool
+		)
 
-		switch current, _, err := cli.ContainerInspectWithRaw(restoreCtx, containerId, false); {
+		planCtx, stopPlan := context.WithTimeout(restoreCtx, c.restoreTimeout/restorePlanShare)
+
+		switch current, _, err := cli.ContainerInspectWithRaw(planCtx, containerId, false); {
 		case err == nil:
 			observed = &current
 		case cerrdefs.IsNotFound(err):
-			// The original is gone: the engine reaped it (it ran with --rm), or someone
-			// removed it. There is nothing left to put back, and a container we did not
-			// take down must not be reported as an outage this recreate caused.
-			log.Warn().Str("container_id", containerId).Str("container", strings.TrimPrefix(container.Name, "/")).
-				Msg("the original container no longer exists, there is nothing to restore")
-
-			return
+			gone = true
 		default:
 			log.Warn().Err(err).Str("container_id", containerId).
 				Msg("unable to read the original container state, restoring every step that was attempted")
 		}
 
-		plan := planRestore(observed, container.Name, renameAttempted, disconnectAttempted)
+		stopPlan()
 
-		if plan.rename {
-			if err := cli.ContainerRename(restoreCtx, containerId, container.Name); err != nil && !alreadyNamed(err) {
-				restoreErrs = append(restoreErrs, errors.Wrap(err, "rename container back error"))
+		if !gone {
+			plan := planRestore(observed, container.Name, renameAttempted, disconnectAttempted)
+
+			if plan.rename {
+				if err := cli.ContainerRename(restoreCtx, containerId, container.Name); err != nil {
+					restoreErrs = append(restoreErrs, errors.Wrap(err, "rename container back error"))
+				}
+			}
+
+			for _, endpointSettings := range plan.networks {
+				if err := cli.NetworkConnect(restoreCtx, endpointSettings.NetworkID, containerId, endpointSettings); err != nil {
+					restoreErrs = append(restoreErrs, errors.Wrapf(err, "connect container to network %s error", endpointSettings.NetworkID))
+				}
+			}
+
+			if err := cli.ContainerStart(restoreCtx, containerId, dockercontainer.StartOptions{}); err != nil {
+				restoreErrs = append(restoreErrs, errors.Wrap(err, "start container error"))
 			}
 		}
 
-		for _, endpointSettings := range plan.networks {
-			if err := cli.NetworkConnect(restoreCtx, endpointSettings.NetworkID, containerId, endpointSettings); err != nil && !alreadyConnected(err) {
-				restoreErrs = append(restoreErrs, errors.Wrapf(err, "connect container to network %s error", endpointSettings.NetworkID))
+		// The verdict is what the engine reports about the original at the end, and
+		// nothing else. Which restore calls failed says little about it: a refused
+		// call may have been refused precisely because the step was already in place
+		// ("already in that state", a name the container already carries), and a call
+		// that returned nil is no proof either — a container can exit the moment it is
+		// started. restoreErrs is diagnostics for the report, never an input here.
+		var (
+			restored     *dockercontainer.InspectResponse
+			stateUnknown bool
+		)
+
+		if !gone {
+			switch final, _, err := cli.ContainerInspectWithRaw(restoreCtx, containerId, false); {
+			case cerrdefs.IsNotFound(err):
+				gone = true
+			case err != nil:
+				restoreErrs = append(restoreErrs, errors.Wrap(err, "inspect the original container error"))
+				stateUnknown = true
+			case final.ContainerJSONBase == nil || final.State == nil:
+				restoreErrs = append(restoreErrs, errors.New("the engine reported no state for the original container"))
+				stateUnknown = true
+			default:
+				restored = &final
 			}
 		}
 
-		// Whether the workload is serving again is the ORIGINAL's observed state and
-		// nothing else. A successful start call is not proof of service (the container
-		// may have exited at once), and a state that could not be read is not proof
-		// either.
+		// A new container that could not be removed belongs in every report below:
+		// holding the original name, it is a common reason a rename back could not
+		// land, and it is a leftover somebody has to clean up in any case.
+		if newContainerErr != nil {
+			restoreErrs = append([]error{newContainerErr}, restoreErrs...)
+		}
+
+		// A --rm container disappearing is not a third party's doing: the engine reaps
+		// it the moment it stops, and the restore is armed BEFORE the stop.
+		autoRemoved := gone && container.HostConfig != nil && container.HostConfig.AutoRemove
 		originalRunning := false
 
-		switch err := cli.ContainerStart(restoreCtx, containerId, dockercontainer.StartOptions{}); {
-		case err == nil:
-			restored, _, err := cli.ContainerInspectWithRaw(restoreCtx, containerId, false)
-			switch {
-			case err != nil:
-				restoreErrs = append(restoreErrs, errors.Wrap(err, "inspect restored container error"))
-			case restored.ContainerJSONBase == nil || restored.State == nil || !restored.State.Running:
-				restoreErrs = append(restoreErrs, errors.New("restored container is not running"))
-			default:
-				originalRunning = true
-			}
-		case cerrdefs.IsNotFound(err):
-			// It vanished between the inspect above and this start. Same verdict as
-			// above: nothing to restore, and no outage to pin on this recreate.
+		switch {
+		case gone && !autoRemoved:
+			// A container this recreate did not take down: nothing removes a container on
+			// a stop unless it runs with --rm, so somebody else removed this one. There is
+			// nothing to put back, and no outage to pin on this recreate.
 			log.Warn().Errs("restore_errors", restoreErrs).
 				Str("container_id", containerId).Str("container", strings.TrimPrefix(container.Name, "/")).
 				Msg("the original container no longer exists, there is nothing to restore")
 
 			return
+		case autoRemoved:
+			restoreErrs = append(restoreErrs, errors.New("the original container ran with --rm, so the engine removed it when this recreate stopped it and there is nothing left to restore"))
+		case stateUnknown:
+			// Conservative: a state that could not be read is not a running container.
+			// restoreErrs already says why it could not be read.
 		default:
-			restoreErrs = append(restoreErrs, errors.Wrap(err, "start container error"))
-		}
+			originalRunning = restored.State.Running
+			nameBack := restored.Name == container.Name
+			missing := missingNetworks(restored, disconnectAttempted)
 
-		if originalRunning && len(restoreErrs) == 0 {
-			// The workload is serving again exactly as before, so this is an ordinary
-			// failed recreate and the caller keeps the original error. A new container
-			// that could not be removed is loud, but it is a leftover to clean up rather
-			// than an outage, and must not be dressed up as one.
-			if newContainerErr != nil {
-				log.Warn().Err(newContainerErr).Str("container_id", containerId).
-					Msg("the new container could not be removed after a failed recreate, the original is running again but the leftover needs cleaning up")
+			if originalRunning && nameBack && len(missing) == 0 {
+				// The workload is serving again exactly as before, so this is an ordinary
+				// failed recreate and the caller keeps the original error. A new container
+				// that could not be removed is loud, but it is a leftover to clean up rather
+				// than an outage, and must not be dressed up as one.
+				if newContainerErr != nil {
+					log.Warn().Err(newContainerErr).Str("container_id", containerId).
+						Msg("the new container could not be removed after a failed recreate, the original is running again but the leftover needs cleaning up")
+				}
+
+				// Refused calls that turned out not to matter: the step was already in
+				// place, or a later one made up for it. Debug material, not an operator's.
+				if len(restoreErrs) > 0 {
+					log.Debug().Errs("restore_errors", restoreErrs).Str("container_id", containerId).
+						Msg("some restore calls failed, but the original came back exactly as it was")
+				}
+
+				return
 			}
 
-			return
+			// What the container itself says did not come back. The call errors are no
+			// substitute: a step can be refused and still be in place, and a step can be
+			// reported as done and not be.
+			if !originalRunning {
+				restoreErrs = append(restoreErrs, errors.New("the original container is not running"))
+			}
+
+			if !nameBack {
+				restoreErrs = append(restoreErrs, errors.Errorf("the original container is named %s, not %s", restored.Name, container.Name))
+			}
+
+			for _, endpointSettings := range missing {
+				restoreErrs = append(restoreErrs, errors.Errorf("the original container is not attached to network %s", endpointSettings.NetworkID))
+			}
 		}
 
-		// Something did not come back. A new container that could not be removed
-		// belongs in the report: holding the original name, it is a common reason the
-		// rename back could not land.
-		errs := restoreErrs
-		if newContainerErr != nil {
-			errs = append([]error{newContainerErr}, restoreErrs...)
+		// Something did not come back, or could not be read. Degraded is a warning,
+		// nothing running (or nothing known) is an error — the same split the
+		// container-automation notifier uses, so one incident reads at one level.
+		level := log.Warn
+		if !originalRunning {
+			level = log.Error
 		}
 
-		event := log.Error().Errs("restore_errors", errs).
+		event := level().Errs("restore_errors", restoreErrs).
 			Str("container_id", containerId).
 			Str("container", strings.TrimPrefix(container.Name, "/")).
 			Int("endpoint_id", int(endpoint.ID)).
@@ -409,16 +461,27 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 		}
 
 		event = event.Err(err)
-		if originalRunning {
+
+		switch {
+		case stateUnknown:
+			event.Msg("recreate failed and the state of the original container could not be read, whether it is running again is unknown")
+		case originalRunning:
 			// Serving, but not as it was: it may answer under the wrong name (a stack
 			// peer resolving "web" would not find it) or be missing a network. Loud, and
 			// still not an outage.
 			event.Msg("recreate failed and the original container is running again, but the restore was incomplete")
-		} else {
+		default:
 			event.Msg("recreate failed and the original container could not be restored, it is left down")
 		}
 
-		err = &RestoreError{ContainerID: containerId, Name: container.Name, Cause: err, Errs: errs, OriginalRunning: originalRunning}
+		err = &RestoreError{
+			ContainerID:     containerId,
+			Name:            container.Name,
+			Cause:           err,
+			Errs:            restoreErrs,
+			OriginalRunning: originalRunning,
+			StateUnknown:    stateUnknown,
+		}
 	}()
 
 	// 2. stop the current container
@@ -488,14 +551,19 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 		// Only a share of the shared budget: this defer runs FIRST (LIFO), so a stop
 		// or a removal that hangs must not be able to spend the whole restore window
 		// and leave the original with nothing. See restoreTeardownShare.
-		restoreCtx, stopTeardown := context.WithTimeout(useRestoreCtx(), c.restoreBudget()/restoreTeardownShare)
+		restoreCtx, stopTeardown := context.WithTimeout(useRestoreCtx(), c.restoreTimeout/restoreTeardownShare)
 		defer stopTeardown()
 
 		log.Debug().Str("container_id", create.ID).Msg("removing the new container")
 
 		// A stop failure is not fatal on its own, the forced removal below kills the
-		// container anyway.
-		if err := cli.ContainerStop(restoreCtx, create.ID, dockercontainer.StopOptions{}); err != nil && !cerrdefs.IsNotFound(err) {
+		// container anyway — which is also why it is given no grace period at all.
+		// The engine's default grace is 10s, the same order as this whole teardown
+		// share, so a container ignoring SIGTERM (common enough) would spend the share
+		// waiting here and leave the forced removal to run on an expired context, the
+		// new container holding the original name and the rename back refused.
+		noGrace := 0
+		if err := cli.ContainerStop(restoreCtx, create.ID, dockercontainer.StopOptions{Timeout: &noGrace}); err != nil && !cerrdefs.IsNotFound(err) {
 			log.Warn().Err(err).Str("container_id", create.ID).Msg("failure to stop container")
 		}
 

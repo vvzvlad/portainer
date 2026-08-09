@@ -384,7 +384,9 @@ func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newCo
 				return
 			}
 
-			log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
+			// Serving again, so ServiceDown stays false and this is a warning, the level
+			// the notifier gives it too.
+			log.Warn().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
 				Msg("auto-update: rollback recreate failed, the container is running again but its name or networks were not restored")
 			s.notifier.Notify(Event{
 				Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
