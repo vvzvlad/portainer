@@ -368,6 +368,17 @@ func TestRollbackReportsAContainerLeftDown(t *testing.T) {
 			wantMessage:     "rollback failed and the container is left down, manual intervention required",
 			wantServiceDown: true,
 		},
+		{
+			name: "a partial restore leaves the container running off one of its networks",
+			err: &docker.RestoreError{
+				ContainerID:     "new-id",
+				Name:            "/web",
+				Cause:           recreateErr,
+				Errs:            []error{errors.New("connect container to network net-a error: boom")},
+				OriginalRunning: true,
+			},
+			wantMessage: "rollback failed and the container was only partially restored (name or networks), manual intervention required",
+		},
 	}
 
 	for _, tt := range tests {

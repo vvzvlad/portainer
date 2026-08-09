@@ -302,18 +302,34 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 	if err != nil {
 		// Recreate preserves config and keeps the original container until the new one
 		// has started, rolling back to the original from the moment it stops it, so an
-		// ordinary recreate failure ends with the original running again. Recreate
-		// verifies that by inspecting it; when it could NOT be put back it reports a
-		// *docker.RestoreError: nothing is running, which is an operator-visible outage
-		// rather than a skipped update.
+		// ordinary recreate failure ends with the original running exactly as before.
+		// Recreate verifies that by inspecting it; when the rollback did not fully land
+		// it reports a *docker.RestoreError, which is an operator-visible problem rather
+		// than a skipped update. Its OriginalRunning tells the two apart: nothing
+		// running is an outage, a running container that did not get its name or its
+		// networks back is a degradation that will not fix itself.
 		var restoreErr *docker.RestoreError
 		if errors.As(err, &restoreErr) {
+			if !restoreErr.OriginalRunning {
+				log.Error().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
+					Msg("auto-update: failed to recreate container and the original could not be restored, it is left down")
+				s.notifier.Notify(Event{
+					Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
+					StackName: stackName, Message: "failed to recreate container and the original container is left down, manual intervention required", Err: err,
+					ServiceDown: true,
+				})
+
+				return
+			}
+
+			// Serving again, so ServiceDown stays false — but under the wrong name or
+			// without a network it is not the service it was, and the next pass would
+			// find and recreate the "-old" container instead of this one.
 			log.Error().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
-				Msg("auto-update: failed to recreate container and the original could not be restored, it is left down")
+				Msg("auto-update: failed to recreate container, the original is running again but its name or networks were not restored")
 			s.notifier.Notify(Event{
 				Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
-				StackName: stackName, Message: "failed to recreate container and the original container is left down, manual intervention required", Err: err,
-				ServiceDown: true,
+				StackName: stackName, Message: "failed to recreate container and the original container was only partially restored (name or networks), manual intervention required", Err: err,
 			})
 
 			return

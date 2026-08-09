@@ -365,18 +365,30 @@ func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newCo
 	}
 
 	if _, err := s.containerService.Recreate(ctx, endpoint, newContainerID, false, "", ""); err != nil {
-		// A *docker.RestoreError means the rollback recreate could not put back even
-		// the container it had torn down: unlike a plain recreate failure, nothing is
-		// left running, so the operator must not be told the unhealthy container is
-		// still serving.
+		// A *docker.RestoreError means the rollback recreate could not put back the
+		// container it had torn down. Unlike a plain recreate failure, the unhealthy
+		// container is not simply still serving, so the operator must not be told it
+		// is: OriginalRunning false means nothing is running at all, true means it
+		// came back without its name or its networks.
 		var restoreErr *docker.RestoreError
 		if errors.As(err, &restoreErr) {
+			if !restoreErr.OriginalRunning {
+				log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
+					Msg("auto-update: rollback recreate failed and the container could not be restored, it is left down")
+				s.notifier.Notify(Event{
+					Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
+					StackName: stackName, Image: originalRef, Message: "rollback failed and the container is left down, manual intervention required", Err: err,
+					ServiceDown: true,
+				})
+
+				return
+			}
+
 			log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
-				Msg("auto-update: rollback recreate failed and the container could not be restored, it is left down")
+				Msg("auto-update: rollback recreate failed, the container is running again but its name or networks were not restored")
 			s.notifier.Notify(Event{
 				Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
-				StackName: stackName, Image: originalRef, Message: "rollback failed and the container is left down, manual intervention required", Err: err,
-				ServiceDown: true,
+				StackName: stackName, Image: originalRef, Message: "rollback failed and the container was only partially restored (name or networks), manual intervention required", Err: err,
 			})
 
 			return

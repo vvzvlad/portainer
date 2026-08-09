@@ -49,10 +49,11 @@ type Event struct {
 	// Err carries the underlying error for failure events; nil otherwise.
 	Err error
 	// ServiceDown marks a failure that left NOTHING running for the container: the
-	// update (or its rollback) tore the original down and could not put it back.
-	// It is what tells the two failure outcomes apart for a consumer that only sees
-	// the event, since both are EventUpdateFailed and otherwise differ in Message
-	// wording alone. Always false for a failure the container survived.
+	// update (or its rollback) tore the original down and could not put it back. It
+	// is the one machine-readable failure distinction a consumer gets, and it is
+	// deliberately narrow: false for every failure the container survived, INCLUDING
+	// a restore that put it back only partially (running again, but without its
+	// original name or networks). That degraded outcome is conveyed in Message only.
 	ServiceDown bool
 }
 

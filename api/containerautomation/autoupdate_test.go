@@ -145,11 +145,13 @@ func TestUpdateEndpointRecreatesComposeStackMemberIndividually(t *testing.T) {
 }
 
 // TestUpdateStandaloneReportsAContainerLeftDown locks in the honesty of the
-// auto-update notification. An ordinary recreate failure ends with the original
-// container running again, so the old wording stands; a *docker.RestoreError
-// means the restore itself failed and NOTHING is running, which the operator has
-// to be told about explicitly (the reported #36 case, where a service stayed
-// Exited while the notification only said the update had failed).
+// auto-update notification across the three outcomes a failed recreate has. An
+// ordinary failure ends with the original running exactly as before, so the old
+// wording stands; a *docker.RestoreError means the restore did not fully land,
+// and its OriginalRunning decides whether the operator is told about an outage
+// (the reported #36 case, where a service stayed Exited while the notification
+// only said the update had failed) or about a container that came back without
+// its name or its networks and will not fix itself.
 func TestUpdateStandaloneReportsAContainerLeftDown(t *testing.T) {
 	recreateErr := errors.New("start container error: boom")
 
@@ -174,6 +176,17 @@ func TestUpdateStandaloneReportsAContainerLeftDown(t *testing.T) {
 			},
 			wantMessage:     "failed to recreate container and the original container is left down, manual intervention required",
 			wantServiceDown: true,
+		},
+		{
+			name: "a partial restore leaves the container running under the wrong name",
+			err: &docker.RestoreError{
+				ContainerID:     "old-id",
+				Name:            "/web",
+				Cause:           recreateErr,
+				Errs:            []error{errors.New("rename container back error: name already in use")},
+				OriginalRunning: true,
+			},
+			wantMessage: "failed to recreate container and the original container was only partially restored (name or networks), manual intervention required",
 		},
 	}
 
