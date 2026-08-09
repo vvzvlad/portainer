@@ -50,7 +50,8 @@ type ContainerService struct {
 	// restoreTimeout is the whole time budget of one restore. It is a field rather
 	// than a constant read at the call site so a test can drive the
 	// budget-exhaustion paths in milliseconds without mutating a package-level knob
-	// shared by every other (parallel) test.
+	// shared by every other (parallel) test. Read it through restoreBudget rather
+	// than directly, so the zero value cannot switch a restore off.
 	restoreTimeout time.Duration
 }
 
@@ -100,6 +101,22 @@ func clearMacAddrs(n network.NetworkingConfig) network.NetworkingConfig {
 	return netConfig
 }
 
+// restoreBudget is the whole time budget of one restore, and the only reading of
+// restoreTimeout there is: every budget derived from it — the restore context
+// itself and the shares the teardown and the planning inspect run on — goes
+// through here. A ContainerService built without NewContainerService carries a
+// zero budget, and a zero timeout is an already-expired context: every restore
+// call would fail before it left the process, leaving the original renamed,
+// disconnected and stopped. Falling back to the default keeps that from ever
+// being a silent switch-off, in the derived budgets as much as in the whole.
+func (c *ContainerService) restoreBudget() time.Duration {
+	if c.restoreTimeout <= 0 {
+		return defaultRestoreTimeout
+	}
+
+	return c.restoreTimeout
+}
+
 // restoreContext derives the context the restore runs on. It is deliberately
 // detached from the caller's context: the most common recreate failure is the
 // caller's own deadline or cancellation (auto-update bounds a recreate with
@@ -112,16 +129,7 @@ func clearMacAddrs(n network.NetworkingConfig) network.NetworkingConfig {
 // nothing about process shutdown. If the daemon exits mid-restore the sequence
 // is cut at whatever step it had reached, exactly as before.
 func (c *ContainerService) restoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	// A service built without NewContainerService would carry a zero budget, and a
-	// zero timeout is an already-expired context: every restore call would fail
-	// instantly and the original would be left renamed, disconnected and stopped.
-	// Falling back to the default keeps that from ever being a silent switch-off.
-	budget := c.restoreTimeout
-	if budget <= 0 {
-		budget = defaultRestoreTimeout
-	}
-
-	return context.WithTimeout(context.WithoutCancel(ctx), budget)
+	return context.WithTimeout(context.WithoutCancel(ctx), c.restoreBudget())
 }
 
 // restorePlan is what putting the original back still requires: whether it has
@@ -329,7 +337,7 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 			gone     bool
 		)
 
-		planCtx, stopPlan := context.WithTimeout(restoreCtx, c.restoreTimeout/restorePlanShare)
+		planCtx, stopPlan := context.WithTimeout(restoreCtx, c.restoreBudget()/restorePlanShare)
 
 		switch current, _, err := cli.ContainerInspectWithRaw(planCtx, containerId, false); {
 		case err == nil:
@@ -588,7 +596,7 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 		// Only a share of the shared budget: this defer runs FIRST (LIFO), so a stop
 		// or a removal that hangs must not be able to spend the whole restore window
 		// and leave the original with nothing. See restoreTeardownShare.
-		restoreCtx, stopTeardown := context.WithTimeout(useRestoreCtx(), c.restoreTimeout/restoreTeardownShare)
+		restoreCtx, stopTeardown := context.WithTimeout(useRestoreCtx(), c.restoreBudget()/restoreTeardownShare)
 		defer stopTeardown()
 
 		log.Debug().Str("container_id", create.ID).Msg("removing the new container")

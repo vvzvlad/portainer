@@ -1476,6 +1476,38 @@ func TestRecreateDoesNotBlameAStopThatFoundNothingToStop(t *testing.T) {
 	requireNoCall(t, stand.recorded(), "start:"+standOldID)
 }
 
+// TestRecreateBlamesAStopWhoseAnswerWasLostForAReapedOriginal is the other edge of
+// the same line, and the one that decides how narrow the "nothing to stop" proof
+// has to be: a --rm container whose stop FAILED — the answer lost on a reset
+// connection — while the engine carried it out anyway and reaped the container for
+// it. That is the #36 class exactly, and the container is gone because of this
+// recreate. Only "no such container" proves otherwise, so anything looser than a
+// 404 here silently turns every lost stop answer on a --rm container into "not our
+// doing" and drops a real outage on the floor.
+func TestRecreateBlamesAStopWhoseAnswerWasLostForAReapedOriginal(t *testing.T) {
+	t.Parallel()
+
+	const stopError = "connection reset while stopping"
+
+	svc, stand, endpoint := newRecreateStand(t)
+	stand.withAutoRemove()
+	// The stop lands and the engine reaps the --rm container; the caller only ever
+	// sees the failure, which says nothing about the container being gone.
+	stand.hookCall("stop:"+standOldID, func() { stand.forget(standOldID) })
+	stand.failCallStatus("stop:"+standOldID, stopError, http.StatusInternalServerError)
+
+	_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "stop container error")
+
+	var restoreErr *RestoreError
+	require.ErrorAs(t, err, &restoreErr, "our own stop reaping the workload is an outage this recreate caused")
+	require.False(t, restoreErr.OriginalRunning)
+	require.False(t, restoreErr.StateUnknown, "the state is known: the container is gone")
+	require.ErrorContains(t, err, "left down")
+	require.ErrorContains(t, err, "--rm", "the message has to say why there is nothing left to restore")
+}
+
 // TestRecreateDoesNotUndoARenameItNeverMade guards the restore's mandate: it puts
 // back what THIS recreate took away, and nothing else. A recreate that failed at
 // the stop never renamed anything, so a name that does not match by the time the
@@ -1704,4 +1736,77 @@ func TestRestoreContextFallsBackToTheDefaultBudget(t *testing.T) {
 	require.True(t, ok, "the restore is always bounded")
 	require.Positive(t, time.Until(deadline), "a zero budget must not leave the restore no time at all")
 	require.LessOrEqual(t, time.Until(deadline), defaultRestoreTimeout)
+}
+
+// TestRecreateRestoresOnTheDefaultBudgetWhenNoneIsConfigured carries the fallback
+// above through to the calls. It is worth nothing if only the restore context
+// takes it while the budgets DERIVED from that context — the share the teardown
+// of the new container runs on, and the share the inspect that plans the rollback
+// runs on — read the zero field straight and expire on the spot. A
+// ContainerService built by hand, the way an embedder builds one, has to restore
+// as completely as one built by the constructor.
+func TestRecreateRestoresOnTheDefaultBudgetWhenNoneIsConfigured(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		script func(*dockerStand)
+		// assert what only a derived budget that did NOT expire can produce.
+		assert func(*testing.T, *dockerStand, []string)
+	}{
+		{
+			// On an expired share neither the stop nor the forced removal of the new
+			// container lands, the new container goes on holding the original name, and
+			// the rename of the original back to it is refused with a Conflict.
+			name:   "the teardown of the new container",
+			script: func(stand *dockerStand) { stand.failCall("start:"+standNewID, standStartError) },
+			assert: func(t *testing.T, stand *dockerStand, calls []string) {
+				t.Helper()
+
+				callIndex(t, calls, "remove:"+standNewID+":force")
+				require.False(t, stand.exists(standNewID), "the new container was torn down")
+			},
+		},
+		{
+			// On an expired share the inspect that reads the original's state fails and
+			// the plan falls back to every ATTEMPTED step — here including the disconnect
+			// that never landed, which it would then needlessly "undo" with a connect.
+			name: "the inspect that plans the rollback",
+			script: func(stand *dockerStand) {
+				stand.failCall("disconnect:"+standNetworkID+":"+standOldID, "disconnect refused by the daemon")
+			},
+			assert: func(t *testing.T, stand *dockerStand, calls []string) {
+				t.Helper()
+
+				requireNoCall(t, calls, "connect:"+standNetworkID+":"+standOldID)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, stand, endpoint := newRecreateStand(t)
+			// Built by hand rather than by NewContainerService, so every budget of the
+			// restore is derived from an unset field.
+			svc := &ContainerService{factory: dockerclient.NewClientFactory(nil, nil)}
+			require.Zero(t, svc.restoreTimeout, "the unset budget is the point of the test")
+
+			tt.script(stand)
+
+			_, err := svc.Recreate(t.Context(), endpoint, standOldID, false, "", "")
+			require.Error(t, err)
+
+			var restoreErr *RestoreError
+			require.NotErrorAs(t, err, &restoreErr, "the original came back exactly as it was")
+
+			calls := stand.recorded()
+			callIndex(t, calls, "start:"+standOldID)
+			require.True(t, stand.isRunning(standOldID), "the original container is running again")
+			require.Equal(t, standName, stand.nameOf(standOldID), "under its own name")
+
+			tt.assert(t, stand, calls)
+		})
+	}
 }
