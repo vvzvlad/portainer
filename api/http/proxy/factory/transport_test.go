@@ -105,21 +105,29 @@ func TestNewDockerHTTPProxy_NonEdgeTLS(t *testing.T) {
 	require.NotNil(t, dt.HTTPTransport.DialContext)
 }
 
-// The docker API proxy of a non-edge TLS environment(endpoint) talks to the
-// Portainer agent, which relays the request to the Docker socket as-is. Over an
-// HTTP/2 hop an empty body reaches the daemon as Transfer-Encoding: chunked and
-// POST /containers/{id}/start is rejected, so the transport must be pinned to
-// HTTP/1.1. Edge environments(endpoints) tunnel over plain http and keep the default.
+// The docker API proxy of a non-edge TLS environment(endpoint) talks to a
+// Portainer agent (or to a dockerd exposing its TLS port directly). The agent
+// relays the request to the Docker socket as-is: over an HTTP/2 hop an empty body
+// reaches the daemon as Transfer-Encoding: chunked and POST /containers/{id}/start
+// is rejected, so the transport must be pinned to HTTP/1.1. dockerd never speaks
+// HTTP/2, so the same pinning is harmless for the direct case.
+//
+// Edge environments(endpoints) are always TLS-less - TLS is rejected for them by
+// endpoint_update.go ("TLS is not supported for Edge Agent environments") and
+// endpoint_create.go stores TLSConfig{TLS: false} - so their hop is a cleartext
+// chisel tunnel. Go never negotiates h2c without Protocols.SetUnencryptedHTTP2,
+// so there is nothing to disable and the upstream default is kept.
 func TestNewDockerHTTPProxy_TLSDisablesHTTP2(t *testing.T) {
 	enableSSRF(t)
 
-	tlsConfig := portainer.TLSConfiguration{TLS: true, TLSSkipVerify: true}
-
 	f := &ProxyFactory{reverseTunnelService: &stubTunnelService{}}
 	endpoint := &portainer.Endpoint{
-		Type:      portainer.AgentOnDockerEnvironment,
-		URL:       "tcp://192.168.1.100:9001",
-		TLSConfig: tlsConfig,
+		Type: portainer.AgentOnDockerEnvironment,
+		URL:  "tcp://192.168.1.100:9001",
+		TLSConfig: portainer.TLSConfiguration{
+			TLS:           true,
+			TLSSkipVerify: true,
+		},
 	}
 
 	handler, err := f.newDockerHTTPProxy(endpoint)
@@ -132,9 +140,8 @@ func TestNewDockerHTTPProxy_TLSDisablesHTTP2(t *testing.T) {
 	require.True(t, dt.HTTPTransport.Protocols.HTTP1())
 
 	edgeEndpoint := &portainer.Endpoint{
-		Type:      portainer.EdgeAgentOnDockerEnvironment,
-		URL:       "tcp://192.168.1.100:9001",
-		TLSConfig: tlsConfig,
+		Type: portainer.EdgeAgentOnDockerEnvironment,
+		URL:  "tcp://192.168.1.100:9001",
 	}
 
 	edgeHandler, err := f.newDockerHTTPProxy(edgeEndpoint)

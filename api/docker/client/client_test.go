@@ -12,6 +12,7 @@ import (
 
 	portainer "github.com/portainer/portainer/api"
 	"github.com/portainer/portainer/pkg/fips"
+	"github.com/portainer/portainer/pkg/libhttp/ssrf"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
@@ -43,10 +44,12 @@ func TestHttpClientDisablesHTTP2OverTLS(t *testing.T) {
 	t.Parallel()
 	fips.InitFIPS(false)
 
-	// A TLS endpoint is always reached through the Portainer agent, which relays
-	// our request to the Docker socket verbatim. HTTP/2 on that hop corrupts empty
-	// bodies (see TestHttpClientStartsContainerThroughHTTP2CapableAgent), so the
-	// transport must offer HTTP/1.1 only.
+	// A TLS endpoint is either a Portainer agent or a dockerd exposing its TLS
+	// port directly. The agent relays our request to the Docker socket verbatim,
+	// and HTTP/2 on that hop corrupts empty bodies (see
+	// TestHttpClientStartsContainerThroughHTTP2CapableAgent). dockerd never speaks
+	// HTTP/2 itself, so offering HTTP/1.1 only is harmless there and fixes the
+	// agent case.
 	tlsEndpoint := &portainer.Endpoint{}
 	tlsEndpoint.TLSConfig = portainer.TLSConfiguration{TLS: true}
 
@@ -55,9 +58,9 @@ func TestHttpClientDisablesHTTP2OverTLS(t *testing.T) {
 
 	tlsTransport, ok := tlsCli.Transport.(*NodeNameTransport)
 	require.True(t, ok)
-	require.NotNil(t, tlsTransport.Transport.Protocols, "Protocols must be set: a nil value means HTTP/1.1 + HTTP/2")
-	require.False(t, tlsTransport.Transport.Protocols.HTTP2())
-	require.True(t, tlsTransport.Transport.Protocols.HTTP1())
+	require.NotNil(t, tlsTransport.Protocols, "Protocols must be set: a nil value means HTTP/1.1 + HTTP/2")
+	require.False(t, tlsTransport.Protocols.HTTP2())
+	require.True(t, tlsTransport.Protocols.HTTP1())
 
 	// Plain HTTP endpoints keep the upstream default (Protocols unset): Go's client
 	// never negotiates h2c on its own, so there is nothing to disable there.
@@ -69,7 +72,7 @@ func TestHttpClientDisablesHTTP2OverTLS(t *testing.T) {
 
 	plainTransport, ok := plainCli.Transport.(*NodeNameTransport)
 	require.True(t, ok)
-	require.Nil(t, plainTransport.Transport.Protocols)
+	require.Nil(t, plainTransport.Protocols)
 }
 
 // dockerEmptyBodyError is the message the Docker daemon returns when a
@@ -91,6 +94,7 @@ func TestHttpClientStartsContainerThroughHTTP2CapableAgent(t *testing.T) {
 
 	var mu sync.Mutex
 	var agentProto string
+	var daemonCalled bool
 	var daemonContentLength int64
 	var daemonTransferEncoding []string
 
@@ -103,6 +107,7 @@ func TestHttpClientStartsContainerThroughHTTP2CapableAgent(t *testing.T) {
 		}
 
 		mu.Lock()
+		daemonCalled = true
 		daemonContentLength = r.ContentLength
 		daemonTransferEncoding = r.TransferEncoding
 		mu.Unlock()
@@ -124,7 +129,7 @@ func TestHttpClientStartsContainerThroughHTTP2CapableAgent(t *testing.T) {
 
 	// The Portainer agent: its LocalProxy retargets the *server* request and hands
 	// it straight to a client transport, without normalising the body.
-	relay := &http.Transport{}
+	relay := ssrf.NewTransport(nil)
 	defer relay.CloseIdleConnections()
 
 	agent := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +146,8 @@ func TestHttpClientStartsContainerThroughHTTP2CapableAgent(t *testing.T) {
 
 			return
 		}
-		defer res.Body.Close()
+		// This runs in the test server's goroutine, so it must not call require.
+		defer func() { _ = res.Body.Close() }()
 
 		for k, vv := range res.Header {
 			for _, v := range vv {
@@ -169,16 +175,22 @@ func TestHttpClientStartsContainerThroughHTTP2CapableAgent(t *testing.T) {
 		client.WithScheme("https"),
 	)
 	require.NoError(t, err)
-	defer cli.Close()
+	defer func() {
+		err := cli.Close()
+		require.NoError(t, err)
+	}()
 
 	err = cli.ContainerStart(context.Background(), "probe", container.StartOptions{})
 
+	// ContainerStart has returned, so both hops are done writing.
 	mu.Lock()
-	proto, contentLength, transferEncoding := agentProto, daemonContentLength, daemonTransferEncoding
+	proto, called := agentProto, daemonCalled
+	contentLength, transferEncoding := daemonContentLength, daemonTransferEncoding
 	mu.Unlock()
 
 	require.NoError(t, err, "agent hop protocol: %s, daemon saw Content-Length=%d Transfer-Encoding=%v", proto, contentLength, transferEncoding)
 	require.Equal(t, "HTTP/1.1", proto, "the agent hop must not be negotiated as HTTP/2")
+	require.True(t, called, "the daemon handler must have been reached, otherwise the assertions below are vacuous")
 	require.Equal(t, int64(0), contentLength, "the daemon must see an empty body, not a chunked one")
 	require.Empty(t, transferEncoding)
 }
