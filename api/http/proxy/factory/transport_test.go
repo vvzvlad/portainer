@@ -105,6 +105,46 @@ func TestNewDockerHTTPProxy_NonEdgeTLS(t *testing.T) {
 	require.NotNil(t, dt.HTTPTransport.DialContext)
 }
 
+// The docker API proxy of a non-edge TLS environment(endpoint) talks to the
+// Portainer agent, which relays the request to the Docker socket as-is. Over an
+// HTTP/2 hop an empty body reaches the daemon as Transfer-Encoding: chunked and
+// POST /containers/{id}/start is rejected, so the transport must be pinned to
+// HTTP/1.1. Edge environments(endpoints) tunnel over plain http and keep the default.
+func TestNewDockerHTTPProxy_TLSDisablesHTTP2(t *testing.T) {
+	enableSSRF(t)
+
+	tlsConfig := portainer.TLSConfiguration{TLS: true, TLSSkipVerify: true}
+
+	f := &ProxyFactory{reverseTunnelService: &stubTunnelService{}}
+	endpoint := &portainer.Endpoint{
+		Type:      portainer.AgentOnDockerEnvironment,
+		URL:       "tcp://192.168.1.100:9001",
+		TLSConfig: tlsConfig,
+	}
+
+	handler, err := f.newDockerHTTPProxy(endpoint)
+	require.NoError(t, err)
+
+	proxy := handler.(*httputil.ReverseProxy)
+	dt := proxy.Transport.(*docker.Transport)
+	require.NotNil(t, dt.HTTPTransport.Protocols, "a nil Protocols means HTTP/1.1 + HTTP/2")
+	require.False(t, dt.HTTPTransport.Protocols.HTTP2())
+	require.True(t, dt.HTTPTransport.Protocols.HTTP1())
+
+	edgeEndpoint := &portainer.Endpoint{
+		Type:      portainer.EdgeAgentOnDockerEnvironment,
+		URL:       "tcp://192.168.1.100:9001",
+		TLSConfig: tlsConfig,
+	}
+
+	edgeHandler, err := f.newDockerHTTPProxy(edgeEndpoint)
+	require.NoError(t, err)
+
+	edgeProxy := edgeHandler.(*httputil.ReverseProxy)
+	edgeTransport := edgeProxy.Transport.(*docker.Transport)
+	require.Nil(t, edgeTransport.HTTPTransport.Protocols)
+}
+
 func TestNewDockerHTTPProxy_EdgeNoTLS(t *testing.T) {
 	enableSSRF(t)
 
