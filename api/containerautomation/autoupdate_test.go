@@ -3,6 +3,7 @@ package containerautomation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -141,4 +142,92 @@ func TestUpdateEndpointRecreatesComposeStackMemberIndividually(t *testing.T) {
 	// the webhook renders "Stack [regression-stack]" rather than a bare container.
 	require.Equal(t, "regression-stack", rec.events[0].StackName,
 		"a recreated stack member carries its compose project name in StackName")
+}
+
+// TestUpdateStandaloneReportsAContainerLeftDown locks in the honesty of the
+// auto-update notification across the three outcomes a failed recreate has. An
+// ordinary failure ends with the original running exactly as before, so the old
+// wording stands; a *docker.RestoreError means the restore did not fully land,
+// and its OriginalRunning decides whether the operator is told about an outage
+// (the reported #36 case, where a service stayed Exited while the notification
+// only said the update had failed) or about a container that came back without
+// its name or its networks and will not fix itself.
+func TestUpdateStandaloneReportsAContainerLeftDown(t *testing.T) {
+	recreateErr := errors.New("start container error: boom")
+
+	tests := []struct {
+		name            string
+		err             error
+		wantMessage     string
+		wantServiceDown bool
+	}{
+		{
+			name:        "an ordinary recreate failure leaves the original running",
+			err:         recreateErr,
+			wantMessage: "failed to recreate container",
+		},
+		{
+			name: "a failed restore leaves the container down",
+			err: &docker.RestoreError{
+				ContainerID: "old-id",
+				Name:        "/web",
+				Cause:       recreateErr,
+				Errs:        []error{errors.New("start container error: still boom")},
+			},
+			wantMessage:     "failed to recreate container and the original container is left down, manual intervention required",
+			wantServiceDown: true,
+		},
+		{
+			name: "a partial restore leaves the container running under the wrong name",
+			err: &docker.RestoreError{
+				ContainerID:     "old-id",
+				Name:            "/web",
+				Cause:           recreateErr,
+				Errs:            []error{errors.New("rename container back error: name already in use")},
+				OriginalRunning: true,
+			},
+			wantMessage: "failed to recreate container and the original container was only partially restored (name or networks), manual intervention required",
+		},
+		{
+			// The state could not be read, so the operator must be sent to look rather
+			// than told the container is down — while the alert is still raised as if it
+			// were, since it may well be.
+			name: "an unreadable state is acted on as an outage but not called one",
+			err: &docker.RestoreError{
+				ContainerID:  "old-id",
+				Name:         "/web",
+				Cause:        recreateErr,
+				Errs:         []error{errors.New("inspect the original container error: boom")},
+				StateUnknown: true,
+			},
+			wantMessage:     "failed to recreate container and the state of the original container could not be read, check it manually",
+			wantServiceDown: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seq := &callSeq{}
+			notif := &seqNotifier{seq: seq}
+
+			s := &Service{
+				baseCtx:          context.Background(),
+				containerService: &fakeRecreator{seq: seq, err: tt.err},
+				notifier:         notif,
+				rolledBack:       map[string]rolledBackTarget{},
+			}
+
+			// rollback disabled: the health gate is irrelevant here, the recreate never
+			// returns a container to gate.
+			s.updateStandalone(newFakeDockerClient(seq), &portainer.Endpoint{ID: 1},
+				UpdateCandidate{ID: "old-id", Name: "web"}, updateOptions{})
+
+			event, n := notif.only(EventUpdateFailed)
+			require.Equal(t, 1, n, "exactly one update-failed event")
+			require.Equal(t, tt.wantMessage, event.Message)
+			require.ErrorIs(t, event.Err, tt.err, "the event carries the failure itself")
+			require.Equal(t, tt.wantServiceDown, event.ServiceDown,
+				"ServiceDown is what tells a consumer the two failure outcomes apart, the wording is not machine-readable")
+		})
+	}
 }

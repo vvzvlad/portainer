@@ -2,11 +2,13 @@ package containerautomation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/docker"
 	"github.com/portainer/portainer/api/docker/consts"
 	"github.com/portainer/portainer/api/docker/images"
 	"github.com/portainer/portainer/api/internal/endpointutils"
@@ -298,8 +300,58 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 
 	newContainer, err := s.containerService.Recreate(ctx, endpoint, c.ID, true, "", "")
 	if err != nil {
-		// Recreate preserves config and rolls back on a create failure; a pull or
-		// create failure leaves the original container running.
+		// Recreate preserves config and keeps the original container until the new one
+		// has started, rolling back to the original from the moment it stops it, so an
+		// ordinary recreate failure ends with the original running exactly as before.
+		// Recreate verifies that by inspecting it; when the rollback did not fully land
+		// it reports a *docker.RestoreError, which is an operator-visible problem rather
+		// than a skipped update. Its OriginalRunning tells the two apart: nothing
+		// running is an outage, a running container that did not get its name or its
+		// networks back is a degradation that will not fix itself. StateUnknown is
+		// neither: the container was not observed at all, so the operator is told to
+		// go and look rather than told something that may not be true.
+		var restoreErr *docker.RestoreError
+		if errors.As(err, &restoreErr) {
+			if restoreErr.StateUnknown {
+				// Acted on as an outage — a workload that may be down is worth waking
+				// somebody for — but never described as one.
+				log.Error().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
+					Msg("auto-update: failed to recreate container and the state of the original could not be read, it needs checking by hand")
+				s.notifier.Notify(Event{
+					Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
+					StackName: stackName, Message: "failed to recreate container and the state of the original container could not be read, check it manually", Err: err,
+					ServiceDown: true,
+				})
+
+				return
+			}
+
+			if !restoreErr.OriginalRunning {
+				log.Error().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
+					Msg("auto-update: failed to recreate container and the original could not be restored, it is left down")
+				s.notifier.Notify(Event{
+					Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
+					StackName: stackName, Message: "failed to recreate container and the original container is left down, manual intervention required", Err: err,
+					ServiceDown: true,
+				})
+
+				return
+			}
+
+			// Serving again, so ServiceDown stays false and this is a warning, the level
+			// the notifier gives it too — but under the wrong name or without a network
+			// it is not the service it was, and the next pass would find and recreate the
+			// "-old" container instead of this one.
+			log.Warn().Err(err).Str("container_id", c.ID).Str("container", c.Name).Int("endpoint_id", endpointID).
+				Msg("auto-update: failed to recreate container, the original is running again but its name or networks were not restored")
+			s.notifier.Notify(Event{
+				Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: c.ID, ContainerName: c.Name,
+				StackName: stackName, Message: "failed to recreate container and the original container was only partially restored (name or networks), manual intervention required", Err: err,
+			})
+
+			return
+		}
+
 		log.Warn().Err(err).Str("container_id", c.ID).Int("endpoint_id", endpointID).
 			Msg("auto-update: failed to recreate container")
 		s.notifier.Notify(Event{

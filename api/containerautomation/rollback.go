@@ -7,6 +7,7 @@ import (
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/docker"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/rs/zerolog/log"
@@ -337,7 +338,9 @@ func (s *Service) gateDeadlineResult() gateResult {
 //
 // If any step fails the previous image cannot be safely restored, so the
 // (unhealthy) new container is left running rather than destroyed, and a loud
-// failure notification is emitted.
+// failure notification is emitted. The exception is a *docker.RestoreError from
+// the rollback recreate: there the restore itself failed, nothing is left
+// running, and the notification says so.
 func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newContainerID, oldImageID, originalRef, containerName, stackName string) {
 	endpointID := int(endpoint.ID)
 
@@ -362,6 +365,52 @@ func (s *Service) rollback(cli dockerClient, endpoint *portainer.Endpoint, newCo
 	}
 
 	if _, err := s.containerService.Recreate(ctx, endpoint, newContainerID, false, "", ""); err != nil {
+		// A *docker.RestoreError means the rollback recreate could not put back the
+		// container it had torn down. Unlike a plain recreate failure, the unhealthy
+		// container is not simply still serving, so the operator must not be told it
+		// is: OriginalRunning false means nothing is running at all, true means it
+		// came back without its name or its networks, and StateUnknown means it was
+		// not observed at all, so neither can be claimed.
+		var restoreErr *docker.RestoreError
+		if errors.As(err, &restoreErr) {
+			if restoreErr.StateUnknown {
+				// Acted on as an outage — a workload that may be down is worth waking
+				// somebody for — but never described as one.
+				log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
+					Msg("auto-update: rollback recreate failed and the state of the container could not be read, it needs checking by hand")
+				s.notifier.Notify(Event{
+					Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
+					StackName: stackName, Image: originalRef, Message: "rollback failed and the state of the container could not be read, check it manually", Err: err,
+					ServiceDown: true,
+				})
+
+				return
+			}
+
+			if !restoreErr.OriginalRunning {
+				log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
+					Msg("auto-update: rollback recreate failed and the container could not be restored, it is left down")
+				s.notifier.Notify(Event{
+					Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
+					StackName: stackName, Image: originalRef, Message: "rollback failed and the container is left down, manual intervention required", Err: err,
+					ServiceDown: true,
+				})
+
+				return
+			}
+
+			// Serving again, so ServiceDown stays false and this is a warning, the level
+			// the notifier gives it too.
+			log.Warn().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
+				Msg("auto-update: rollback recreate failed, the container is running again but its name or networks were not restored")
+			s.notifier.Notify(Event{
+				Kind: EventUpdateFailed, EndpointID: endpointID, ContainerID: newContainerID, ContainerName: containerName,
+				StackName: stackName, Image: originalRef, Message: "rollback failed and the container was only partially restored (name or networks), manual intervention required", Err: err,
+			})
+
+			return
+		}
+
 		log.Error().Err(err).Str("container_id", newContainerID).Str("image", originalRef).Int("endpoint_id", endpointID).
 			Msg("auto-update: rollback recreate failed, leaving the unhealthy container in place")
 		s.notifier.Notify(Event{
