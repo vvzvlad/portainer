@@ -362,6 +362,17 @@ the unpacker path, which is **unreachable in CE** — `IsRelativePathStack()` in
 for the failure mode rather than live code. The live instance of the same bug, in
 `ContainerService.Recreate`, is being fixed separately.
 
+A neighbouring fix raised the adjacent question, and it is worth answering here because
+this whole design rests on failing loudly. Docker can report a pull failure *inside* the
+stream body after having already sent HTTP 200; hand-rolled code that reads the stream
+with `io.ReadAll` discards those, and then rebuilds from the stale image while reporting
+success. **The compose path does not have that shape.** `ComposeDeployer.Pull`
+(`pkg/libstack/compose/composeplugin.go`) delegates to `composeService.Pull(ctx, project,
+api.PullOptions{})` and wraps whatever comes back — we never touch the stream ourselves.
+The zero value matters too: `PullOptions.IgnoreFailures` is `false`, so failures are not
+suppressed at our call site. Whether compose v2's own puller can swallow an in-stream
+error is an upstream question and is **not verified here**.
+
 For the resolver the requirement is the **opposite direction**: the call is a local
 round trip over a unix socket to fetch a handful of short strings, so it gets its own
 explicit, *short* deadline, independent of any docker client. A wedged or unresponsive
