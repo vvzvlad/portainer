@@ -541,8 +541,14 @@ stacks, never copies, or rotation will split services apart.
 
 ### Explicitly out of scope
 
-- **hatbox** runs stock EE 2.42.0, not our build — its 13 stacks stay outside this
-  scheme until it moves to our image.
+- **hatbox** ran stock EE 2.42.0, not our build, which put its 13 stacks outside this
+  scheme. **This may already be obsolete:** a session doing field work reports that on
+  2026-08-17 the host `slug` (13 stacks, 42 containers, public services — gitea, the
+  wiki, the sites) was moved off its own Portainer onto this fork as environment id 11,
+  reached through an agent over WireGuard. Reported, **not verified here** — the
+  Portainer MCP servers were unavailable in the window where this was written. Confirm
+  the environment count on borneo before relying on it; if it holds, those 13 stacks
+  are in scope and the estate is one control plane, not two.
 - The `vaultwarden` stack itself (id 30, island.lc) must be **excluded** from the
   scheme, or deploying it would require itself. It has no secrets in its compose, so
   the exclusion is free — but it has to be explicit.
