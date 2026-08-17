@@ -3,8 +3,11 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,10 +15,14 @@ import (
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/dataservices"
 	dockerclient "github.com/portainer/portainer/api/docker/client"
+	"github.com/portainer/portainer/api/docker/images"
+	"github.com/portainer/portainer/api/internal/testhelpers"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
+	sdkclient "github.com/docker/docker/client"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,22 +84,31 @@ const (
 	standNetwork    = "bridge"
 	standImage      = "nginx:1.21"
 	standStartError = "new container refused to start"
+
+	// standPulledImage is what standImage normalises to once the reference is
+	// parsed: the fully qualified name the Docker SDK puts on the wire as
+	// fromImage+tag, and the one Recreate names in the pull error.
+	standPulledImage = "docker.io/library/nginx:1.21"
+
+	// standNodeName is the node an agent-cluster recreate is aimed at, i.e. the one
+	// holding the container being recreated.
+	standNodeName = "worker-2"
 )
 
 // standOp is a decoded Docker Engine API call the stand understands. Splitting
 // the decoding from the response keeps the routing in one place, so a test can
 // script a failure or a hook against the same identity the call log reports.
 type standOp struct {
-	verb      string // inspect, stop, start, rename, remove, create, connect, disconnect
+	verb      string // inspect, stop, start, rename, remove, create, connect, disconnect, pull
 	id        string // container id, or network id for connect/disconnect
 	container string // container id, for connect/disconnect
-	name      string // rename/create target name
+	name      string // rename/create target name, or the image reference of a pull
 	force     bool   // removal force flag
 	timeout   string // stop grace period, as sent on the wire ("" when unset)
 }
 
 // containerID is the container a call targets, empty for one that targets none
-// (a create, which has no container yet).
+// (a create, which has no container yet, or a pull, which targets an image).
 func (o standOp) containerID() string {
 	switch {
 	case o.container != "":
@@ -122,7 +138,7 @@ func (o standOp) detail() string {
 	switch {
 	case o.verb == "rename":
 		return o.key() + "->" + o.name
-	case o.verb == "create":
+	case o.verb == "create", o.verb == "pull":
 		return o.key() + ":" + o.name
 	case o.verb == "remove" && o.force:
 		return o.key() + ":force"
@@ -169,15 +185,16 @@ type dockerStand struct {
 	networks   map[string]string               // network name -> id
 	attached   map[string]map[string]bool      // container id -> network ids it is attached to
 	autoRemove bool                            // the original runs with --rm
+	pullStall  time.Duration                   // how long a pull stalls PART WAY THROUGH its progress stream
+	pings      int                             // /_ping calls answered, i.e. SDK clients that reached the stand
+	targets    map[string]string               // call verb -> the agent target header that call carried
 }
 
-// newRecreateStand wires a ContainerService to a fresh stand. The data store is
-// nil on purpose: it is only reached by the image puller, and every test here
-// recreates without a forced pull.
-func newRecreateStand(t *testing.T) (*ContainerService, *dockerStand, *portainer.Endpoint) {
-	t.Helper()
-
-	stand := &dockerStand{
+// newStand builds the stand's state, with nothing serving it yet. The wirings
+// below differ only in how the endpoint reaches it — over loopback TCP, over a
+// unix socket or as an agent — and every one of them needs this same engine.
+func newStand() *dockerStand {
+	return &dockerStand{
 		failures:   map[string]standFailure{},
 		nth:        map[string]map[int]standFailure{},
 		seen:       map[string]int{},
@@ -189,8 +206,28 @@ func newRecreateStand(t *testing.T) (*ContainerService, *dockerStand, *portainer
 		names:      map[string]string{standOldID: standName},
 		networks:   map[string]string{standNetwork: standNetworkID},
 		attached:   map[string]map[string]bool{standOldID: {standNetworkID: true}},
+		targets:    map[string]string{},
 	}
+}
 
+// standDataStore is what every wiring hands the ContainerService. It is the
+// in-memory stub rather than a real store: the only thing reaching it here is the
+// image puller, which looks a registry up to authenticate the pull with, and the
+// stub's ViewTx never runs the callback it is given — so the registry slice stays
+// nil, findBestMatchRegistry finds no match in it, and the puller falls back to
+// pulling unauthenticated. That is what an anonymous pull from Docker Hub looks
+// like, and no test pays for a store on disk. A nil store would panic there
+// instead.
+func standDataStore() dataservices.DataStore {
+	return testhelpers.NewDatastore()
+}
+
+// newRecreateStand wires a ContainerService to a fresh stand behind loopback TCP,
+// which is what an ordinary Docker endpoint looks like.
+func newRecreateStand(t *testing.T) (*ContainerService, *dockerStand, *portainer.Endpoint) {
+	t.Helper()
+
+	stand := newStand()
 	stand.srv = httptest.NewServer(stand)
 	t.Cleanup(stand.srv.Close)
 
@@ -201,7 +238,96 @@ func newRecreateStand(t *testing.T) (*ContainerService, *dockerStand, *portainer
 		URL:  "tcp://" + stand.srv.Listener.Addr().String(),
 	}
 
-	return NewContainerService(dockerclient.NewClientFactory(nil, nil), nil), stand, endpoint
+	return NewContainerService(dockerclient.NewClientFactory(nil, nil), standDataStore()), stand, endpoint
+}
+
+// newLocalRecreateStand wires a ContainerService to a stand reached over a UNIX
+// SOCKET, the way a Portainer that manages the engine it runs next to reaches it.
+// The transport is not a detail here: a unix:// (or npipe://) endpoint is built by
+// createLocalClient, which ignores the timeout argument entirely, so such a client
+// carries NO http.Client.Timeout at all and the context is the only bound a call
+// on it has.
+func newLocalRecreateStand(t *testing.T) (*ContainerService, *dockerStand, *portainer.Endpoint) {
+	t.Helper()
+
+	// go-connections/sockets carries no unix transport on Windows, and "unix://" +
+	// path is not a valid URL there either, so createLocalClient cannot build a
+	// client at all and the test would go red rather than say nothing. The npipe://
+	// equivalent is different wiring, not a drop-in swap of the scheme, so the local
+	// transport simply is not exercised on the platform this repo also builds for.
+	if runtime.GOOS == "windows" {
+		t.Skip("no unix socket transport on Windows; the npipe equivalent is different wiring, not a drop-in swap")
+	}
+
+	// Not t.TempDir: a unix socket path has to fit in sun_path, which is ~104
+	// bytes, and t.TempDir builds its directory name out of the TEST's name — long
+	// enough here, under a macOS TMPDIR, to overflow it and fail the listen.
+	dir, err := os.MkdirTemp("", "stand") //nolint:usetesting // t.TempDir names the directory after the test, which overflows sun_path here
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	// Concatenated rather than filepath.Join, which the forward config forbids to
+	// keep user input out of path building: both halves here are literals, so there
+	// is no traversal to guard against, and a unix socket path is POSIX by
+	// construction — "/" is the separator wherever this runs.
+	sock := dir + "/d.sock"
+	listener, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+
+	stand := newStand()
+	stand.srv = httptest.NewUnstartedServer(stand)
+	require.NoError(t, stand.srv.Listener.Close(), "drop the loopback listener httptest opened for us")
+	stand.srv.Listener = listener
+	stand.srv.Start()
+	t.Cleanup(stand.srv.Close)
+
+	endpoint := &portainer.Endpoint{
+		ID:   1,
+		Name: "stand",
+		Type: portainer.DockerEnvironment,
+		URL:  "unix://" + sock,
+	}
+
+	return NewContainerService(dockerclient.NewClientFactory(nil, nil), standDataStore()), stand, endpoint
+}
+
+// newAgentRecreateStand wires a ContainerService to a stand reached as an AGENT,
+// which is the only endpoint type that routes a call to a particular node — the
+// factory turns nodeName into the target header there and nowhere else. The
+// signature service is a stub because an agent client refuses to be built without
+// one: it signs every request, and none of that is under test here.
+func newAgentRecreateStand(t *testing.T) (*ContainerService, *dockerStand, *portainer.Endpoint) {
+	t.Helper()
+
+	stand := newStand()
+	stand.srv = httptest.NewServer(stand)
+	t.Cleanup(stand.srv.Close)
+
+	endpoint := &portainer.Endpoint{
+		ID:   1,
+		Name: "stand",
+		Type: portainer.AgentOnDockerEnvironment,
+		URL:  "tcp://" + stand.srv.Listener.Addr().String(),
+	}
+
+	factory := dockerclient.NewClientFactory(standSignatureService{}, nil)
+
+	return NewContainerService(factory, standDataStore()), stand, endpoint
+}
+
+// standSignatureService is the least a portainer.DigitalSignatureService can be
+// and still let createAgentClient build a client: it signs the agent handshake,
+// which the stand does not check. Only the target header it sits next to is under
+// test.
+type standSignatureService struct{}
+
+func (standSignatureService) ParseKeyPair(private, public []byte) error { return nil }
+func (standSignatureService) GenerateKeyPair() ([]byte, []byte, error)  { return nil, nil, nil }
+func (standSignatureService) EncodedPublicKey() string                  { return "stand-public-key" }
+func (standSignatureService) PEMHeaders() (string, string)              { return "", "" }
+
+func (standSignatureService) CreateSignature(message string) (string, error) {
+	return "stand-signature", nil
 }
 
 // failCall makes every call matching key fail with a daemon-style server error.
@@ -274,6 +400,28 @@ func (s *dockerStand) blockNthCall(verb string, n int) {
 	s.blockedNth[verb][n] = true
 }
 
+// slowPull makes a pull stall for d PART WAY THROUGH its progress stream, after
+// the response headers and a first chunk have already gone out. The ordering is
+// the whole point of the helper: an image pull answers at once and then streams
+// progress for as long as the download takes, so what a fat image runs out of is
+// not the time to get an answer but the time to READ the body — and reading the
+// body is the part of the exchange the pull's own budget has to cover. blockCall
+// cannot stand in for this: it hangs before answering at all, which is a
+// different failure at a different point of the exchange.
+func (s *dockerStand) slowPull(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.pullStall = d
+}
+
+func (s *dockerStand) pullDelay() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.pullStall
+}
+
 // withAutoRemove makes the original container report HostConfig.AutoRemove, i.e.
 // it runs with --rm and the engine reaps it the moment it stops.
 func (s *dockerStand) withAutoRemove() {
@@ -303,6 +451,27 @@ func (s *dockerStand) startsInert(id string) {
 	defer s.mu.Unlock()
 
 	s.inert[id] = true
+}
+
+// pingCount is how many /_ping calls the stand answered, which is how many SDK
+// clients reached it: version negotiation costs exactly one ping per client
+// (WithAPIVersionNegotiation, done once and remembered), so the count is the
+// number of clients a recreate built and used, not the number of calls it made.
+func (s *dockerStand) pingCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.pings
+}
+
+// target is the agent target header the stand saw on the last call of a verb,
+// i.e. the node the request was routed to. It is empty for an endpoint that is
+// not an agent, where the factory sets no such header.
+func (s *dockerStand) target(verb string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.targets[verb]
 }
 
 // recorded returns the calls the stand answered, in order.
@@ -427,6 +596,13 @@ func decodeStandOp(r *http.Request, path string) (standOp, bool) {
 	case r.Method == http.MethodPost && path == "/containers/create":
 		return standOp{verb: "create", name: r.URL.Query().Get("name")}, true
 
+	case r.Method == http.MethodPost && path == "/images/create":
+		// What the SDK's ImagePull sends: the fully qualified name and the tag as two
+		// query parameters, which the stand joins back into the reference the caller
+		// asked for. The id is left empty on purpose — a pull targets no container, so
+		// the "is this container still there" check must not fire on it.
+		return standOp{verb: "pull", name: r.URL.Query().Get("fromImage") + ":" + r.URL.Query().Get("tag")}, true
+
 	case strings.HasPrefix(path, "/containers/"):
 		id, action, _ := strings.Cut(strings.TrimPrefix(path, "/containers/"), "/")
 
@@ -464,6 +640,14 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := stripAPIVersion(r.URL.Path)
 
 	if path == "/_ping" {
+		// Counted rather than recorded as a call: it is the SDK's own version
+		// negotiation, not a step of the recreate, and the sequence assertions read the
+		// steps. The count is what tells a recreate that built ONE client from one that
+		// built a second for the pull.
+		s.mu.Lock()
+		s.pings++
+		s.mu.Unlock()
+
 		w.Header().Set("Api-Version", standAPIVersion)
 		w.Header().Set("Ostype", "linux")
 		w.WriteHeader(http.StatusOK)
@@ -483,6 +667,10 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.calls = append(s.calls, op.detail())
 	s.seen[op.verb]++
+	// Which node the call was routed to, kept per verb: every call of one recreate
+	// carries the same target, so the last one seen is that recreate's answer, and
+	// keeping it per verb is what lets a test ask specifically what the PULL carried.
+	s.targets[op.verb] = r.Header.Get(portainer.PortainerAgentTargetHeader)
 	// The detail is looked up first so a test can single out one call of a verb
 	// (the rename BACK, say) without also scripting its sibling; the count-based
 	// script is last, for the calls a test cannot name.
@@ -526,6 +714,31 @@ func (s *dockerStand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch op.verb {
+	case "pull":
+		// A pull is answered at once and then streams JSON progress lines for as long
+		// as the download takes. The first line is flushed before the stall so the
+		// headers are genuinely on the wire and the client's ImagePull has returned:
+		// what a slow pull then runs out of is the time to read the BODY, which is the
+		// failure under test. The stall gives up as soon as the caller does, so a test
+		// that scripts a long one still finishes the moment the budget fires.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"Pulling from ` + op.name + `"}` + "\n"))
+
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+
+		if delay := s.pullDelay(); delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-r.Context().Done():
+				return
+			}
+		}
+
+		_, _ = w.Write([]byte(`{"status":"Status: Downloaded newer image for ` + op.name + `"}` + "\n"))
+
 	case "inspect":
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(s.inspectResponse(op.id))
@@ -705,6 +918,365 @@ func TestRecreateReplacesTheOriginalContainer(t *testing.T) {
 		"remove:" + standOldID,
 		"inspect:" + standNewID,
 	}, stand.recorded())
+}
+
+// TestRecreatePullsTheImageBeforeReplacingTheContainer pins the forced-pull
+// sequence: the image comes down FIRST, and only then does the recreate touch the
+// original. That ordering is what makes a failed pull harmless, and it is also
+// what the test below leans on. A pull that fits inside its budget must not
+// disturb anything else — the ordinary sequence follows it exactly as it runs
+// without a pull.
+func TestRecreatePullsTheImageBeforeReplacingTheContainer(t *testing.T) {
+	t.Parallel()
+
+	svc, stand, endpoint := newRecreateStand(t)
+	// A budget two orders of magnitude above the stall, so the assertion is about
+	// the pull fitting rather than about how busy the machine running the suite is.
+	svc.pullTimeout = 5 * time.Second
+	stand.slowPull(20 * time.Millisecond)
+
+	newContainer, err := svc.Recreate(t.Context(), endpoint, standOldID, true, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, newContainer)
+	require.Equal(t, standNewID, newContainer.ID)
+
+	require.Equal(t, []string{
+		"inspect:" + standOldID,
+		"pull:" + standPulledImage,
+		"stop:" + standOldID,
+		"rename:" + standOldID + "->" + standName + "-old",
+		"disconnect:" + standNetworkID + ":" + standOldID,
+		"create:" + standName,
+		"start:" + standNewID,
+		"remove:" + standOldID,
+		"inspect:" + standNewID,
+	}, stand.recorded())
+}
+
+// TestRecreateGivesThePullAClientOfItsOwn pins the half of the fix that no
+// timing assertion can see: the pull is issued on a SECOND Docker client, built
+// with a timeout of its own, rather than on the short-timeout control-plane client
+// the rest of the recreate uses. Reusing that one is precisely the bug — it
+// carries the factory's 60s http.Client.Timeout, which bounds the whole exchange
+// including the reading of the progress stream, so any download longer than a
+// minute dies mid-stream.
+//
+// The stand counts it through /_ping. The SDK negotiates its API version once per
+// client and that costs exactly one ping, so the ping count IS the number of
+// clients the recreate built and used: one without a pull, two with one. Were the
+// pull handed the control-plane client again, the second ping would never be
+// issued and the count would fall back to one.
+//
+// What this cannot see is the VALUE the second client's timeout was built with. A
+// pull runs under two bounds cut from one budget, and the context deadline is
+// armed before the request is sent, so the context always expires first and the
+// client's timeout never gets to fire — unless the exchange outlasts the factory's
+// 60s default, which is exactly the case no test here is willing to sit through. A
+// pull client built with a nil timeout would therefore pass this test while
+// quietly reinstating the 60s ceiling for tcp and agent endpoints; the local-socket
+// test below is unaffected either way, since a local client has no timeout at all.
+// That value is pinned instead by
+// TestRecreateAsksForThePullClientWithThePullBudget, which watches the factory
+// rather than the wire.
+func TestRecreateGivesThePullAClientOfItsOwn(t *testing.T) {
+	t.Parallel()
+
+	pings := func(t *testing.T, forcePullImage bool) int {
+		t.Helper()
+
+		svc, stand, endpoint := newRecreateStand(t)
+
+		newContainer, err := svc.Recreate(t.Context(), endpoint, standOldID, forcePullImage, "", "")
+		require.NoError(t, err)
+		require.Equal(t, standNewID, newContainer.ID)
+
+		return stand.pingCount()
+	}
+
+	require.Equal(t, 1, pings(t, false), "a recreate without a pull needs one client and negotiates once")
+	require.Equal(t, 2, pings(t, true), "a forced pull runs on a client of its own, which negotiates again")
+}
+
+// createClientCall is one CreateClient the service made, as it was asked for.
+//
+// The timeout is kept as a copy of the value the argument pointed at rather than
+// as the pointer itself: pullImage passes the address of a local budget variable,
+// so a recorder holding on to the pointer would report whatever that local
+// happens to contain by the time the assertion reads it, not what the call asked
+// for. A nil pointer here means the same as on the wire to the factory — "use
+// your default".
+type createClientCall struct {
+	nodeName string
+	timeout  *time.Duration
+}
+
+// recordingFactory forwards every CreateClient to the real factory and records
+// what it was asked for. It wraps that factory rather than standing in for it
+// because the recreate still has to run for real end to end: what is under test
+// is the ARGUMENTS, and a stub handing back a client of its own would stop pinning
+// that the pull those arguments belong to actually happens.
+type recordingFactory struct {
+	ClientFactory
+	calls []createClientCall
+}
+
+func (f *recordingFactory) CreateClient(endpoint *portainer.Endpoint, nodeName string, timeout *time.Duration) (*sdkclient.Client, error) {
+	call := createClientCall{nodeName: nodeName}
+	if timeout != nil {
+		budget := *timeout
+		call.timeout = &budget
+	}
+
+	f.calls = append(f.calls, call)
+
+	return f.ClientFactory.CreateClient(endpoint, nodeName, timeout)
+}
+
+// TestRecreateAsksForThePullClientWithThePullBudget pins the argument that
+// carries the fix: the timeout the pull's own client is BUILT with. The test
+// above pins that a second client exists at all; this one pins what it was asked
+// for, and only the two together cover the fix. Revert this one argument to nil
+// and the second client is still built, still used, still cut by its own context
+// in every test here — while every tcp and agent endpoint quietly goes back to the
+// factory's 60s ceiling and the outage returns.
+//
+// It has to be watched at the factory because there is nowhere else to watch it.
+// The budget disappears into an unexported http.Client.Timeout inside the SDK
+// client, and it never fires under test: the pull's context is armed first and so
+// always expires first, which leaves an exchange outlasting a whole minute as the
+// only one that could tell a 60s client from an hour-long one.
+//
+// Both calls are asserted, because the control-plane client asking for NO timeout
+// is a decision rather than an omission: it keeps the factory's 60s default, so an
+// engine that stops answering cannot pin a caller that brought no deadline of its
+// own. The recreate here runs with the default budget and a caller carrying no
+// deadline, which makes defaultPullTimeout the exact value the pull must ask for —
+// an assertion that fails both on a revert to nil and on a wrong value.
+func TestRecreateAsksForThePullClientWithThePullBudget(t *testing.T) {
+	t.Parallel()
+
+	svc, stand, endpoint := newRecreateStand(t)
+	factory := &recordingFactory{ClientFactory: svc.factory}
+	svc.factory = factory
+
+	newContainer, err := svc.Recreate(t.Context(), endpoint, standOldID, true, "", standNodeName)
+	require.NoError(t, err)
+	require.Equal(t, standNewID, newContainer.ID)
+
+	callIndex(t, stand.recorded(), "pull:"+standPulledImage)
+
+	require.Len(t, factory.calls, 2, "one client for the control plane, and then one for the pull")
+
+	control, pull := factory.calls[0], factory.calls[1]
+
+	require.Nil(t, control.timeout,
+		"the control-plane client keeps the factory's short default on purpose: an unresponsive engine must not pin the caller")
+
+	require.NotNil(t, pull.timeout,
+		"the pull client is asked for with a timeout of its own, or the factory's 60s default silently bounds the download")
+	require.Equal(t, defaultPullTimeout, *pull.timeout,
+		"and that timeout is the pull's whole budget")
+
+	require.Equal(t, standNodeName, pull.nodeName,
+		"the pull is aimed at the node the recreate itself is aimed at")
+	require.Equal(t, control.nodeName, pull.nodeName,
+		"the same node the rest of the recreate talks to")
+}
+
+// TestRecreateLeavesTheOriginalUntouchedWhenThePullOutlivesItsBudget is the
+// non-destructive half of the pull, and the property an operator actually depends
+// on when an image turns out to be bigger than the budget allows: the update did
+// not happen, and that is the whole of it. The pull runs before the first step
+// that takes the workload down, so a budget that fires here must leave the
+// original running under its own name with nothing to roll back — never a
+// container left in pieces because the download was too slow.
+//
+// The stall is served part way through the progress stream rather than before the
+// answer, which is how the bug bites in production: the budget has to cover the
+// reading of the body, not just the wait for an answer, and an image whose
+// download outlasts it is cut off mid-stream.
+func TestRecreateLeavesTheOriginalUntouchedWhenThePullOutlivesItsBudget(t *testing.T) {
+	t.Parallel()
+
+	svc, stand, endpoint := newRecreateStand(t)
+	svc.pullTimeout = 100 * time.Millisecond
+	// Far beyond the budget, and it costs the suite nothing: the stand gives the
+	// stall up the moment the caller gives the request up.
+	stand.slowPull(time.Minute)
+
+	newContainer, err := svc.Recreate(t.Context(), endpoint, standOldID, true, "", "")
+	require.Error(t, err)
+	require.Nil(t, newContainer)
+	require.ErrorContains(t, err, "pull image error "+standPulledImage)
+
+	var restoreErr *RestoreError
+	require.NotErrorAs(t, err, &restoreErr, "nothing was taken down, so there is nothing to restore")
+
+	// The recreate got exactly as far as the pull and stopped there. Asserted as the
+	// WHOLE sequence rather than as a handful of absent calls: a call the stand
+	// records under a slightly different detail than the one a "must not appear"
+	// assertion names would silently check nothing at all, and this way anything at
+	// all issued after the failed pull fails the test too.
+	require.Equal(t, []string{
+		"inspect:" + standOldID,
+		"pull:" + standPulledImage,
+	}, stand.recorded(), "the pull was attempted, and not one step beyond it")
+
+	require.True(t, stand.isRunning(standOldID), "the original container never stopped serving")
+	require.Equal(t, standName, stand.nameOf(standOldID), "under its own name")
+}
+
+// TestRecreateCutsAPullOnALocalEndpointByItsOwnContext pins the OTHER half of the
+// fix: the pull runs on a context with a deadline of its own, and not on the
+// caller's context as it stood.
+//
+// A unix-socket endpoint is what makes that half visible. createLocalClient
+// ignores the timeout argument entirely, so the pull client for a local endpoint
+// carries no http.Client.Timeout at all and the context is the only bound the pull
+// has — the same is true of npipe:// on Windows, and of every Portainer managing
+// the engine it runs beside. The caller here brings no deadline, exactly like the
+// recreate HTTP handler, which passes context.TODO(). Take the pull's own context
+// away and there is nothing left to cut the download: the stall would simply run
+// to completion and the recreate would succeed.
+func TestRecreateCutsAPullOnALocalEndpointByItsOwnContext(t *testing.T) {
+	t.Parallel()
+
+	svc, stand, endpoint := newLocalRecreateStand(t)
+	svc.pullTimeout = 200 * time.Millisecond
+	// An order of magnitude over the budget, and no more: the point is that the
+	// budget fires, and a test that has to WAIT for the stall to end has already
+	// failed. Nothing waits for it in the passing case, and in the failing one the
+	// suite pays two seconds and gets an assertion rather than a hang.
+	stand.slowPull(2 * time.Second)
+
+	newContainer, err := svc.Recreate(t.Context(), endpoint, standOldID, true, "", "")
+	require.Error(t, err, "a pull past its budget must fail even where no client timeout can cut it")
+	require.Nil(t, newContainer)
+	require.ErrorContains(t, err, "pull image error "+standPulledImage)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "cut by the pull's own deadline")
+
+	require.Equal(t, []string{
+		"inspect:" + standOldID,
+		"pull:" + standPulledImage,
+	}, stand.recorded(), "the pull was attempted, and not one step beyond it")
+
+	require.True(t, stand.isRunning(standOldID), "the original container never stopped serving")
+}
+
+// TestRecreatePullTargetsTheSameNodeAsTheRecreate pins that the pull's own client
+// still routes to the node the recreate was asked for. On an agent cluster the
+// node is carried by a header the factory adds from nodeName, and it is set for
+// agent endpoints only — so a pull client built without it would not fail, it
+// would quietly land on whichever node the agent picked. The node actually
+// recreating the container would then build it from the image IT already has, and
+// an update that reported success would leave the old code running.
+func TestRecreatePullTargetsTheSameNodeAsTheRecreate(t *testing.T) {
+	t.Parallel()
+
+	svc, stand, endpoint := newAgentRecreateStand(t)
+
+	newContainer, err := svc.Recreate(t.Context(), endpoint, standOldID, true, "", standNodeName)
+	require.NoError(t, err)
+	require.Equal(t, standNewID, newContainer.ID)
+
+	require.Equal(t, standNodeName, stand.target("pull"), "the image came down on the targeted node")
+	require.Equal(t, standNodeName, stand.target("create"), "the same node the new container is built on")
+}
+
+// TestPullBudgetFallsBackToTheDefaultBudget guards the zero value the way
+// TestRestoreContextFallsBackToTheDefaultBudget does for the restore: a
+// ContainerService built without NewContainerService — the way an embedder builds
+// one — carries no pull budget, and a zero timeout is an already-expired context.
+// Read straight, it would fail every forced pull before the request left the
+// process, which is not a slow pull but a recreate that can never pull at all.
+// The accessor is only half of it, so the fallback is carried through to a real
+// forced-pull recreate as well.
+func TestPullBudgetFallsBackToTheDefaultBudget(t *testing.T) {
+	t.Parallel()
+
+	_, stand, endpoint := newRecreateStand(t)
+
+	svc := &ContainerService{
+		factory:   dockerclient.NewClientFactory(nil, nil),
+		dataStore: standDataStore(),
+	}
+	require.Zero(t, svc.pullTimeout, "the unset budget is the point of the test")
+	require.Equal(t, defaultPullTimeout, svc.pullBudget(t.Context()), "a zero budget must not leave the pull no time at all")
+
+	newContainer, err := svc.Recreate(t.Context(), endpoint, standOldID, true, "", "")
+	require.NoError(t, err)
+	require.Equal(t, standNewID, newContainer.ID)
+
+	callIndex(t, stand.recorded(), "pull:"+standPulledImage)
+}
+
+// TestPullBudgetReservesAShareOfTheCallersDeadline pins the reserve the pull
+// leaves behind. The pull is the first step and the longest, and every step that
+// follows it is one that takes the workload down — so a pull allowed to spend the
+// caller's whole window and then SUCCEED is worse than one that fails, because it
+// hands the stop a context with nothing left in it and a stop whose answer is lost
+// lands in the restore path. Auto-update is the caller that matters here: it
+// bounds a whole recreate with ten minutes.
+func TestPullBudgetReservesAShareOfTheCallersDeadline(t *testing.T) {
+	t.Parallel()
+
+	svc := &ContainerService{pullTimeout: time.Hour}
+
+	require.Equal(t, time.Hour, svc.pullBudget(t.Context()),
+		"a caller with no deadline has nothing to reserve out of, so the whole budget stands")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
+	defer cancel()
+
+	// Five sixths of what the caller has left, give or take the microseconds spent
+	// getting here.
+	require.InDelta(t, (10 * time.Minute * (pullReserveShare - 1) / pullReserveShare).Seconds(),
+		svc.pullBudget(ctx).Seconds(), 1,
+		"the pull gets all but one share of the caller's remaining time")
+
+	svc.pullTimeout = time.Second
+	require.Equal(t, time.Second, svc.pullBudget(ctx),
+		"the cap only ever shortens the budget, it never stretches it to fill the caller's window")
+
+	// A caller that is already out of time gets a pull that is already out of time.
+	// The zero budget is deliberate: the fallback to the default must not resurrect
+	// an expired caller into an hour-long pull.
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Minute))
+	defer cancelExpired()
+
+	require.Negative(t, (&ContainerService{}).pullBudget(expired),
+		"an expired caller yields an expired pull, never an unbounded one")
+}
+
+// TestPullImageRefusesAnAlreadySpentBudget covers the one branch where BOTH bounds
+// pullImage cuts from its budget would otherwise be missing. A caller whose
+// deadline has passed leaves a non-positive budget, and net/http reads a
+// non-positive http.Client.Timeout as NO timeout — so handing that value to the
+// factory builds exactly the unbounded client the timeout argument exists to
+// prevent, on a context that is already dead. No client is built at all instead.
+//
+// The error matters as much as the missing client: ctx.Err() can still be nil for
+// the instant after a deadline passes, and a nil coming back from here would be
+// read as a pull that succeeded — a forced recreate would go on to take the
+// workload down having pulled nothing.
+func TestPullImageRefusesAnAlreadySpentBudget(t *testing.T) {
+	t.Parallel()
+
+	factory := &recordingFactory{ClientFactory: dockerclient.NewClientFactory(nil, nil)}
+	svc := &ContainerService{factory: factory, dataStore: standDataStore(), pullTimeout: time.Hour}
+
+	expired, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Minute))
+	defer cancel()
+
+	require.Negative(t, svc.pullBudget(expired), "a spent deadline is the whole premise of the test")
+
+	endpoint := &portainer.Endpoint{ID: 1, Name: "stand", Type: portainer.DockerEnvironment, URL: "tcp://127.0.0.1:1"}
+
+	err := svc.pullImage(expired, endpoint, "", images.Image{})
+	require.Error(t, err, "a pull with no time left must never come back as a success")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	require.Empty(t, factory.calls, "no client is built for a pull there is no time left to make")
 }
 
 // TestRecreateFailedStartRestoresTheOriginal covers the ordinary rollback: the
