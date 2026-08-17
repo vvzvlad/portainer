@@ -80,7 +80,7 @@ Read-only inventory over both Portainer servers via their APIs.
 
 This is the part that determines the entire design, and it is counter-intuitive.
 
-### 3.1 Compose runs inside the Portainer Server container. Always.
+### 3.1 Compose always runs inside the Portainer Server container
 
 `pkg/libstack/compose/composeplugin.go` imports the compose engine as a **library**
 and calls `composeService.Up(ctx, project, opts)`:
@@ -172,7 +172,40 @@ backup, no transient file to clean up and no window where a crash leaves one beh
 So the leak channels into an agent's context are exactly two: literals in the body,
 and the `Env` field. Both are removed by this design.
 
-### 3.6 Residual leak channels (not closed by this work)
+### 3.6 The container-automation daemon does not go through this path
+
+Checked because a neighbouring session warned that the fork's auto-update daemon
+redeploys stacks and would therefore bypass the resolver. **It does not** — the
+concern is real but the mechanism is different, and the difference matters.
+
+`grep -rn "DeployComposeStack(" api --include="*.go"` gives callers only in
+`api/stacks/deployments/{deployer,deployment_compose_config,deploy}.go` and
+`api/http/handler/stacks/stack_start.go`. There is **no** call from
+`api/containerautomation` — that package works one level down, on containers:
+`ContainerInspect` → pull → recreate → health gate → rollback (`autoupdate.go`,
+`seams.go`). It reads the compose stack name only to label a notification.
+
+So every compose deploy really does funnel through `DeployComposeStack` →
+`ComposeStackManager.Up`, and the resolver placed there covers all of them,
+including `StackStart` and the git-polling `RedeployWhenChanged`.
+
+**But the check surfaced a genuine operational consequence.** Because the daemon
+recreates a container from the *existing* container's config, it reuses the `Env`
+that container was created with — values already substituted at its last real
+deploy. Therefore:
+
+- an auto-update will never deploy an unresolved reference (it never re-substitutes),
+  which is the good half;
+- an auto-update will also never pick up a **rotated** secret. A container updated by
+  the daemon — or by watchtower, which the park currently runs on and which behaves the
+  same way — keeps the old value until someone redeploys the stack for real.
+
+Rotation therefore means: change the value in the vault **and redeploy the stack**. An
+image update is not a rotation. This has to be in the migration runbook, because the
+failure is silent: the service keeps working on the old credential until the day the
+old credential is revoked.
+
+### 3.7 Residual leak channels (not closed by this work)
 
 | Channel | Status |
 | --- | --- |
@@ -181,7 +214,7 @@ and the `Env` field. Both are removed by this design.
 | `Stack.DeploymentStatus[].Message` | **Risk, unverified.** `api/stacks/stackutils/stack_status.go` stores a failed deploy's `err.Error()` in the DB and `StackInspect` returns it. Compose errors normally name variables, not values, but it is not proven that a substituted value can never appear. Worth a look during implementation. |
 | Deploy logs | Safe by name: compose logrus → zerolog via `pkg/libstack/compose/logwriter.go`; the notable message is `template.go` warning with the variable **name**. Container log, not exposed over the API. |
 
-### 3.7 A latent fork bug found on the way
+### 3.8 A latent fork bug found on the way
 
 `api/http/handler/stacks/stack_versioning.go`, `collectStackFilesContent()` copies
 only `stack.EntryPoint` and `stack.AdditionalFiles` into the new `v<N>` directory.
@@ -200,7 +233,7 @@ version (rolling secrets back too) or from the current one?
 
 ### 4.1 Shape
 
-```
+```text
 compose body        stack.Env            resolver socket        Vaultwarden
 ────────────        ─────────            ───────────────        ───────────
 ${DB_PASSWORD:?}    DB_PASSWORD=         batch fetch, one       collection
@@ -348,7 +381,7 @@ in the entrypoint at start.
 DNS resolves `vaultwarden.vvzvlad.xyz` to a public address, but the internal path is
 open and the certificate validates on it:
 
-```
+```text
 tcp 10.31.40.120:443            open
 curl --resolve …:10.31.40.120   http=200  tls_verify=0  remote_ip=10.31.40.120
 curl (public)                   http=200            remote_ip=46.188.5.21
@@ -392,7 +425,7 @@ Recorded so they are not re-proposed.
 | Option | Why rejected |
 | --- | --- |
 | Values in the stack `Env` field, pushed at deploy | Values sit in Portainer's DB — visible via `StackInspect`. Fails requirement 1. |
-| Plain `.env` in the stack's project directory | A materialised copy inside `portainer_data`; `filesToBackup` includes `compose`, so any admin token pulls every `.env` through `POST /backup`. Also dies on redeploy (§3.7). |
+| Plain `.env` in the stack's project directory | A materialised copy inside `portainer_data`; `filesToBackup` includes `compose`, so any admin token pulls every `.env` through `POST /backup`. Also dies on redeploy (§3.8). |
 | Env file on the **target host**, referenced by path | Compose runs inside the Portainer container (§3.2) — it cannot see the target host's filesystem at all. Mechanically impossible. |
 | Files on borneo rendered from a laptop over ssh | Ties server infrastructure to a personal machine, and is a second copy that drifts. |
 | Portainer speaks to Vaultwarden directly (crypto in the fork) | 400–700 lines of security-critical Go, the org-key path is where reference implementations break, and it puts the vault credential inside Portainer. |
@@ -437,7 +470,7 @@ stacks, never copies, or rotation will split services apart.
 - The `vaultwarden` stack itself (id 30, island.lc) must be **excluded** from the
   scheme, or deploying it would require itself. It has no secrets in its compose, so
   the exclusion is free — but it has to be explicit.
-- `Config.Env` visibility through the docker proxy (§3.6).
+- `Config.Env` visibility through the docker proxy (§3.7).
 
 ---
 
