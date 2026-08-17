@@ -298,6 +298,47 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 	ctx, cancel := context.WithTimeout(s.baseCtx, recreateTimeout)
 	defer cancel()
 
+	// Hold the original container for the rest of this pass: an auto-heal restart
+	// landing in the middle of the recreate would fight it for the same container,
+	// and the two would race over its lifecycle. The early returns above take no
+	// hold — nothing was acted on there.
+	//
+	// Taking it BEFORE Recreate is load-bearing twice over. Recreate pulls the image
+	// first and only then stops the container, so the original stays up — unhealthy,
+	// and listed as such — for however long the pull takes. And when the recreate
+	// fails, Recreate's restore defer renames the original back from "<name>-old" and
+	// starts it again under its ORIGINAL id (api/docker/container.go), so the whole
+	// restore path is covered by this hold too, but only because it was already taken
+	// when Recreate was entered.
+	//
+	// It narrows the window rather than closing the race: auto-heal consults the hold
+	// at one line and calls ContainerRestart at another, so a restart it decided on
+	// just before this hold — or one already in flight when Recreate issues its stop
+	// and rename — still lands mid-recreate. There is no hold in the other direction
+	// either: auto-heal does not block an update.
+	s.acquireUpdateHold(endpoint.ID, c.ID)
+	defer s.releaseUpdateHold(endpoint.ID, c.ID)
+
+	// Hold the container NAME as well, and from here rather than after the recreate,
+	// because the new container's id does not exist until Recreate returns while the
+	// new container itself is running well before that. Recreate creates it under the
+	// ORIGINAL name (api/docker/container.go, step 6), starts it (step 8), and only
+	// then removes the old container (step 9) and inspects the new one — so between
+	// the start and the id hold taken below there is a real window (a blocking
+	// removal plus a full inspect round-trip) in which the new container is running,
+	// reporting health, and visible in auto-heal's health=unhealthy list. A container
+	// with an aggressive healthcheck (interval 1s, retries 1, no start period, all
+	// ordinary in compose files) turns unhealthy inside it; an auto-heal restart
+	// there resets Docker health to "starting" and the gate waits instead of rolling
+	// back — exactly what this interlock exists to prevent.
+	//
+	// The name is recreate-stable, so this hold covers the new container from birth,
+	// and keeps covering it across the rollback recreate, which creates a third
+	// container under the same name. The old container leaves the name (Recreate
+	// renames it to "<name>-old", step 3) but stays covered by its id hold above.
+	s.acquireUpdateHoldByName(endpoint.ID, c.Name)
+	defer s.releaseUpdateHoldByName(endpoint.ID, c.Name)
+
 	newContainer, err := s.containerService.Recreate(ctx, endpoint, c.ID, true, "", "")
 	if err != nil {
 		// Recreate preserves config and keeps the original container until the new one
@@ -366,6 +407,20 @@ func (s *Service) updateStandalone(cli dockerClient, endpoint *portainer.Endpoin
 	newImage := ""
 	if newContainer != nil {
 		newImage = newContainer.Config.Image
+
+		// Hold the new container by id now that it has one. An auto-heal restart
+		// landing mid-gate resets Docker health to "starting", so the gate would keep
+		// waiting instead of rolling back and could accept a failed update as a good
+		// one. A restart preserves the container id, so this hold covers the gate
+		// window and the rollback's operations on THIS id (the re-tag and the recreate
+		// it hands this id to).
+		//
+		// It does not cover what the rollback then produces: the rollback's own
+		// Recreate (see rollback) creates a THIRD container with a new id, which is
+		// never held by id at all. What carries across that recreate is the name hold
+		// taken above, still in scope here and released only when this pass returns.
+		s.acquireUpdateHold(endpoint.ID, newContainer.ID)
+		defer s.releaseUpdateHold(endpoint.ID, newContainer.ID)
 	}
 
 	// Health gate: roll back if the new container does not become healthy in time.
@@ -429,6 +484,34 @@ func skipUnnamedForRollback(rollback bool, name string) bool {
 // the ID cannot key state across an update; the name is preserved.
 func rollbackKey(endpointID portainer.EndpointID, name string) string {
 	return fmt.Sprintf("%d/%s", int(endpointID), name)
+}
+
+// updateHoldIDKey identifies a hold on one concrete container, by its id; a hold
+// taken this way follows that container and only that container. The "id:"/"name:"
+// namespaces keep a container id from ever colliding with a container name.
+//
+// Both keys are endpoint-scoped, like rollbackKey, which leaves two cases
+// uncovered for two different reasons:
+//
+//   - Two environments of THIS Portainer pointing at the same Docker engine do not
+//     interlock with each other. Nothing technical stops it — they share this
+//     process and this map, and dropping the endpoint from the key would be enough
+//     — it is a deliberate choice: the endpoint is the unit of automation
+//     everywhere else in this package (scheduling, scope, retry accounting), and
+//     such a pair already runs two independent auto-update passes over the same
+//     containers. Holds are not what makes that configuration safe, so widening
+//     them would not make it so.
+//   - Two separate Portainer INSTANCES sharing an engine cannot interlock at all:
+//     that would need coordination state outside this process.
+func updateHoldIDKey(endpointID portainer.EndpointID, containerID string) string {
+	return fmt.Sprintf("%d/id:%s", int(endpointID), containerID)
+}
+
+// updateHoldNameKey identifies a hold on whatever container currently owns a
+// name. Like rollbackKey it survives a recreate (which assigns a new container id
+// but preserves the name), so it covers a container that does not exist yet.
+func updateHoldNameKey(endpointID portainer.EndpointID, name string) string {
+	return fmt.Sprintf("%d/name:%s", int(endpointID), name)
 }
 
 // resolveRemoteDigest fetches the current remote image digest for a reference. It

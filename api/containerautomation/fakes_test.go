@@ -56,6 +56,12 @@ type fakeDockerClient struct {
 	inspectByID    map[string]container.InspectResponse
 	inspectErrByID map[string]error
 
+	// inspectHook, when set, runs on every ContainerInspect before the programmed
+	// response is returned. It lets a test observe service state at the exact moment
+	// the health gate polls the new container, which is the only window where the
+	// auto-update hold has to be observable from the outside.
+	inspectHook func(containerID string)
+
 	imageTagErr    error
 	imageRemoveErr error
 	restartErrByID map[string]error
@@ -72,6 +78,9 @@ func newFakeDockerClient(seq *callSeq) *fakeDockerClient {
 
 func (f *fakeDockerClient) ContainerInspect(_ context.Context, containerID string) (container.InspectResponse, error) {
 	f.seq.record("inspect:" + containerID)
+	if f.inspectHook != nil {
+		f.inspectHook(containerID)
+	}
 	if err := f.inspectErrByID[containerID]; err != nil {
 		return container.InspectResponse{}, err
 	}
@@ -115,10 +124,21 @@ type fakeRecreator struct {
 	result *types.ContainerJSON
 	err    error
 	calls  []recreateCall
+
+	// recreateHook, when set, runs on every Recreate before the programmed result is
+	// returned. It mirrors inspectHook on fakeDockerClient: a recreate is the only
+	// window in which the holds taken around it are observable from the outside — the
+	// one on the ORIGINAL container (which stays up, and unhealthy, for the whole
+	// image pull the real Recreate does first), and the one on the container name
+	// (which must still be held when the rollback recreates under it).
+	recreateHook func(containerID string)
 }
 
 func (f *fakeRecreator) Recreate(_ context.Context, _ *portainer.Endpoint, containerID string, forcePullImage bool, _, _ string) (*types.ContainerJSON, error) {
 	f.seq.record("recreate:" + containerID)
+	if f.recreateHook != nil {
+		f.recreateHook(containerID)
+	}
 	f.calls = append(f.calls, recreateCall{containerID: containerID, forcePullImage: forcePullImage})
 	if f.err != nil {
 		return nil, f.err
