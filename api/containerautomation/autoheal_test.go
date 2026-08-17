@@ -1,8 +1,14 @@
 package containerautomation
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	portainer "github.com/portainer/portainer/api"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDecideRestart(t *testing.T) {
@@ -133,5 +139,143 @@ func TestRetryStateSurvivesStartingTick(t *testing.T) {
 	}
 	if state.attempts != 1 {
 		t.Errorf("tick 3: attempts = %d, want 1 (state survived, not reset)", state.attempts)
+	}
+}
+
+// TestHealContainersSkipsContainersHeldByAnUpdate locks in the auto-heal side of
+// the interlock with auto-update. While an update pass holds a container
+// (recreate -> health gate -> rollback), auto-heal must not restart it: a restart
+// mid-gate resets Docker health to "starting", so the gate keeps waiting instead
+// of rolling back and a failed update can be accepted as a good one.
+//
+// Both keys are covered. A hold by id is the ordinary case; a hold by NAME is the
+// one the recreate window produces, where the running container is brand new, its
+// id has never been seen by anybody, and the name is the only thing tying it to
+// the update in progress.
+//
+// A hold also has to be pinned across ticks, not merely honoured on the first
+// one: it spans the whole recreate plus the gate window, i.e. many heal ticks,
+// and auto-heal must suppress every one of them. Folding the lookup and the
+// once-per-hold log claim into one condition would honour only the first tick
+// and restart the container mid-gate on every tick after it — the exact
+// failure this interlock exists to prevent.
+//
+// The skip is also free: it happens before the retry accounting, so a held tick
+// does not consume the container's restart budget and healing resumes with a full
+// budget once the hold is released. Holds are endpoint-scoped, so the same
+// container on another environment is unaffected.
+func TestHealContainersSkipsContainersHeldByAnUpdate(t *testing.T) {
+	const (
+		containerID    = "c1"
+		name           = "web"
+		healEndpointID = portainer.EndpointID(1)
+	)
+
+	tests := []struct {
+		name string
+		// holdEndpoint is the environment the hold is taken for; healing always runs
+		// against healEndpointID.
+		holdEndpoint portainer.EndpointID
+		// byName takes the hold on the container's NAME instead of its id, leaving the
+		// id unheld — the state the recreate window produces.
+		byName bool
+		// ticksUnderHold is how many heal passes run while the hold is still taken. A
+		// hold spans the whole recreate plus the gate window — many ticks — and every
+		// one of them must be suppressed, so more than one pass here is not padding: it
+		// is the only way to catch a skip that is honoured once and then dropped.
+		ticksUnderHold int
+		// releaseAndReheal releases the hold after those passes and runs one more, as
+		// auto-heal would do on its next tick once the update finished.
+		releaseAndReheal bool
+		wantRestarts     int
+		wantAttempts     int
+	}{
+		{
+			name:           "a held container is neither restarted nor charged for the tick",
+			holdEndpoint:   healEndpointID,
+			ticksUnderHold: 1,
+			wantRestarts:   0,
+			wantAttempts:   0,
+		},
+		{
+			name:           "a hold suppresses every tick it spans, not just the first",
+			holdEndpoint:   healEndpointID,
+			ticksUnderHold: 3,
+			wantRestarts:   0,
+			wantAttempts:   0,
+		},
+		{
+			name:           "a container whose name is held is skipped even though its id is not",
+			holdEndpoint:   healEndpointID,
+			byName:         true,
+			ticksUnderHold: 3,
+			wantRestarts:   0,
+			wantAttempts:   0,
+		},
+		{
+			name:             "healing resumes with a full budget once the hold is released",
+			holdEndpoint:     healEndpointID,
+			ticksUnderHold:   1,
+			releaseAndReheal: true,
+			wantRestarts:     1,
+			wantAttempts:     1,
+		},
+		{
+			name:           "a hold on another environment does not suppress healing here",
+			holdEndpoint:   healEndpointID + 1,
+			ticksUnderHold: 1,
+			wantRestarts:   1,
+			wantAttempts:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seq := &callSeq{}
+			cli := newFakeDockerClient(seq)
+
+			s := &Service{
+				baseCtx:     context.Background(),
+				notifier:    &seqNotifier{seq: seq},
+				retries:     map[string]retryState{},
+				updateHolds: map[string]updateHold{},
+			}
+
+			endpoint := &portainer.Endpoint{ID: healEndpointID}
+			containers := []container.Summary{{ID: containerID, Names: []string{"/" + name}}}
+
+			acquire, release := s.acquireUpdateHold, s.releaseUpdateHold
+			held := containerID
+			if tt.byName {
+				acquire, release = s.acquireUpdateHoldByName, s.releaseUpdateHoldByName
+				held = name
+			}
+
+			acquire(tt.holdEndpoint, held)
+
+			for range tt.ticksUnderHold {
+				s.healContainers(cli, endpoint, ScopeAll, containers)
+			}
+
+			if tt.holdEndpoint == healEndpointID {
+				// A hold on THIS environment covers every tick it spans, so after all of
+				// them nothing may have happened yet. Assert it BEFORE any release below:
+				// afterwards the restart cooldown would deny the extra pass anyway, and the
+				// totals at the end would come out the same whether the hold was honoured
+				// or ignored.
+				require.Empty(t, seq.snapshot(),
+					"a hold suppresses every tick it spans, not just the first")
+			}
+
+			if tt.releaseAndReheal {
+				release(tt.holdEndpoint, held)
+				s.healContainers(cli, endpoint, ScopeAll, containers)
+			}
+
+			require.Equal(t, tt.wantRestarts, countPrefix(seq.snapshot(), "restart:"),
+				"a held container must not be restarted while an update acts on it")
+			require.Equal(t, tt.wantAttempts, s.getRetry(containerID).attempts,
+				"the skip happens before the retry accounting, so a held tick costs no restart budget")
+		})
 	}
 }

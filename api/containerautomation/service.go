@@ -103,6 +103,39 @@ type Service struct {
 	// of scope here; the cooldown-bounded single extra cycle is an acceptable
 	// trade-off against that complexity.
 	rolledBack map[string]rolledBackTarget
+
+	// updateHoldMu guards updateHolds.
+	updateHoldMu sync.Mutex
+	// updateHolds records the containers an auto-update pass is currently acting on
+	// (recreate -> health gate -> rollback), keyed by endpoint plus EITHER a
+	// container id or a (recreate-stable) container name — see updateHoldIDKey /
+	// updateHoldNameKey. Auto-heal skips a held container: restarting it mid-gate
+	// resets Docker health to "starting", which makes the gate wait instead of
+	// rolling back and can get a failed update accepted as a good one.
+	//
+	// The interlock is one-way and advisory: it narrows the window, it does not
+	// eliminate the race. Auto-heal reads the hold at one line and calls
+	// ContainerRestart at another, so a restart decided a moment before the hold was
+	// taken still lands on a container an update is already acting on; and a restart
+	// already in flight when Recreate issues its ContainerStop and rename fights the
+	// recreate over the same container from the other side. There is no hold in the
+	// opposite direction either — auto-heal never blocks an update from starting.
+	//
+	// The entries are leases, not records: every hold is released by a defer in
+	// updateStandalone, so unlike retries/rolledBack this map needs no pruning.
+	updateHolds map[string]updateHold
+}
+
+// updateHold is one lease taken by an auto-update pass over a container it is
+// acting on, for as long as it is acting on it.
+type updateHold struct {
+	at time.Time
+	// skipLogged records that auto-heal has already reported skipping this hold (see
+	// claimFirstSkipLog), so the skip is announced once per hold instead of once per
+	// heal tick. A hold spans the whole recreate (bounded by recreateTimeout, image
+	// pull included) plus the gate window, which is many ticks at any realistic
+	// check interval: the event is rare per update, not per tick.
+	skipLogged bool
 }
 
 // NewService creates a new container automation service. Call Start to schedule
@@ -138,6 +171,7 @@ func NewService(
 		retryBackoff:   webhookRetryBackoff,
 		retries:        make(map[string]retryState),
 		rolledBack:     make(map[string]rolledBackTarget),
+		updateHolds:    make(map[string]updateHold),
 	}
 	s.updatePass = s.runUpdatePass
 
@@ -382,6 +416,148 @@ func (s *Service) setRetry(containerID string, state retryState) {
 	defer s.retryMu.Unlock()
 
 	s.retries[containerID] = state
+}
+
+// addHold records a lease under an already-built key. It is the key-agnostic core
+// of the acquire wrappers below. The map is created lazily so a Service literal
+// that omits the field cannot panic on a hold.
+func (s *Service) addHold(key string) {
+	s.updateHoldMu.Lock()
+	defer s.updateHoldMu.Unlock()
+
+	if s.updateHolds == nil {
+		s.updateHolds = make(map[string]updateHold)
+	}
+
+	s.updateHolds[key] = updateHold{at: time.Now()}
+}
+
+// dropHold releases the lease under an already-built key. It is the key-agnostic
+// core of the release wrappers below.
+func (s *Service) dropHold(key string) {
+	s.updateHoldMu.Lock()
+	defer s.updateHoldMu.Unlock()
+
+	delete(s.updateHolds, key)
+}
+
+// acquireUpdateHold marks a concrete container as being acted on by an
+// auto-update pass, so auto-heal leaves it alone until the hold is released. An
+// empty container id is never held: it identifies no container and would make
+// every other unidentified container collide on the same key.
+func (s *Service) acquireUpdateHold(endpointID portainer.EndpointID, containerID string) {
+	if containerID == "" {
+		return
+	}
+
+	s.addHold(updateHoldIDKey(endpointID, containerID))
+}
+
+// releaseUpdateHold drops the hold on a container id, letting auto-heal act on it
+// again. It is always called from a defer, so the hold cannot outlive the pass.
+// The empty-id guard mirrors acquireUpdateHold's: what is never held is never
+// released.
+func (s *Service) releaseUpdateHold(endpointID portainer.EndpointID, containerID string) {
+	if containerID == "" {
+		return
+	}
+
+	s.dropHold(updateHoldIDKey(endpointID, containerID))
+}
+
+// acquireUpdateHoldByName holds whatever container currently owns a name. The
+// name is recreate-stable, so unlike an id hold it covers the container a recreate
+// is about to create under that name, from the moment the engine starts it. An
+// empty name is never held, for the same reason an empty id is not.
+func (s *Service) acquireUpdateHoldByName(endpointID portainer.EndpointID, name string) {
+	if name == "" {
+		return
+	}
+
+	s.addHold(updateHoldNameKey(endpointID, name))
+}
+
+// releaseUpdateHoldByName drops the hold on a container name. Like the id
+// release, it is always called from a defer and guards the empty name symmetrically
+// with the acquire.
+func (s *Service) releaseUpdateHoldByName(endpointID portainer.EndpointID, name string) {
+	if name == "" {
+		return
+	}
+
+	s.dropHold(updateHoldNameKey(endpointID, name))
+}
+
+// heldByUpdate reports whether an auto-update pass is currently acting on this
+// container, by id or by its (recreate-stable) name, and when the hold was taken.
+// It is a pure lookup: use claimFirstSkipLog to consume the once-per-hold Info,
+// so that asking about the state — as tests and any future caller do — cannot
+// silently burn the one line an operator gets.
+//
+// The id key is checked first and the name key second, the same order
+// claimFirstSkipLog uses, so with both taken the two agree on which hold they
+// mean whenever the map does not change between the two calls. They take
+// updateHoldMu separately, though, so if the id hold is released while the name
+// hold is still live, the claim may resolve a different hold than the lookup
+// reported. That costs at most a wrong held_for in one line — and it is the Info
+// one when the name hold's token is still unspent, so do not read this as a
+// Debug-only inaccuracy.
+func (s *Service) heldByUpdate(endpointID portainer.EndpointID, containerID, name string) (since time.Time, held bool) {
+	// Both keys are built before the lock: the formatting has no business inside the
+	// critical section. An empty id or name is never held (the acquires refuse it),
+	// so its key simply misses and the lookup falls through to the other one.
+	keys := [2]string{updateHoldIDKey(endpointID, containerID), updateHoldNameKey(endpointID, name)}
+
+	s.updateHoldMu.Lock()
+	defer s.updateHoldMu.Unlock()
+
+	for _, key := range keys {
+		if hold, ok := s.updateHolds[key]; ok {
+			return hold.at, true
+		}
+	}
+
+	return time.Time{}, false
+}
+
+// claimFirstSkipLog reports whether this is the first heal tick suppressed by the
+// hold on this container, marking it so every later tick is reported at Debug: a
+// hold spans the whole recreate plus the gate window, i.e. many ticks, and the
+// event is rare per update, not per tick. A fresh hold on the same key starts
+// unclaimed, so the next update over that container is announced again.
+//
+// The lock is not about heal passes racing each other — heal() admits one pass at
+// a time via s.running.CompareAndSwap. It is about the heal pass racing the update
+// pass: two different scheduler jobs on two different goroutines, one reading and
+// marking this map while the other adds and drops holds in it.
+//
+// Callers ask heldByUpdate first and claim only if held, so the hold can in
+// principle be released in between; the claim then finds nothing and returns
+// false, and the skip is logged at Debug. That is harmless — and cheaper than
+// holding the mutex across the log call.
+func (s *Service) claimFirstSkipLog(endpointID portainer.EndpointID, containerID, name string) bool {
+	keys := [2]string{updateHoldIDKey(endpointID, containerID), updateHoldNameKey(endpointID, name)}
+
+	s.updateHoldMu.Lock()
+	defer s.updateHoldMu.Unlock()
+
+	for _, key := range keys {
+		hold, ok := s.updateHolds[key]
+		if !ok {
+			continue
+		}
+
+		if hold.skipLogged {
+			return false
+		}
+
+		hold.skipLogged = true
+		s.updateHolds[key] = hold
+
+		return true
+	}
+
+	return false
 }
 
 // getRolledBack returns the rolled-back target for a key and whether it exists.
