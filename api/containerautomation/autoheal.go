@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
@@ -163,6 +164,42 @@ func (s *Service) healContainers(cli dockerClient, endpoint *portainer.Endpoint,
 			continue
 		}
 
+		// An auto-update pass is acting on this container. Leave it alone: restarting
+		// it now would put the two jobs in a fight over the same container's
+		// lifecycle, one recreating it while the other stops and starts it. That
+		// applies to every auto-update pass, whichever options it runs with, and holds
+		// are taken around the whole pass regardless of whether the health gate is
+		// enabled at all (it is off by default: RollbackOnFailure).
+		//
+		// The gate is the sharpest case rather than the only one: a restart landing
+		// mid-gate resets the container's Docker health to "starting", which makes the
+		// gate wait instead of rolling back and can get a failed update accepted as a
+		// good one.
+		//
+		// Both keys are consulted: the id matches a container the update already knows
+		// by id, the name matches the one a recreate has just started under the
+		// original name and whose id nobody has seen yet.
+		//
+		// The placement is load-bearing: the skip happens BEFORE the retry accounting
+		// below, so a skipped tick does not consume the container's restart budget and
+		// auto-heal resumes with a full budget once the update finishes.
+		//
+		// A single hold spans the whole recreate plus the gate window, i.e. many heal
+		// ticks, so only the first tick it suppresses is reported at Info and the rest
+		// at Debug: the event is rare per update, not per tick.
+		name := containerName(c.Names)
+		if since, held := s.heldByUpdate(endpoint.ID, c.ID, name); held {
+			level := zerolog.DebugLevel
+			if s.claimFirstSkipLog(endpoint.ID, c.ID, name) {
+				level = zerolog.InfoLevel
+			}
+
+			log.WithLevel(level).Str("container_id", c.ID).Int("endpoint_id", endpointID).Dur("held_for", time.Since(since)).
+				Msg("auto-heal: skipping container, an auto-update is acting on it")
+
+			continue
+		}
+
 		policy := retryPolicy{
 			maxRetries: MaxRetries(c.Labels),
 			window:     retryWindow,
@@ -195,7 +232,7 @@ func (s *Service) healContainers(cli dockerClient, endpoint *portainer.Endpoint,
 		log.Info().Str("container_id", c.ID).Int("endpoint_id", endpointID).Int("attempt", newState.attempts).
 			Msg("auto-heal: restarted unhealthy container")
 		s.notifier.Notify(Event{
-			Kind: EventHealRestarted, EndpointID: endpointID, ContainerID: c.ID, ContainerName: containerName(c.Names),
+			Kind: EventHealRestarted, EndpointID: endpointID, ContainerID: c.ID, ContainerName: name,
 			StackName: c.Labels[consts.ComposeStackNameLabel], Message: "restarted unhealthy container",
 		})
 	}
