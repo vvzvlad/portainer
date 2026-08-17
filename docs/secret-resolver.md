@@ -205,6 +205,38 @@ image update is not a rotation. This has to be in the migration runbook, because
 failure is silent: the service keeps working on the old credential until the day the
 old credential is revoked.
 
+The env reuse is by construction, not incidental. `autoupdate.go:301` and
+`rollback.go:367` both call the same `containerService.Recreate`
+(`seams.go:36` → `api/docker/container.go:212`), which inspects the container
+(`ContainerInspectWithRaw`), mutates **exactly one field** — `container.Config.Image`
+at line 241 — and hands the same struct to creation:
+
+```go
+create, err := cli.ContainerCreate(ctx, container.Config, container.HostConfig, &initialNetwork, nil, container.Name)
+```
+
+`Env` lives in `Config` and is never rebuilt.
+
+**Beware the fork's git history here.** Commit `e63d2ffe9 fix(automation): update a
+single container instead of redeploying its stack` shows the daemon *used* to go
+through a stack redeploy, and that was deliberately removed. Reading the history
+rather than the current code yields the opposite — and wrong — model. This cost one
+round of analysis already.
+
+**Container-level rollback does not resurrect old values.** Worth stating because the
+opposite is a natural guess: `rollback.go` re-tags the previous image id back onto the
+original reference and then calls `Recreate` on the *new* container, so the inspected
+`Config.Env` is the current one. Only the image travels back; the environment does not.
+
+**Stack-level `RollbackTo` is the real trap, and it is worse.** It restores the compose
+body from `v{target}`. Rolling a migrated stack back to a version created *before* the
+migration restores a body full of secret literals — putting them straight back into
+Portainer's database, which is exactly what this whole design removes, and back into
+everything that reads stack bodies through the API. The migration runbook must say:
+once a stack is migrated, versions older than the migration are not safe to roll back
+to, and the pre-migration versions should be pruned rather than left as tempting
+restore points.
+
 ### 3.7 Residual leak channels (not closed by this work)
 
 | Channel | Status |
