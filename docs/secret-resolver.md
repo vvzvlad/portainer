@@ -371,7 +371,10 @@ success. **The compose path does not have that shape.** `ComposeDeployer.Pull`
 api.PullOptions{})` and wraps whatever comes back — we never touch the stream ourselves.
 The zero value matters too: `PullOptions.IgnoreFailures` is `false`, so failures are not
 suppressed at our call site. Whether compose v2's own puller can swallow an in-stream
-error is an upstream question and is **not verified here**.
+error is an upstream question and is **not verified here**. If it ever turns out that it
+does, the symptom is the quiet one: the stack deploy reports success while containers
+come up on the old images, and the only tell is that the image digest did not move.
+Check the digest, not the deploy's exit status.
 
 For the resolver the requirement is the **opposite direction**: the call is a local
 round trip over a unix socket to fetch a handful of short strings, so it gets its own
