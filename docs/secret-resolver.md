@@ -340,7 +340,36 @@ error; no partial results. A version field in the request lets the resolver evol
 without touching the fork. The resolver address is configuration (unix socket by
 default, URL possible), so the resolver can move later without a patch.
 
-### 4.3 Why `rbw` and not our own Bitwarden client
+### 4.3 Deadlines: give the resolver call its own, and make it short
+
+There is a recurring timeout mistake in this area of the codebase, and the resolver
+must not repeat it in mirror image.
+
+`ClientFactory.CreateClient` with a `nil` timeout yields
+`defaultDockerRequestTimeout` (60 s) on `http.Client.Timeout`, which covers reading
+the response body — i.e. the whole image download. The stack deploy path already
+works around it:
+
+```go
+// Creates a docker client with 1 hour timeout
+func (d *stackDeployer) createDockerClient(ctx context.Context, endpoint *portainer.Endpoint) (*dockerclient.Client, error) {
+    timeout := 3600 * time.Second
+```
+
+(`api/stacks/deployments/deployer_remote.go`.) Note this particular function sits in
+the unpacker path, which is **unreachable in CE** — `IsRelativePathStack()` in
+`api/stacks/stackutils/util.go` is a hardcoded `return false` — so it is a precedent
+for the failure mode rather than live code. The live instance of the same bug, in
+`ContainerService.Recreate`, is being fixed separately.
+
+For the resolver the requirement is the **opposite direction**: the call is a local
+round trip over a unix socket to fetch a handful of short strings, so it gets its own
+explicit, *short* deadline, independent of any docker client. A wedged or unresponsive
+resolver must fail the deploy quickly and loudly, not hang it for a minute — still
+less inherit an hour. Do not create a docker client for this and do not pass `nil`
+anywhere near it.
+
+### 4.4 Why `rbw` and not our own Bitwarden client
 
 Rejected: writing the Bitwarden client crypto in Go (prelogin → PBKDF2/Argon2id →
 HKDF-stretch → user key → RSA → org key → AES-CBC+HMAC). That is 400–700 lines of
@@ -351,13 +380,13 @@ collection items, `MAC verification failed` — because the organisation key pat
 the hard part, and ours live in the org `agents`, collection `infra`.
 
 `rbw` gets its crypto maintained by someone else. Its one real defect is handled in
-§4.4. The pinentry shim it requires is ugly but inert under this threat model.
+§4.5. The pinentry shim it requires is ugly but inert under this threat model.
 
 Accepted risk: `rbw` is in maintenance mode (author: "essentially feature-complete…
 unlikely to spend time implementing new features"). If it breaks, writing the Go
 client becomes a forced move with a clear reason, rather than an upfront bet.
 
-### 4.4 Freshness: `rbw get` never contacts the server
+### 4.5 Freshness: `rbw get` never contacts the server
 
 **This is the crux, and it is verified three ways.**
 
@@ -399,7 +428,7 @@ makes `get` fail — a safe refusal.
 Caveat to carry into the implementation: this mtime contract is a side effect of the
 implementation, not a documented guarantee.
 
-### 4.5 The resolver runs as a container
+### 4.6 The resolver runs as a container
 
 In `/opt/portainer/docker-compose.yml` on borneo, next to Portainer itself, brought
 up from the host with `docker compose up -d`. **Not a Portainer stack** — for the same
@@ -423,7 +452,7 @@ in the entrypoint at start.
 - image: multi-stage, our resolver plus an `rbw` binary. `rbw` is **not** packaged for
   Debian (`apt-cache policy rbw` on borneo is empty), so build it in a rust stage.
 
-### 4.6 Network path (verified on borneo)
+### 4.7 Network path (verified on borneo)
 
 DNS resolves `vaultwarden.vvzvlad.xyz` to a public address, but the internal path is
 open and the certificate validates on it:
