@@ -223,19 +223,34 @@ through a stack redeploy, and that was deliberately removed. Reading the history
 rather than the current code yields the opposite — and wrong — model. This cost one
 round of analysis already.
 
-**Container-level rollback does not resurrect old values.** Worth stating because the
-opposite is a natural guess: `rollback.go` re-tags the previous image id back onto the
-original reference and then calls `Recreate` on the *new* container, so the inspected
-`Config.Env` is the current one. Only the image travels back; the environment does not.
+**Container-level rollback does not resurrect old values either.** Worth stating
+because the opposite is a natural guess: `rollback.go` re-tags the previous image id
+onto the original reference and then calls `Recreate` on the *new* container, so the
+inspected `Config.Env` is the current one. Only the image travels back.
 
-**Stack-level `RollbackTo` is the real trap, and it is worse.** It restores the compose
-body from `v{target}`. Rolling a migrated stack back to a version created *before* the
-migration restores a body full of secret literals — putting them straight back into
-Portainer's database, which is exactly what this whole design removes, and back into
-everything that reads stack bodies through the API. The migration runbook must say:
-once a stack is migrated, versions older than the migration are not safe to roll back
-to, and the pre-migration versions should be pruned rather than left as tempting
-restore points.
+Put precisely: in the daemon path `Env` does not move **in either direction**. It is
+frozen at the last real deploy and carried from the inspect into `ContainerCreate` on
+update and on rollback alike.
+
+**Stack-level `RollbackTo` is the real trap, and it is worse than a one-off deploy of
+an old body.** `snapshotFileBasedStackVersion` (`api/http/handler/stacks/stack_update.go`)
+with `rollbackTo != nil` reads the target version's entrypoint from disk
+(`GetStackProjectPathByVersion` → `GetFileContent`; client-supplied content is ignored)
+and feeds it into `collectStackFilesContent`, which snapshots it as a **new** version,
+`StackFileVersion+1`. So rolling a migrated stack back past the migration does not merely
+deploy the old body once — it makes that body **current**, and one mis-click restores
+secret literals as the live definition.
+
+Where they land, precisely — this matters for the runbook, because getting it wrong
+sends someone to clean the wrong place: for file-based stacks the compose body lives
+**on disk under `ProjectPath`**, not in the database; the database holds `Env []Pair`.
+Cleaning the DB therefore does not remove restored literals. And the body is exposed
+through `GET /api/stacks/{id}/file` (`api/http/handler/stacks/handler.go`), so agents
+see it exactly as they see `Env`.
+
+Runbook rule: once a stack is migrated, versions older than the migration are unsafe
+to roll back to, and pre-migration version directories should be pruned rather than
+left as tempting restore points.
 
 ### 3.7 Residual leak channels (not closed by this work)
 
