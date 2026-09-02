@@ -309,7 +309,7 @@ func TestWebhookNotifierFailingEndpointDoesNotBlock(t *testing.T) {
 // standalone container, with the old->new short digests.
 func TestFormatMessageStandaloneUpdate(t *testing.T) {
 	n, store := newTestWebhookNotifier(t, "unused")
-	createEndpoint(t, store, 1, "nebula.lc")
+	createEndpoint(t, store, 1, "docker-01")
 
 	settings, _ := store.Settings().Settings()
 
@@ -318,7 +318,7 @@ func TestFormatMessageStandaloneUpdate(t *testing.T) {
 		OldDigest: "sha256:59b94983c73aabcd", NewDigest: "sha256:2231ca5d676dabcd",
 	})
 
-	want := "Environment | nebula.lc\nContainer [esphome]\nUpdate [esphome]: 59b94983c73a → 2231ca5d676d"
+	want := "Environment | docker-01\nContainer [esphome]\nUpdate [esphome]: 59b94983c73a → 2231ca5d676d"
 	if msg != want {
 		t.Errorf("got:\n%q\nwant:\n%q", msg, want)
 	}
@@ -328,7 +328,7 @@ func TestFormatMessageStandaloneUpdate(t *testing.T) {
 // digests): the context line is the stack name.
 func TestFormatMessageStackUpdate(t *testing.T) {
 	n, store := newTestWebhookNotifier(t, "unused")
-	createEndpoint(t, store, 1, "nebula.lc")
+	createEndpoint(t, store, 1, "docker-01")
 	createStack(t, store, 7, "cache-demo")
 
 	settings, _ := store.Settings().Settings()
@@ -337,7 +337,7 @@ func TestFormatMessageStackUpdate(t *testing.T) {
 		Kind: EventUpdated, EndpointID: 1, StackID: 7,
 	})
 
-	want := "Environment | nebula.lc\nStack [cache-demo]\nUpdate [cache-demo]: image updated"
+	want := "Environment | docker-01\nStack [cache-demo]\nUpdate [cache-demo]: image updated"
 	if msg != want {
 		t.Errorf("got:\n%q\nwant:\n%q", msg, want)
 	}
@@ -349,7 +349,7 @@ func TestFormatMessageStackUpdate(t *testing.T) {
 // old->new digests. This is the maintainer's target output.
 func TestFormatMessageStackMemberUpdate(t *testing.T) {
 	n, store := newTestWebhookNotifier(t, "unused")
-	createEndpoint(t, store, 1, "nebula.lc")
+	createEndpoint(t, store, 1, "docker-01")
 
 	settings, _ := store.Settings().Settings()
 
@@ -359,7 +359,7 @@ func TestFormatMessageStackMemberUpdate(t *testing.T) {
 		OldDigest:     "sha256:59b94983c73aabcd", NewDigest: "sha256:2231ca5d676dabcd",
 	})
 
-	want := "Environment | nebula.lc\nStack [cache-demo]\nUpdate [esphome]: 59b94983c73a → 2231ca5d676d"
+	want := "Environment | docker-01\nStack [cache-demo]\nUpdate [esphome]: 59b94983c73a → 2231ca5d676d"
 	if msg != want {
 		t.Errorf("got:\n%q\nwant:\n%q", msg, want)
 	}
@@ -371,7 +371,7 @@ func TestFormatMessageStackMemberUpdate(t *testing.T) {
 // rather than blocking delivery.
 func TestFormatMessageStackMemberUpdateNoNewDigest(t *testing.T) {
 	n, store := newTestWebhookNotifier(t, "unused")
-	createEndpoint(t, store, 1, "nebula.lc")
+	createEndpoint(t, store, 1, "docker-01")
 
 	settings, _ := store.Settings().Settings()
 
@@ -380,7 +380,7 @@ func TestFormatMessageStackMemberUpdateNoNewDigest(t *testing.T) {
 		ContainerName: "esphome", OldDigest: "sha256:59b94983c73aabcd",
 	})
 
-	want := "Environment | nebula.lc\nStack [cache-demo]\nUpdate [esphome]: image updated"
+	want := "Environment | docker-01\nStack [cache-demo]\nUpdate [esphome]: image updated"
 	if msg != want {
 		t.Errorf("got:\n%q\nwant:\n%q", msg, want)
 	}

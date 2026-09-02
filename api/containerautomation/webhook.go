@@ -149,7 +149,7 @@ func (n webhookNotifier) deliver(webhookURL, message string) {
 // environment name from the endpoint and the stack name from the stack via the
 // datastore, mirroring the maintainer's example:
 //
-//	Environment | nebula.lc
+//	Environment | docker-01
 //	Stack [cache-demo]
 //	Update [esphome]: 59b94983c73a → 2231ca5d676d
 //
@@ -157,7 +157,7 @@ func (n webhookNotifier) deliver(webhookURL, message string) {
 // the action line is adapted per event kind (update / rollback / update-failed /
 // auto-heal restart). Auto-heal renders as:
 //
-//	Environment | nebula.lc
+//	Environment | docker-01
 //	Container [nginx]
 //	Auto-heal: restarted unhealthy container
 func (n webhookNotifier) formatMessage(settings *portainer.Settings, event Event) string {

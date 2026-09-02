@@ -123,7 +123,7 @@ func TestUpdateEndpointRecreatesComposeStackMemberIndividually(t *testing.T) {
 		rolledBack:       make(map[string]rolledBackTarget),
 	}
 
-	endpoint := &portainer.Endpoint{ID: 1, Name: "nebula.lc", URL: srv.URL, Type: portainer.DockerEnvironment}
+	endpoint := &portainer.Endpoint{ID: 1, Name: "docker-01", URL: srv.URL, Type: portainer.DockerEnvironment}
 
 	s.updateEndpoint(endpoint, ScopeAll, updateOptions{})
 
