@@ -258,8 +258,150 @@ left as tempting restore points.
 | --- | --- |
 | `Config.Env` of the running containers, via Portainer's docker proxy | **Open.** No stack-level design closes this; it needs endpoint permissions for the agent. |
 | `POST /backup` | Closed by using `Options.Env` — `filesToBackup` includes `compose`, so any materialised `.env` **would** be in the backup. This is why the simple ".env in the project dir" variant was rejected. |
-| `Stack.DeploymentStatus[].Message` | **Risk, unverified.** `api/stacks/stackutils/stack_status.go` stores a failed deploy's `err.Error()` in the DB and `StackInspect` returns it. Compose errors normally name variables, not values, but it is not proven that a substituted value can never appear. Worth a look during implementation. |
-| Deploy logs | Safe by name: compose logrus → zerolog via `pkg/libstack/compose/logwriter.go`; the notable message is `template.go` warning with the variable **name**. Container log, not exposed over the API. |
+| `Stack.DeploymentStatus[].Message` | **Was "risk, unverified". Now verified: the leak is real.** Closed by *withholding* the deployer's error text, not by redacting it — see below for why redaction was not enough. |
+| Deploy logs | **Narrow but real, and not closed.** Was written here as "safe by name"; that was too confident. See below. |
+| `compose-unpacker` command line | **Was open; closed by a guard.** `getEnv` in `api/stacks/deployments/compose_unpacker_cmd_builder.go` builds `--env=NAME=VALUE` verbatim from `Stack.Env`. See below. |
+| `PORTAINER_*` on the server process, via compose interpolation | **Open, pre-existing, and worth knowing about.** |
+
+**On the `DeploymentStatus` row.** This was written as a guess — "compose errors
+normally name variables, not values, but it is not proven" — and the guess was wrong.
+Reproduced against `pkg/libstack/compose` on compose-go v2.9.1: whenever a substituted
+value lands in a field compose validates *by value*, the value is copied verbatim into
+the error text.
+
+```text
+ports                    →  invalid containerPort: <value>
+deploy.resources.limits  →  'services[app].deploy.resources.limits.memory'
+                            strconv.ParseFloat: parsing "<value>": invalid syntax
+depends_on               →  service "app" depends on undefined service "<value>"
+```
+
+That error is wrapped as `failed to deploy a stack: %w` and stored by
+`UpdateStackStatusFromDeploymentResult` (`api/stacks/stackutils/stack_status.go`) as
+`Message: err.Error()` in the database, from where `StackInspect` serves it. So the
+value lands **permanently** in the very channel this feature exists to close — and the
+likeliest way to trigger it is a mistyped reference or a wrong vault entry, which is
+the characteristic accident of migrating 65 variables.
+
+**The first attempt to close it was redaction, and review broke it.** The obvious fix is
+to hold the resolved values while they are still in hand and `strings.ReplaceAll` them
+out of any error leaving `Up`/`Run`/`Pull`. That is a blacklist over text somebody else
+formatted, and it fails in two verified ways:
+
+- **Escaped forms.** `loader/interpolate.go`'s `toInt`/`toInt64`/`toFloat` return a
+  `*strconv.NumError`, whose `Error()` embeds `strconv.Quote(value)`; `loader/validate.go:89`
+  prints `depends on undefined service %q`; `types/project.go:838`, `types/device.go:46`
+  and the jsonschema path all quote too. A value containing `"` or `\` therefore appears
+  **escaped**, and a raw-substring search misses it completely.
+- **Split fragments.** `docker/go-connections@v0.6.0/nat/nat.go:198,205` emit
+  `"invalid containerPort: " + containerPort`, where that string is already a *fragment*
+  produced by splitting on `:` — and `nat.go:176` lowercases another one. A value
+  `Ab3xYz:Qw7` in `ports:` yields `invalid containerPort: Qw7`: no whole-value match, and
+  the fragment goes to the database.
+
+Patching those two cases would only invite the third. The error text is **untrusted data**
+with respect to secret content, and untrusted text cannot be reliably sanitised by
+blacklist — every new escaping or splitting rule in a dependency reopens the hole, silently,
+in a channel whose whole purpose is to be closed.
+
+**So the control is a whitelist instead: when a deploy resolved at least one reference,
+the deployer's error text does not leave the deploy path at all.** The caller — and
+therefore `DeploymentStatus[].Message`, the database and the API — gets a fixed,
+value-free message naming the stack and the operation. This is sound by construction
+rather than by pattern-matching, and it does not decay as dependencies change.
+
+The cost is real and accepted deliberately: a failed deploy of a secret-bearing stack
+shows no compose diagnostics in the UI. Requirement 1 is absolute, diagnosability of a
+*misconfigured* stack is not; and the redacted text is still written to the Portainer
+server log as defence in depth, where the owner can read it. The redaction that feeds
+that log line covers the raw, quoted, JSON and lowercased forms plus `:`/`/`/`,`
+fragments, applies replacements longest-first (otherwise a short value that is a
+substring of a longer one leaves the longer one's tail exposed), and withholds the line
+entirely rather than shredding it when a value is too short to redact safely.
+
+**Not covered by any of this:** compose's own internal logging, which reaches
+`pkg/libstack/compose/logwriter.go` through logrus. That is the container log rather
+than the API — a lesser channel, and not one an agent reads by default — but it is not
+proven clean.
+
+**A second disk-level leak of the same family, also found in review.** `createEnvFile`
+returns early without touching the filesystem when it has nothing to write. That is
+exactly the state a stack reaches once **all** its variables have migrated, so the
+`stack.env` written by the last pre-migration deploy stays on disk with live values —
+and `compose` is in `filesToBackup` (`api/backup/backup.go`), so it keeps riding out in
+every `POST /backup`. That is the "plain `.env` in the project directory" variant §6
+rejects, reintroduced through the back door.
+
+**Deleting that file on the next deploy was tried and reverted — do not reintroduce it.**
+`<ProjectPath>/stack.env` is not necessarily a file Portainer wrote: Portainer's own UI
+states that when deploying via **Repository** the `stack.env` must already reside in the
+git repo, and the clone lands in `stack.ProjectPath`
+(`app/react/components/form-components/EnvironmentVariablesFieldset/StackEnvironmentVariablesPanel.tsx`).
+The empty branch is reached by every stack with no variables at all, so deleting there
+destroys a user's repository file and breaks a documented configuration — and gating it
+on "had variables, all of them references" still deletes the repo's file for a fully
+migrated git stack. **A deploy must not delete files it did not create.**
+
+The cleanup therefore belongs to migration, not to the deploy path — and it has to be a
+sweep rather than a single delete anyway, because deleting the current copy does not
+clean history: old `v<N>` directories keep their own `stack.env` (up to 20 versions are
+retained, `stack_versioning.go`), and `RollbackTo` can point `ProjectPath` back at one of
+them. So after migrating a stack, sweep `/data/compose/<id>/v*/stack.env` by hand — the
+same sweep that §3.6 already requires for pre-migration compose bodies, and for the same
+reason.
+
+**On the `compose-unpacker` row.** `getEnv` (`api/stacks/deployments/compose_unpacker_cmd_builder.go`)
+turns `Stack.Env` into `--env=NAME=VALUE` arguments for the `compose-unpacker` container,
+with no resolution step — so a `secret:` reference would be handed to a service as a
+literal credential, the exact failure the swarm guard exists to prevent. It is
+unreachable in CE today **only** because `stackutils.IsRelativePathStack` is hardcoded to
+`false` with the comment "This function is only for code consistency with EE"
+(`api/stacks/stackutils/util.go:47`). A security invariant resting on a CE stub is not an
+invariant — any rebase onto EE code removes it — so the same refusal is now written
+there explicitly.
+
+**On the deploy-logs row.** The original claim — "the notable message is a `template.go`
+warning with the variable name" — was an assumption, and it is incomplete. Verified in
+compose-go v2.9.1, `loader/interpolate.go:101-116`: `toBoolean` logs the
+**post-interpolation** value.
+
+```go
+case "y", "yes", "on":
+    logrus.Warnf("%q for boolean is not supported by YAML 1.2, please use `true`", value)
+```
+
+So a secret whose value happens to be exactly `y`, `yes`, `on`, `n`, `no` or `off`,
+placed in a boolean-typed field (`read_only`, `privileged`, `init`, `tty`,
+`networks.*.external`, …), is written to the log. A six-value alphabet makes this
+close to unreachable for a real credential — but "close to unreachable" is a different
+claim from "safe by construction", and the earlier wording promised the second.
+
+The redaction that closes the `DeploymentStatus` channel does **not** cover this: it
+acts on the error returned from the deployer, not on what compose logs internally.
+Closing it properly would mean filtering the log writer, which needs the current
+deploy's values in a place that has no business holding them. Left open deliberately,
+recorded so the next person does not rediscover it as a surprise.
+
+**On the `PORTAINER_*` row** (verified, `pkg/libstack/libstack.go:17`): `PortainerEnvVars()`
+sweeps **every** environment variable of the Portainer server process whose name starts
+with `PORTAINER_` into the compose environment, and `createProject` feeds it to
+`cli.WithEnv` before anything else. So a stack body containing `${PORTAINER_ANYTHING}`
+interpolates the server's own variable into a service, and the result is readable in
+that container's `Config.Env` through the docker proxy — the channel row 1 of this table
+already describes.
+
+This predates the feature and is not made worse by it, but it constrains the design in
+one concrete way, and the design already respects it: **the only `PORTAINER_`-prefixed
+variables this feature adds are addresses** — the resolver endpoint and its timeout.
+The Vaultwarden master password deliberately lives in the resolver's container as a
+mounted file, not in Portainer's environment, and not as an environment variable even
+there. Had the fork instead talked to Vaultwarden directly with a credential in its own
+env — the rejected option in §6 — that credential would have been interpolatable into
+any stack by anyone who can edit a stack body.
+
+The general rule that follows: **never put a secret into a `PORTAINER_`-prefixed
+variable on the server process.** Worth stating out loud, because it looks like the
+obvious place to put one.
 
 ### 3.8 A latent fork bug found on the way
 
@@ -274,6 +416,227 @@ Independent of this feature, and worth fixing separately (~10 lines). Note the
 semantics decision it forces: on `RollbackTo`, does `.env` come from the target
 version (rolling secrets back too) or from the current one?
 
+### 3.9 And another one: compose log levels are dead code
+
+Found while checking the deploy-logs row of §3.7; independent of this feature.
+
+`pkg/libstack/compose/logwriter.go:21` decides a compose log line's severity by testing
+`strings.HasPrefix(logMessage, "time=")`, falling back to `info` plus the raw line when
+the test fails. But `composeplugin.go:31-35` configures logrus with
+`TextFormatter{DisableTimestamp: true}`, so every line it emits starts with `level=`,
+never `time=`.
+
+The prefix test is therefore **always false**. Two consequences, both live today:
+
+- the entire level-mapping switch underneath it is unreachable for compose logs;
+- every compose message — warnings and errors included — is emitted at zerolog
+  **Info**, with the raw `level=warning msg="…"` text carried inside the message body.
+
+So compose failures cannot be filtered by level, and everything compose says is visible
+at default verbosity. Roughly a two-line fix (accept a `level=` prefix as well, or drop
+`DisableTimestamp`), but it belongs in its own change, not this one.
+
+### 3.10 A third one, and this one leaks credentials today
+
+Found while closing the compose-unpacker pass-through; **independent of this feature and
+live in the current fork.**
+
+`api/stacks/deployments/deployer_remote.go:215-218` logs the unpacker's whole command
+line:
+
+```go
+log.Debug().Str("cmd", strings.Join(cmd, " ")).Msg(…)
+```
+
+That command line is assembled from `generateRegistriesStrings` and
+`appendGitAuthIfNeeded`, so it carries `--registry=<user>:<password>:<url>`,
+`-u <user> -p <git password>` and every `--env=NAME=VALUE`. **Registry passwords and git
+credentials therefore reach the Portainer server log at DEBUG level today**, with no
+secret-resolver feature involved at all.
+
+Two things follow. First, it wants fixing on its own merits — it is a plain credential
+leak into a log an operator or an agent may read. Second, it constrains this feature: if
+resolution is ever extended to the remote/unpacker path, **that line must be redacted or
+removed first**, or resolved values join the registry passwords already there. What keeps
+values out of it right now is precisely the refusal added to `getEnv`, not any property
+of the logging.
+
+**Two related boundary facts, recorded so the withholding is not over-trusted:**
+
+- **The withholding boundary is the `libstack.Deployer` return, not the compose process.**
+  `pkg/libstack/compose/composeplugin.go:352-355` and `pkg/libstack/compose/status.go:65,80`
+  do `log.Warn().Err(err)` *inside* the deployer, upstream of anything this fork wraps. No
+  outer error type can protect those: if a compose error there ever quotes a value, it
+  lands in the log unredacted. This is the same channel §3.7's deploy-logs row leaves
+  open, reached by a second route.
+- `api/http/handler/stacks/create_compose_stack.go:75,84` logs `fmt.Sprintf("%+v", stack)`
+  — the entire `portainer.Stack`, `Env` included. Under this design that prints
+  *references*, which are not secret. But it is the one place the whole `Env` is dumped,
+  so it must stay on the "references only, never values" side of the invariant, and it is
+  a reason not to relax the rule that `Env` never holds a value.
+
+### 3.11 Validation sees references, the deploy sees values
+
+Found in review of the withholding round. Not a leak — a **divergence**, and the one place
+where this design weakens an existing security control rather than strengthening it.
+
+`stackutils.BuildEnvMap` (`api/stacks/stackutils/env.go`) builds the interpolation
+environment for `IsValidStackFile` and `ValidateComposeURLs` out of `stack.Env` — which
+under this design holds **references**. The deploy interpolates **values**. Before this
+work both stages saw the same strings; now they do not.
+
+This is about references only. The other way `stack.Env` can differ from what the deploy
+sends — the escape — is closed: `BuildEnvMap` unescapes, so validation sees the deployed form
+of a `secret::`-prefixed literal. See §4.2 for what that divergence actually did.
+
+`IsValidStackFile` is what enforces, for non-administrators, the environment's policy on
+bind mounts, `privileged`, `pid: host`, devices, sysctls, `security_opt` and capabilities,
+by inspecting the resolved compose config. So the check runs against one string and the
+deploy runs against another.
+
+The concrete shape of the problem: with `AllowBindMountsForRegularUsers` off, a regular
+user writes `volumes: ["${MOUNT}"]` and sets `MOUNT=secret:vw:stack/app/TOKEN`. Two
+mechanics in compose-go v2.9.1 make that pass validation, and both are verified here
+rather than assumed:
+
+- **The source is classified as a named volume.** `format/volume.go:180` `isFilePath`
+  returns true only for a source beginning with `.`, `/`, `~`, `\\` or a Windows drive.
+  `secret` begins with none of them, so `populateType` sets `VolumeTypeVolume` and the
+  bind-mount policy has nothing to object to.
+- **The leftover segment is silently discarded.** The short syntax splits on `:` into
+  source, target and *mode*, so the vault path lands in the mode position — where an
+  unrecognised option is not an error. `format/volume.go:113` says so in its own words:
+  `// ignore unknown options FIXME why not report an error here?`
+
+At deploy time the same variable resolves to whatever the vault holds, `/:/host` included,
+and *that* string does begin with `/`, so it becomes a real bind mount. The same
+divergence applies to `devices`, `sysctls` and `security_opt`; and `ValidateComposeURLs` —
+the SSRF policy, which applies to **every** user — probes `secret:vw:…` instead of the
+real registry host.
+
+Not verified: whether a relative target (`vw` above) survives the rest of compose's
+validation for every reference shape. If it does not, the outcome is a validation error
+whose text has nothing to do with the real problem — still a divergence, just a noisier
+one. The mechanism above does not depend on that detail.
+
+Exploiting it requires the ability to create a vault entry with the chosen value, so it is
+not reachable by a Portainer user alone. That is a mitigation, not a fix.
+
+**The rule that follows, and it is a real constraint on rollout: a stack carrying secret
+references must not be editable by a user who is not an environment administrator.**
+Resolving secrets for validation as well would close the divergence — validation runs in
+the same process and the same memory as the deploy, so it costs nothing in exposure — but
+it doubles the resolver traffic and puts the vault on the path of every stack *save*, not
+just every deploy. Deliberately not done here; recorded so the choice is visible.
+
+### 3.12 The resolver's `error` field is the only external text that reaches the API
+
+The withholding of §3.7 covers the **deployer's** errors. The errors of the resolution step
+itself — everything that can leave `resolveStackSecrets` — deliberately do **not** go
+through it. "Route those through withholding too" is the obvious suggestion and it is wrong
+on both counts, so the reasoning is recorded here rather than left to be re-derived.
+
+**It would not work.** `deployFailure` withholds the deployer's text and sends a *redacted*
+copy to the server log, and `redactSecretValues` builds its patterns out of the values that
+were resolved for this deploy. At the point a resolution error is raised nothing has been
+resolved yet: there is nothing to redact against, so the mechanism would degrade into
+dropping the text with no log copy at all — strictly worse than what it replaces.
+
+**It is not needed.** Enumerate what can leave `resolveStackSecrets`:
+
+- `manager.secretResolver == nil` — "stack %q uses secret references but no secret resolver
+  is configured, set PORTAINER_SECRET_RESOLVER": constants, the stack name, an env var name.
+- from `Fetch` — the configuration error (an env var name and the operator's own bad value),
+  the dial error, the timeout, a non-200 status with no error field, "response exceeds N
+  bytes", "no value for reference %q" (that is the **reference**, not the value), the
+  decode failure, and `parsed.Error`.
+- "no value resolved for variable %s" — a variable name.
+
+Every component of every one of those, `parsed.Error` aside, is constructed by Portainer out
+of data that is already public in the stack config — **with one exception, which had to be
+engineered away rather than argued away.** The list above once said the dial error and the
+timeout were safe because they are built from public data. They are not, as written: they
+are safe only because of what `New` now does to the endpoint before either can be raised.
+
+Both come back as a `*url.Error`, and a `*url.Error` prints the URL of the request. The
+endpoint is *not* wholly public — its userinfo is the only way this protocol offers to
+authenticate to a remote resolver, which is exactly why `redactEndpoint` exists for the
+startup log. `net/http` builds that error from `stripPassword(req.URL)`, and `stripPassword`
+masks a **password** and nothing else, so the documented `http://<token>@resolver:9100` form
+came back whole — on the commonest failure this feature has, a resolver that is down,
+unreachable or slow, and on every retry of it, accumulating in `DeploymentStatus[]`.
+Reproduced rather than suspected:
+
+```text
+Post "http://TOKENINUSERNAME@127.0.0.1:1/v1/resolve": dial tcp: connection refused
+Post "http://user:***@127.0.0.1:1/v1/resolve":        dial tcp: connection refused
+```
+
+The withholding of §3.7 does not cover it: that wraps the *deployer's* error, while a
+resolution error leaves `Up` directly.
+
+So the mechanism, and not the conclusion: `New` parses the endpoint, moves its
+`url.Userinfo` into a field of the client, and builds the request URL from what is left, so
+that neither `c.url` nor `req.URL` holds it; `Fetch` sends the credential as an explicit
+`req.SetBasicAuth`, which is the identical header `net/http` would have derived from the
+userinfo. No transport error can then quote what the URL no longer contains. The same rule
+covers `New`'s own error strings, which matter more than they look: a bad endpoint is kept as
+`configErr` and returned by **every** `Fetch`, so a single misconfiguration publishes on
+every deploy rather than once. Substituting `redactEndpoint` for `%q` is not enough there —
+`url.Parse` fails with a `*url.Error` whose `Error()` prints the raw URL whatever verb wraps
+it, so the parse path keeps the inner reason and drops the endpoint entirely.
+
+Nothing the resolver *sent* is quoted
+back: an undecodable body, an oversized body and the raw body behind a non-2xx status all
+produce an error built from non-content facts, with the status, the content type and the
+body length going to the server log instead. That is not a theoretical precaution — the JSON
+decoder in use (`segmentio/encoding`, mandated by depguard) appends the first 32 bytes of
+the buffer it choked on to its syntax errors, and that buffer is the response body
+`{"values":{"<ref>":"<value>"…`, so for a short reference the window reaches into the value.
+A wrapped parse error published it.
+
+The same rule reaches into the **status line**, which is the trap here, because
+`resp.Status` reads like the status code and is not. Go fills it from the status line as
+the server wrote it, so it is `"<code> <reason phrase>"` and the phrase is text the
+*resolver* chose — bounded only by `net/http`'s 10 MiB header limit, and on an `http://`
+endpoint settable by anyone on the path. Echoing it would have been a second, unbounded
+channel of resolver text into the very error `maxResolverErrorBytes` exists to bound, on
+every retry of a failing deploy. The client therefore formats `resp.StatusCode`: the
+number is ours — three digits parsed by `net/http` — while the phrase beside it is theirs
+and is dropped. The decode failure logs the number for the same reason, and bounds the
+content type it logs beside it. Reviewed and reproduced: a raw TCP server answering
+`HTTP/1.1 500 <2 KiB of planted text>` put all of it into
+`Stack.DeploymentStatus[].Message` and out of `StackInspect`.
+`TestFetch/keeps the status line reason phrase out of the returned error` pins it from a
+raw `net.Listener`, because an `httptest` server can only ever write the canonical phrase.
+
+`parsed.Error` is the exception, and it is echoed on purpose. It is **contractually free of
+secret values**: the resolver is our own component, and the extensibility requirement of
+§4.2 is about pluggable *backends behind* the resolver, not about third-party
+implementations of the wire protocol. Echoing it is what makes "the Vaultwarden vault is
+locked" readable in the UI instead of an opaque "secret resolution failed", and a locked or
+unsynced vault is the characteristic operational failure of this feature — withholding it
+would make the common case undiagnosable, which is not a trade worth making for text that
+carries no value by construction.
+
+Two bounds keep the exception honest. The field is truncated to `maxResolverErrorBytes`
+(512, on a rune boundary, with an ellipsis marker) before it is echoed, so a resolver
+answering with a stack trace cannot write a page of somebody else's text into Portainer's
+database. And the contract is stated in the `pkg/secretresolver` package doc, where the
+author of a second implementation of the wire protocol reads it: **a resolver that
+interpolates a resolved value into its `error` field breaks the contract.**
+
+`Test_resolveStackSecrets_errorPathsCarryNoSecretValue` (`api/exec`) is the pin. It drives
+every path listed above — against the real client and a fake resolver, so the two halves
+cannot drift apart — and asserts that a planted value appears in none of the messages. A new
+error path that carries a value fails it.
+
+That table missed the credential for three rounds, because it reached the resolver over a
+`unix://` socket and a bare `httptest` URL, neither of which has userinfo. It now plants the
+value **as the endpoint's credential**, in the username position, so every case in the table
+carries one and an operator's token is under the same assertion as a resolved value rather
+than under a case written specially for it.
+
 ---
 
 ## 4. The design
@@ -284,7 +647,7 @@ version (rolling secrets back too) or from the current one?
 compose body        stack.Env            resolver socket        Vaultwarden
 ────────────        ─────────            ───────────────        ───────────
 ${DB_PASSWORD:?}    DB_PASSWORD=         batch fetch, one       collection
-                      vw:stack/...       request per deploy     `infra`
+                      vw:stack/...       per compose call       `infra`
       │                    │                     │                   │
       └──── Portainer patch ────────────────────►│──── rbw ─────────►│
                   Options.Env (memory only)
@@ -334,11 +697,83 @@ type Backend interface {
 }
 ```
 
-Protocol: **batched, one request per deploy** — not an optimisation but a
-requirement, because one Vaultwarden sync pulls the whole vault. All values or an
-error; no partial results. A version field in the request lets the resolver evolve
-without touching the fork. The resolver address is configuration (unix socket by
+Protocol: **batched, one request per compose invocation** — batching is not an
+optimisation but a requirement, because one Vaultwarden sync pulls the whole vault. All
+values or an error; no partial results. A version field in the request lets the resolver
+evolve without touching the fork. The resolver address is configuration (unix socket by
 default, URL possible), so the resolver can move later without a patch.
+
+The unit is the compose invocation and not the deploy, and the difference is real: a
+forced pull runs `Pull` and then `Up`, each resolving on its own, so that deploy makes
+**two** requests and two vault syncs. Accepted rather than repaired — see follow-up 6 in
+§7, and the compose-side note in §5 — but stated here so the guarantee reads as what the
+code actually gives.
+
+Settled concretely, so the two halves cannot drift:
+
+```text
+POST /v1/resolve      {"version":1,"refs":["secret:vw:stack/<env>/<stack>/<VAR>", …]}
+  200                 {"values":{"<ref>":"<value>", …}}      every requested ref present
+  non-2xx             {"error":"<reason>"}
+GET  /healthz         200 when the vault is unlocked, 503 otherwise; never touches
+                      the network — it is the compose healthcheck
+```
+
+**The marker is `secret:`, and Portainer's parsing stops there.** A stack env value
+beginning with `secret:` is a reference; everything after it — including the inner
+scheme `vw:` — is opaque and forwarded whole. Detection cannot be "any value with a
+`scheme:` prefix": `postgres://…` and `https://…` are ordinary values and would be
+swallowed. One fixed marker keeps detection unambiguous while leaving the scheme
+space entirely to the resolver, which is what §4.2 is for.
+
+**The marker's cost, and the escape that pays it.** A bare prefix takes the value space
+above it: an existing stack whose variable legitimately holds a `secret:`-prefixed literal
+— some third-party application's own URI-ish configuration format — would behave
+differently on this fork than on vanilla Portainer, with **no workaround available in
+Portainer's UI**: the compose path fails for want of a resolver or inside one that cannot
+make sense of the reference, and the swarm and unpacker paths refuse it outright. So the
+colon is doubled to escape it: **`secret::<rest>` is a literal, and what reaches compose is
+`secret:<rest>`** — one colon removed. `secret:::x` is therefore the literal `secret::x`.
+`secretresolver.IsReference` returns false for the escaped form and `secretresolver.Unescape`
+performs the removal, applied on every path that passes a literal through — compose, swarm
+and the unpacker alike, so that a stack's values do not depend on how it is deployed, and in
+`stackutils.BuildEnvMap`, so that the deploy-time validation of a stack file interpolates the
+same string the deploy does rather than the stored one.
+
+That last one was a real divergence and is worth stating, because `BuildEnvMap` feeds
+`IsValidStackFile` (the bind-mount, `privileged`, devices and capabilities policy for
+non-administrators) and `ValidateComposeURLs` (the SSRF policy, for **every** user). Measured
+against compose-go v2 rather than reasoned about: with the variable in a volume's target
+position, the deployed form `secret:/data` makes `/host/path:secret:/data` a **bind mount**
+that the policy correctly refuses, while the stored form `secret::/data` makes the same line
+unparsable — "empty section between colons" — so validation refused the stack for a syntax
+error about a line the operator never wrote. Both directions of the divergence fail closed:
+the doubled colon is invalid nearly everywhere compose splits on colons, and the unescaped
+value still begins with `secret`, which `isFilePath` never accepts as a bind source. So this
+was an inconsistency and a false rejection, not a bypass — but validation and deploy now see
+the same string either way.
+
+**The escape's one silent effect, and the log line that pays for it.** Everything else the
+marker does is loud: an unresolvable reference fails the deploy, and the swarm and unpacker
+paths refuse one by name. But an existing stack whose value happens to begin with `secret::`
+deploys *successfully* here, with a value one colon shorter than vanilla Portainer gives it,
+and nothing in the result would tell an operator that the container got something other than
+what the stack stores. Each of the three deploy paths therefore calls
+`secretresolver.LogEscapedValues` once per deploy — the stack name and the number of
+variables affected, never the values — so the change is visible in the server log at the
+moment it happens.
+
+Configuration is **environment variables, not CLI flags** —
+`PORTAINER_SECRET_RESOLVER` (endpoint, `unix://` or `http://`) and
+`PORTAINER_SECRET_RESOLVER_TIMEOUT` (default 30 s, see §4.3). A fork carries every added flag
+through every future rebase, across `api/cli`, the flags struct and the composition
+root; an env var read at construction costs one call site. `NewComposeStackManager`
+keeps its signature for the same reason.
+
+Unset resolver + a stack that holds references ⇒ **hard error**. Never fall through:
+an unresolved reference reaching a container as the literal string `secret:vw:…`
+is a service quietly running on a garbage password, which is worse than a failed
+deploy and much harder to notice.
 
 ### 4.3 Deadlines: give the resolver call its own, and make it short
 
@@ -382,6 +817,22 @@ explicit, *short* deadline, independent of any docker client. A wedged or unresp
 resolver must fail the deploy quickly and loudly, not hang it for a minute — still
 less inherit an hour. Do not create a docker client for this and do not pass `nil`
 anywhere near it.
+
+**The chain, and the order it must keep.** `secretresolver.DefaultTimeout` is **30 s**, and
+it is the outermost of three nested budgets that span both halves of this system:
+
+```text
+RBW_TIMEOUT_SECONDS(20)  <  REQUEST_TIMEOUT_SECONDS(25)  <  DefaultTimeout(30)
+   one vault subprocess       one whole resolve request      the client round trip
+```
+
+Each must outlive the one inside it, or the inner timeout can never fire and its
+diagnostic — the one that says *which* call hung — is never printed. Lowering the outermost
+alone silently disables the resolver's own error reporting, so the three move together. This
+belongs here and not only in a Go doc comment, because this document is the specification the
+resolver is configured from: an operator who reads a wrong number here sets the inner budgets
+around it and inverts the order, which is the exact breakage the comment on `DefaultTimeout`
+warns about.
 
 ### 4.4 Why `rbw` and not our own Bitwarden client
 
@@ -505,6 +956,42 @@ before systemd restarts it — from the deploy critical path.
   argon2 values (`$2y$…`, `$argon2id$…`) must be **single-quoted**, or the dotenv
   parser interpolates them. This hits our traefik `basicauth.users` hashes directly.
   Verify with `docker compose config` — but never log its output, it prints values.
+- **After a stack has migrated *fully*, delete its `stack.env` by hand.** With no literal
+  variables left, a deploy writes no env file — so the one written by the last
+  pre-migration deploy stays in the project directory with the old values in it, and rides
+  out in every `POST /backup`. Portainer will not remove it: the same path can hold a
+  `stack.env` that came from a git clone, and a deploy must not destroy a file it did not
+  create (§3.7). A deploy of a fully migrated stack now logs a warning naming the stack and
+  the path when the file is still there — and the warning only says the file *may* hold
+  pre-migration values, because its firing condition cannot tell Portainer's file from the
+  one a git-deployed stack brings in its clone; check which it is, and whether an
+  `env_file:` directive still points at it, before deleting. Nothing removes the file, so
+  the line repeats on every deploy until you do. Sweep `/data/compose/<id>/v*/stack.env`,
+  not just the current version — old version directories keep their own copy.
+
+### Three traps found in review, each of which can bite silently
+
+- **`env_file:` is not fed by this mechanism.** `Options.Env` supplies compose's
+  *interpolation* environment; it does **not** add entries to a service's `env_file:`
+  list. A stack that today passes a variable into its container via
+  `env_file: stack.env` — rather than via `environment:` with `${VAR}` — will, after
+  migration, start with that variable simply **missing**, and with no error, because
+  nothing was interpolated and nothing failed. Before migrating a stack, check how each
+  variable actually reaches the container, and convert `env_file:` consumers to explicit
+  `environment:` entries with `${VAR:?}`. The `:?` is what turns this silent failure into
+  a loud one.
+- **A reference is visible to pre-deploy validation.** `stackutils.BuildEnvMap` puts the
+  raw `secret:vw:…` string into the map used by `ValidateStackFiles` (for non-admins) and
+  `ValidateComposeURLs` (when SSRF protection is on). No secret is exposed — a reference
+  is not secret — but a reference substituted into a typed field fails validation with a
+  *different* message than the same mistake produces at deploy time, and
+  `ValidateComposeURLs` may go and probe a meaningless registry host. Expect the
+  discrepancy rather than debugging it twice.
+- **A forced pull resolves twice.** `DeployComposeStack` calls `Pull` and then `Up` when
+  `forcePullImage` is set (`api/stacks/deployments/deployer.go`), and each does its own
+  full `Fetch`. Harmless in itself — but it doubles the vault syncs per deploy, and if a
+  secret is rotated in the window between the two calls, the pull and the deploy run with
+  different values.
 
 ---
 
@@ -527,10 +1014,19 @@ Recorded so they are not re-proposed.
 
 ## 7. Work plan
 
-1. **Resolver service** (own project in `home-network`, image to
-   `gitea.vvzvlad.xyz/projects/`): backend interface, Vaultwarden backend with the
-   sync+mtime protocol, unix socket, container, entrypoint unlock. ~150 lines plus
-   Dockerfile.
+1. **Resolver service** — **its own repository**, `~/Data/Projects/secret_resolver`,
+   image to `gitea.vvzvlad.xyz/projects/secret_resolver`: backend interface,
+   Vaultwarden backend with the sync+mtime protocol, unix socket, container,
+   entrypoint unlock.
+
+   Two corrections to the original plan, both made when the ground was checked.
+   It is **not** a subdirectory of `home-network`: that repository has no git remote
+   and no CI at all, and this service needs an image built by Gitea Actions and
+   pulled on borneo. And it is **Python**, not Go — the `Backend` sketch above stays
+   accurate as a shape, but the estate's convention for server projects is the
+   Python-in-Docker scaffold with its own guide, and the service is a subprocess
+   wrapper around `rbw` with one HTTP endpoint. Its requirements, verified findings
+   and the two deliberate deviations from that guide are in its own `docs/SPEC.md`.
 2. **Fork patch** (this branch): reference detection in `stack.Env`, batch call to the
    resolver, injection through `libstack.Options.Env`, hard failure on any error.
    ~50 lines in `api/exec/compose_stack.go`, no frontend. PR into `develop` in the
@@ -552,6 +1048,44 @@ Recorded so they are not re-proposed.
 repeat across environments (`docker-etc` four times, `monitoring` three, `timeseries`
 and `rdesktops` twice each). A reused value gets **one** entry referenced from several
 stacks, never copies, or rotation will split services apart.
+
+### Follow-ups this change deliberately does not make
+
+Each was found while building this and each belongs in its own change, so that a security
+feature does not arrive carrying unrelated repairs. Listed in the order they deserve
+attention.
+
+1. **The unpacker command line leaks registry and git credentials into the log at DEBUG
+   today** (§3.10). The only one of these that is a live credential leak rather than a
+   latent bug, and the only one that also constrains this feature's future: it must be
+   fixed before resolution is ever extended to the remote/unpacker path.
+2. **`.env` files are lost on redeploy** (§3.8).
+3. **Compose log levels are dead code** (§3.9) — every compose message, warnings and
+   errors alike, is emitted at zerolog Info.
+4. **`make lint` cannot run as written**: the Makefile reads `.golangci-version`, and that
+   file is absent from the tree. Worth fixing before relying on lint in CI — and note the
+   repo is not clean under `golangci-lint:latest`, with issues in packages this work never
+   touches (`api/containerautomation`, `api/oauth`, `api/agent`), so the pinned version is
+   load-bearing.
+5. **Lint findings inside this patch's own new test file**: `errcheck` on unchecked
+   `w.Write`/`Encode`/`Serve`/`Close`/`os.RemoveAll`, `testifylint`'s go-require rule for
+   `require` used inside HTTP handlers, and one `usetesting` hit on a deliberate
+   `os.MkdirTemp` that exists to keep the socket path under the `sockaddr_un` length limit
+   — that last one wants a `//nolint:usetesting` carrying the reason rather than a change.
+
+6. **A divergence accepted rather than a repair deferred: a forced pull resolves the
+   references twice.** `DeployComposeStack` calls `Pull` and then `Up` when
+   `forcePullImage` is set, and each runs its own full `Fetch` — two round trips per
+   deploy, and in principle two different values if the secret is rotated in the window
+   between them. Accepted: the call is local and batched, and an env var takes no part in
+   pulling an image, so the pull's copy of the value is never used for anything that
+   outlives the call. Also noted from the compose side in §5.
+7. **Likewise accepted: the client treats only `200` as success.** The wire contract of
+   §4.2 defines success as a 2xx; `Fetch` tests `resp.StatusCode != http.StatusOK`. A
+   resolver answering `202` would be a success to the spec and a failure to the client.
+   Accepted as the stricter reading — this is a synchronous request for values that are
+   either in hand or not, so a `202` has no meaning here — but written down so the author
+   of a second resolver implementation is not surprised by it.
 
 ### Explicitly out of scope
 
