@@ -1,12 +1,14 @@
 package deployments
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,7 +20,10 @@ import (
 	"github.com/portainer/portainer/api/internal/testhelpers"
 	"github.com/portainer/portainer/pkg/fips"
 	"github.com/portainer/portainer/pkg/libhttp/response"
+	"github.com/portainer/portainer/pkg/secretresolver"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -421,5 +426,188 @@ func Test_getUserRegistries(t *testing.T) {
 		registries, err := getUserRegistries(store, user, portainer.EndpointID(endpointID))
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []portainer.Registry{registryReachableByUser, registryReachableByTeam}, registries)
+	})
+}
+
+func Test_getEnv_refusesSecretReferences(t *testing.T) {
+	t.Parallel()
+
+	t.Run("passes literal variables through", func(t *testing.T) {
+		t.Parallel()
+
+		env, err := getEnv("plain", []portainer.Pair{{Name: "LOG_LEVEL", Value: "debug"}})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"--env=LOG_LEVEL=debug"}, env)
+	})
+
+	t.Run("refuses a reference instead of passing it through", func(t *testing.T) {
+		t.Parallel()
+
+		// The unpacker container has no resolution path, so a reference handed to it as
+		// a literal --env argument would start a service on the string "secret:..." as
+		// its credential. Dropping the variable silently would be no better.
+		env, err := getEnv("plain", []portainer.Pair{
+			{Name: "LOG_LEVEL", Value: "debug"},
+			{Name: "ADMIN_TOKEN", Value: "secret:vw:stack/nebula/arcextension/ADMIN_TOKEN"},
+		})
+		require.Error(t, err)
+		assert.Nil(t, env)
+		assert.Contains(t, err.Error(), "ADMIN_TOKEN")
+	})
+
+	t.Run("accepts a value that only looks like a reference", func(t *testing.T) {
+		t.Parallel()
+
+		// The doubled colon is the escape for a literal whose own text starts with
+		// "secret:". It reaches the unpacker as the same string the compose path would
+		// produce, one colon shorter.
+		env, err := getEnv("plain", []portainer.Pair{{Name: "APP_URI", Value: "secret::app/config"}})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"--env=APP_URI=secret:app/config"}, env)
+	})
+}
+
+// Test_getEnv_announcesTheEscape pins the line that makes the escape visible on this path
+// too. The value reaches the unpacker one colon shorter than the stack stores it, which is
+// the one effect of the marker that is otherwise silent - see secretresolver.Unescape.
+//
+// It captures the global logger, so it does not run in parallel. That is safe: the
+// package's parallel tests resume only once every sequential test has finished.
+func Test_getEnv_announcesTheEscape(t *testing.T) {
+	var buf bytes.Buffer
+
+	previous := log.Logger
+	log.Logger = zerolog.New(&buf)
+
+	t.Cleanup(func() { log.Logger = previous })
+
+	env, err := getEnv("arcextension", []portainer.Pair{
+		{Name: "LOG_LEVEL", Value: "debug"},
+		{Name: "APP_URI", Value: "secret::app/config"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"--env=LOG_LEVEL=debug", "--env=APP_URI=secret:app/config"}, env)
+
+	output := buf.String()
+	assert.Contains(t, output, "arcextension")
+	assert.Contains(t, output, `"variables":1`)
+}
+
+// composeManagerStub records whether the image pull was reached.
+type composeManagerStub struct {
+	pulled bool
+}
+
+func (m *composeManagerStub) ComposeSyntaxMaxVersion() string { return "" }
+
+func (m *composeManagerStub) NormalizeStackName(name string) string { return name }
+
+func (m *composeManagerStub) Run(ctx context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint, serviceName string, options portainer.ComposeRunOptions) error {
+	return nil
+}
+
+func (m *composeManagerStub) Up(ctx context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint, options portainer.ComposeUpOptions) error {
+	return nil
+}
+
+func (m *composeManagerStub) Down(ctx context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint) error {
+	return nil
+}
+
+func (m *composeManagerStub) Pull(ctx context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint, options portainer.ComposeOptions) error {
+	m.pulled = true
+
+	return nil
+}
+
+func Test_DeployRemoteComposeStack_refusesSecretReferencesBeforePulling(t *testing.T) {
+	t.Parallel()
+
+	stack := &portainer.Stack{
+		Name:       "arcextension",
+		EntryPoint: "docker-compose.yml",
+		Env: []portainer.Pair{
+			{Name: "LOG_LEVEL", Value: "debug"},
+			{Name: "ADMIN_TOKEN", Value: "secret:vw:stack/nebula/arcextension/ADMIN_TOKEN"},
+		},
+	}
+
+	compose := &composeManagerStub{}
+	deployer := &stackDeployer{lock: &sync.Mutex{}, composeStackManager: compose}
+
+	err := deployer.DeployRemoteComposeStack(t.Context(), stack, &portainer.Endpoint{}, nil, false, true, false)
+	require.Error(t, err)
+
+	// buildUnpackerCmdForStack refuses this stack anyway, but only after Pull has
+	// resolved every reference - a full vault sync - and pulled every image for a deploy
+	// that was never going to proceed.
+	assert.False(t, compose.pulled)
+
+	// And it refuses it in the same words, so the two checks cannot drift apart.
+	_, fromBuilder := deployer.buildUnpackerCmdForStack(stack, OperationDeploy, unpackerCmdBuilderOptions{})
+	require.Error(t, fromBuilder)
+	assert.Equal(t, fromBuilder.Error(), err.Error())
+}
+
+func Test_buildUnpackerCmdForStack_refusesSecretReferencesOnlyWhereEnvIsUsed(t *testing.T) {
+	t.Parallel()
+
+	stack := &portainer.Stack{
+		Name:       "arcextension",
+		EntryPoint: "docker-compose.yml",
+		Env: []portainer.Pair{
+			{Name: "LOG_LEVEL", Value: "debug"},
+			{Name: "ADMIN_TOKEN", Value: "secret:vw:stack/nebula/arcextension/ADMIN_TOKEN"},
+		},
+	}
+
+	opts := unpackerCmdBuilderOptions{
+		composeDestination: "/data/compose/1/v1/compose",
+		gitConfig: &gittypes.RepoConfig{
+			URL:           "https://example.com/stack.git",
+			ReferenceName: "refs/heads/main",
+		},
+	}
+
+	deployer := &stackDeployer{}
+
+	t.Run("refuses every operation that passes the environment on", func(t *testing.T) {
+		t.Parallel()
+
+		for _, operation := range []StackRemoteOperation{
+			OperationDeploy,
+			OperationComposeStart,
+			OperationSwarmDeploy,
+			OperationSwarmStart,
+		} {
+			cmd, err := deployer.buildUnpackerCmdForStack(stack, operation, opts)
+			require.Error(t, err, operation)
+			assert.Nil(t, cmd, operation)
+			assert.Contains(t, err.Error(), "ADMIN_TOKEN", operation)
+			assert.Contains(t, err.Error(), "arcextension", operation)
+		}
+	})
+
+	t.Run("still builds the operations that need no values", func(t *testing.T) {
+		t.Parallel()
+
+		// Undeploy and stop address the project by name. Refusing them for a reference
+		// they never read would leave a migrated stack impossible to remove or stop
+		// through this path.
+		for _, operation := range []StackRemoteOperation{
+			OperationUndeploy,
+			OperationComposeStop,
+			OperationSwarmUndeploy,
+			OperationSwarmStop,
+		} {
+			cmd, err := deployer.buildUnpackerCmdForStack(stack, operation, opts)
+			require.NoError(t, err, operation)
+			require.NotEmpty(t, cmd, operation)
+
+			for _, arg := range cmd {
+				assert.NotContains(t, arg, secretresolver.ReferencePrefix, operation)
+				assert.NotContains(t, arg, "--env=", operation)
+			}
+		}
 	})
 }

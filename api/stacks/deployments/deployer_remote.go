@@ -59,6 +59,14 @@ func (d *stackDeployer) DeployRemoteComposeStack(
 	d.lock.Lock()
 	defer d.lock.Unlock()
 
+	// buildUnpackerCmdForStack refuses this stack anyway, but only further down the call:
+	// by then Pull has resolved every reference - a full vault sync - and pulled every
+	// image, for a deploy that was never going to proceed. Refuse first, the way
+	// SwarmStackManager.Deploy does. Nothing leaks either way, the values stay in memory.
+	if err := checkNoSecretReferences(stack); err != nil {
+		return err
+	}
+
 	options := portainer.ComposeOptions{Registries: registries}
 
 	// --force-recreate doesn't pull updated images
