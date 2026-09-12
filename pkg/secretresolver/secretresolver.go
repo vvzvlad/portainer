@@ -310,19 +310,9 @@ type Client struct {
 	// the operator's own configuration rather than anything the resolver wrote, it is
 	// bounded by whatever they put in the environment variable, and without it "the secret
 	// resolver could not be reached" does not say which resolver. It is kept separately
-	// from url because url is a request URL with resolvePath appended and no credential,
-	// which is a different question from "what was this client pointed at".
+	// from url because url is a request URL with resolvePath appended, which is a
+	// different question from "what was this client pointed at".
 	endpoint string
-
-	// credential authenticates to the resolver. It is held here rather than left in url,
-	// where net/http would derive the same Authorization header from it, because the URL
-	// is what every transport error prints: http.Client.Do fails with a *url.Error built
-	// from stripPassword(req.URL), and that masks the password and nothing else - a token
-	// passed as "http://<token>@resolver:9100", which is the form this protocol offers,
-	// comes back whole. That error is wrapped into the stack's deployment status message,
-	// which Portainer persists and StackInspect serves. Kept out of the URL and applied
-	// per request, the credential cannot reach any error text at all.
-	credential *url.Userinfo
 
 	// configErr carries a broken environment configuration. The composition root
 	// builds the client from a constructor whose signature cannot return an error,
@@ -364,11 +354,10 @@ func FromEnv() *Client {
 	}
 
 	// Logged so a typo in the endpoint surfaces at startup rather than at the first
-	// deploy of a migrated stack - but never the endpoint as given. It can carry a
-	// credential: "http://user:token@resolver:9100" parses, and its userinfo is in fact
-	// the only way this protocol offers to authenticate to a remote resolver. New keeps
-	// that userinfo out of the client's URL and applies it per request instead, so these
-	// two lines are the last place where the endpoint as configured is in hand at all.
+	// deploy of a migrated stack - but never the endpoint as given. Userinfo in an
+	// http(s) endpoint is refused by New above, so a credential can only reach this line
+	// through the unix:// form, where it is a stretch of the socket path rather than a
+	// credential - and the redaction holds for both without having to tell them apart.
 	safeEndpoint := redactEndpoint(endpoint)
 
 	log.Info().Str("endpoint", safeEndpoint).Dur("timeout", timeout).Msg("Secret resolver configured")
@@ -522,6 +511,18 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 
 	switch {
 	case strings.HasPrefix(endpoint, "unix://"):
+		// No userinfo refusal here, unlike the http(s) branch below: the dialer below receives
+		// everything after "unix://" as a filesystem path, so a "user:token@" in it is part of
+		// that path and reaches nobody as a credential - there is no remote to authenticate to.
+		//
+		// Not because the endpoint goes unparsed. It does get parsed, by the redactEndpoint
+		// calls in this branch, and that parse has a consequence worth knowing: measured,
+		// "unix://user:token@/run/x.sock" dials the path "user:token@/run/x.sock" while every
+		// message and log line naming this client says "unix:///run/x.sock". The printed form
+		// is therefore not always the path in use. That is the userinfo rule doing its job on a
+		// string that only looks like it has userinfo, and it costs a slice of the real path in
+		// diagnostics - which is the safe direction, and the reason this is stated rather than
+		// special-cased.
 		socketPath := strings.TrimPrefix(endpoint, "unix://")
 		if socketPath == "" {
 			// %s and not %q at this and every other endpoint-printing site: redactEndpoint
@@ -589,10 +590,21 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 			return nil, fmt.Errorf("invalid secret resolver endpoint, it is not named because it can carry a credential, only the parser's own bounded reason is kept: %s", sanitize(reason, maxEndpointBytes))
 		}
 
-		// Taken out of the URL before anything below can quote it, and applied per request
-		// in Fetch instead. See Client.credential.
-		credential := parsed.User
-		parsed.User = nil
+		// Refused, not carried. The endpoint comes from PORTAINER_SECRET_RESOLVER, and
+		// libstack.PortainerEnvVars sweeps every PORTAINER_-prefixed variable of the server
+		// process into the compose environment of every project, so a stack body that
+		// interpolates that variable puts this endpoint into a container's Config.Env -
+		// readable through the docker proxy by anyone who can edit a stack. A credential
+		// placed here would therefore publish itself, and this package has no channel that
+		// can carry one safely, so the configuration is refused rather than used.
+		//
+		// The refusal is at startup and not at the first deploy for the same reason a broken
+		// timeout is: a misconfiguration that only surfaces mid-migration is the expensive
+		// kind. redactEndpoint is what keeps the credential out of this error, which FromEnv
+		// turns into configErr and every Fetch then persists as a deployment status message.
+		if parsed.User != nil {
+			return nil, fmt.Errorf("secret resolver endpoint %s carries a credential in its userinfo, which is refused: %s is interpolated into every compose project, so a credential in it is readable from any stack", redactEndpoint(endpoint), EndpointEnvVar)
+		}
 
 		if parsed.Host == "" {
 			// Through redactEndpoint, which bounds it: "http:///" plus a mebibyte of path
@@ -601,11 +613,9 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 		}
 
 		return &Client{
-			credential: credential,
 			httpClient: &http.Client{
-				// See refuseRedirects. This is the branch where both of its reasons bite: the
-				// Location comes off a network hop, and this is the only branch that carries a
-				// credential.
+				// See refuseRedirects. This is the branch where its reason bites hardest: the
+				// Location comes off a network hop, written by whatever answered.
 				CheckRedirect: refuseRedirects,
 				// See redirectReporter.
 				Transport: &redirectReporter{base: &http.Transport{
@@ -627,9 +637,10 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 				}},
 			},
 			url: strings.TrimRight(parsed.String(), "/") + resolvePath,
-			// parsed already has its userinfo removed, so this is redactEndpoint's own
-			// output; it goes through the function anyway, because the invariant that every
-			// printed endpoint passes through one place is what keeps this cheap to review.
+			// parsed cannot carry userinfo at all - the branch above refuses it - so this is
+			// already redactEndpoint's own output; it goes through the function anyway,
+			// because the invariant that every printed endpoint passes through one place is
+			// what keeps this cheap to review.
 			endpoint: redactEndpoint(parsed.String()),
 			timeout:  timeout,
 		}, nil
@@ -658,15 +669,6 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 // walks past all three guards this package already has - maxResolverErrorBytes,
 // truncateContentType, and the withholding of an undecodable body - because the text arrives
 // through the URL and not through the body.
-//
-// Credential travel. The endpoint's credential used to ride in req.URL.User and now goes out
-// as an Authorization header set per request in Fetch, from Client.credential; see the field
-// for why it moved. That move changed what a redirect does with it. net/http's
-// shouldCopyHeaderOnRedirect compares the HOSTNAME only, ignoring scheme and port, so the
-// header follows a redirect to a different port on the same host, and from an https://
-// endpoint down to plain http:// on the same host. The userinfo-in-URL form never did that,
-// because URL.ResolveReference drops userinfo for an absolute Location. Measured against a
-// vanilla client on the second hop: this client sent Authorization, vanilla did not.
 //
 // With the redirect refused, the 3xx lands on Fetch's non-2xx branch, which names
 // resp.StatusCode and the resolver's own bounded error field and nothing else. So no part of
@@ -877,16 +879,6 @@ func (c *Client) Fetch(ctx context.Context, refs []string) (map[string]string, e
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-
-	// Set here rather than left to net/http, which derives the same header from userinfo
-	// in the URL - at the price of keeping the credential in c.url, where every transport
-	// error prints it. A token passed in the username position has no password, which
-	// basic auth encodes as an empty one. See Client.credential.
-	if c.credential != nil {
-		password, _ := c.credential.Password()
-
-		req.SetBasicAuth(c.credential.Username(), password)
-	}
 
 	log.Debug().Int("references", len(unique)).Msg("Resolving secret references")
 

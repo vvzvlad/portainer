@@ -261,6 +261,11 @@ Runbook rule: once a stack is migrated, versions older than the migration are un
 to roll back to, and pre-migration version directories should be pruned rather than
 left as tempting restore points.
 
+The same applies to the **Portainer image**: once stacks are migrated, rolling it back to a
+build without this patch is unsafe — stock Portainer passes `secret:vw:…` through as a
+literal, and a service that creates its credential on first start against an empty volume
+creates it *as that string*.
+
 ### 3.7 Residual leak channels (not closed by this work)
 
 | Channel | Status |
@@ -409,6 +414,19 @@ mounted file, not in Portainer's environment, and not as an environment variable
 there. Had the fork instead talked to Vaultwarden directly with a credential in its own
 env — the rejected option in §6 — that credential would have been interpolatable into
 any stack by anyone who can edit a stack body.
+
+**That claim is only true because the code makes it true, and for a while it was not.**
+The client used to accept `http://user:token@resolver:9100` and documented that userinfo as
+the way to authenticate to a remote resolver — which makes the address itself a secret and
+publishes it through exactly the channel this row describes: any stack body containing
+`${PORTAINER_SECRET_RESOLVER}` gets the token into a container's `Config.Env`, readable
+through the docker proxy. `secretresolver.New` now **refuses** an `http(s)://` endpoint whose
+userinfo carries a credential, so Portainer starts with a resolver configuration that fails
+every deploy of a stack using references rather than one that quietly publishes its own
+credential. The rule below is enforced for this variable, not merely addressed to the
+operator. Nothing is lost by the refusal: the deployment is a unix socket (§4.6), remote
+authentication was never a requirement, and this design has no channel that could carry a
+token safely — adding one is a design change, not a configuration option.
 
 The general rule that follows: **never put a secret into a `PORTAINER_`-prefixed
 variable on the server process.** Worth stating out loud, because it looks like the
@@ -633,11 +651,13 @@ for `net/http` to parse a response — the fact that `Fetch` no longer wraps a t
 at all, which is why that bullet now says *classified*.
 
 Both come back as a `*url.Error`, and a `*url.Error` prints the URL of the request. The
-endpoint is *not* wholly public — its userinfo is the only way this protocol offers to
-authenticate to a remote resolver, which is exactly why `redactEndpoint` exists for the
-startup log. `net/http` builds that error from `stripPassword(req.URL)`, and `stripPassword`
-masks a **password** and nothing else, so the documented `http://<token>@resolver:9100` form
-came back whole — on the commonest failure this feature has, a resolver that is down,
+endpoint is *not* wholly public — it can be **given** with userinfo, and an operator who has
+a credential will put it there, which is why every printed endpoint goes through
+`redactEndpoint`, the refusal error included. The startup log is now reachable with userinfo
+only through the `unix://` form, where it is a stretch of the socket path rather than a
+credential. `net/http` builds that error from `stripPassword(req.URL)`, and `stripPassword`
+masks a **password** and nothing else, so the `http://<token>@resolver:9100` form this
+package once offered came back whole — on the commonest failure this feature has, a resolver that is down,
 unreachable or slow, and on every retry of it, accumulating in `DeploymentStatus[]`.
 Reproduced rather than suspected:
 
@@ -649,11 +669,20 @@ Post "http://user:***@127.0.0.1:1/v1/resolve":        dial tcp: connection refus
 The withholding of §3.7 does not cover it: that wraps the *deployer's* error, while a
 resolution error leaves `Up` directly.
 
-So the mechanism, and not the conclusion: `New` parses the endpoint, moves its
-`url.Userinfo` into a field of the client, and builds the request URL from what is left, so
-that neither `c.url` nor `req.URL` holds it; `Fetch` sends the credential as an explicit
-`req.SetBasicAuth`, which is the identical header `net/http` would have derived from the
-userinfo. No transport error can then quote what the URL no longer contains. The same rule
+So the mechanism, and not the conclusion: `New` **refuses** an endpoint whose userinfo carries
+a credential, and builds a request URL only from one that does not, so neither `c.url` nor
+`req.URL` can hold a credential and no transport error can quote one.
+
+That refusal replaced an arrangement which moved the userinfo into a field of the client and
+re-sent it per request as an explicit `req.SetBasicAuth`. It worked, for what it was aimed at:
+the credential reached no error text and no log line. It was removed anyway, because it was
+aimed at the wrong thing. The credential lived in `PORTAINER_SECRET_RESOLVER`, and
+`PortainerEnvVars()` sweeps every `PORTAINER_`-prefixed variable of the server process into
+the compose environment of **every** project, so a stack body containing
+`${PORTAINER_SECRET_RESOLVER}` published it into that container's `Config.Env` — readable
+through the docker proxy by anyone who can edit a stack. Forty lines of this package guarded a
+credential that the variable holding it handed out anyway. The rule in §3.7 is the general
+form, and this is the one place the feature had to obey it rather than state it. The same rule
 covers `New`'s own error strings, which matter more than they look: a bad endpoint is kept as
 `configErr` and returned by **every** `Fetch`, so a single misconfiguration publishes on
 every deploy rather than once. Substituting `redactEndpoint` for `%q` is not enough there —
@@ -950,24 +979,26 @@ cannot drift apart — and asserts that a planted value appears in none of the m
 error path that carries a value fails it.
 
 That table missed the credential for three rounds, because it reached the resolver over a
-`unix://` socket and a bare `httptest` URL, neither of which has userinfo. It now plants the
-value **as the endpoint's credential** on every case that reaches a resolver through the real
-client over the network — eleven of its fifteen: the eight `resolverAt` cases, which splice it
-into the `httptest` URL's username position, the two unreachable-endpoint cases, which carry it
-in the username and in the password respectively, and the misconfigured-endpoint case. So an
-operator's token is under the same assertion as a resolved value on those paths, rather than
-under a single case written specially for it.
+`unix://` socket and a bare `httptest` URL, neither of which has userinfo. It answered by
+planting the value **as the endpoint's credential** on every case that reached a resolver
+through the real client over the network. That arrangement is gone — not because it was wrong,
+but because the channel it guarded is: `New` refuses an endpoint whose userinfo carries a
+credential, so a working endpoint with one to plant no longer exists.
 
-**Four cases cannot carry one, and they are the exception rather than a gap.** Two of them have
-no endpoint at all: "no resolver is configured" runs with a nil resolver, and "a variable is left
-without a value" is driven by a stub, because the real client guarantees a value for every
-requested reference and the path is otherwise unreachable. The other two — "the resolver
-configuration is broken" and "the resolver cannot be reached" — address a `unix://` socket path,
-which has no userinfo position to hold a credential. Those two are covered anyway, by the
-credential-carrying twin that sits beside each of them in the table: the broken configuration is
-followed by "…names an endpoint carrying a credential", and the unreachable socket by the two
-"…cannot be reached, with a token/password in the endpoint" cases, which raise the same two
-errors — `configErr` and the dial failure — from an endpoint that does have one.
+**Two cases remain where a credential can still be written, and both assert that it does not
+survive the refusal that rejects it.** One names a `tcp://` endpoint, refused for its scheme;
+the other an `http://` endpoint, refused for its userinfo — the branch added with the refusal
+itself, so the new error path is under the same assertion as every older one. Each keeps
+`resolver.example:9100` in the message, so neither can pass by saying nothing, and each is a
+`configErr`, which every `Fetch` returns: the text under assertion is the one published on
+every deploy of every stack that uses references, not once at startup.
+
+The rest of the table carries no credential because no path through it can any more. "No
+resolver is configured" runs with a nil resolver and "a variable is left without a value" with
+a stub — the real client guarantees a value for every requested reference, so that path is
+otherwise unreachable. Everything else names an endpoint that has no credential to plant: a
+`unix://` socket path, a bare loopback address (`http://127.0.0.1:1`, whose dial is refused
+because nothing listens there), or an `httptest` URL handed over as the server printed it.
 
 ### 3.13 The text that was *not* the resolver's was the unbounded one
 
@@ -1580,6 +1611,10 @@ Recorded so they are not re-proposed.
    rest.
 6. **Rotation.** These values sat in compose bodies that agents read as a matter of
    course. Migrating them is hygiene; it does not undo the exposure. ~65 variables.
+
+One invariant this plan does **not** buy: nothing makes Portainer the only client of the
+resolver — the socket is a bind-mount, so any container allowed to mount that path asks the
+resolver for values directly, past every gate Portainer applies.
 
 ### Naming in the vault
 

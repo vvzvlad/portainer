@@ -240,19 +240,19 @@ const plantedValue = "Zt9mLr5Vb2nHd8Xk7pQw3"
 // and a stub would pin neither: the whole point is that the two halves cannot drift
 // apart without the test noticing.
 //
-// The endpoint carries plantedValue as its credential, in the username position - the form
-// net/http does not mask in its own errors and the form this protocol actually offers. An
-// operator's credential and a resolved value are the same class of thing on this path, so
-// putting it here rather than in a case of its own subjects every message in the table to
-// the leak assertion. The table missed the leak once already, by reaching the resolver
-// through a unix socket and a bare httptest URL, neither of which has userinfo.
+// The endpoint carries no credential, and cannot: secretresolver.New refuses one, because
+// the endpoint is PORTAINER_SECRET_RESOLVER and compose interpolates that into every
+// project. What it can still carry into these messages is its host and port - an ephemeral
+// httptest one here, which is why the cases built on this helper assert on the diagnostic
+// they must keep rather than on the address. The two cases that do assert on a host and port
+// name a fixed one and are configured through the environment, not through this helper.
 func resolverAt(t *testing.T, timeout time.Duration, handler http.HandlerFunc) secretFetcher {
 	t.Helper()
 
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	return resolverFor(t, withCredential(server.URL), timeout)
+	return resolverFor(t, server.URL, timeout)
 }
 
 // resolverFor returns a real client for an endpoint that need not answer.
@@ -263,14 +263,6 @@ func resolverFor(t *testing.T, endpoint string, timeout time.Duration) secretFet
 	require.NoError(t, err)
 
 	return client
-}
-
-// withCredential splices plantedValue into an endpoint as a token in the username
-// position, which is how a credential reaches a remote resolver.
-func withCredential(endpoint string) string {
-	scheme, rest, _ := strings.Cut(endpoint, "://")
-
-	return scheme + "://" + plantedValue + "@" + rest
 }
 
 // assertNoValueLeak fails when text carries value in any form in which a value can
@@ -335,6 +327,16 @@ func Test_resolveStackSecrets_errorPathsCarryNoSecretValue(t *testing.T) {
 	misconfiguredEndpoint := secretresolver.FromEnv()
 	require.NotNil(t, misconfiguredEndpoint)
 
+	// A third, and the one that reaches the refusal added for the credential channel rather
+	// than the unsupported-scheme branch above: a supported scheme whose userinfo carries a
+	// credential. New refuses it, and the refusal is a configErr like the two before it, so
+	// its text is published on every deploy of every stack that uses references.
+	t.Setenv(secretresolver.EndpointEnvVar, "http://portainer:"+plantedValue+"@resolver.example:9100")
+	t.Setenv(secretresolver.TimeoutEnvVar, "")
+
+	refusedCredential := secretresolver.FromEnv()
+	require.NotNil(t, refusedCredential)
+
 	unreachable, err := secretresolver.New("unix:///nonexistent/secret-resolver.sock", time.Second)
 	require.NoError(t, err)
 
@@ -361,22 +363,22 @@ func Test_resolveStackSecrets_errorPathsCarryNoSecretValue(t *testing.T) {
 			contains: "resolver.example:9100",
 		},
 		{
+			name:     "the resolver endpoint is refused for carrying a credential",
+			resolver: refusedCredential,
+			contains: "resolver.example:9100",
+		},
+		{
 			name:     "the resolver cannot be reached",
 			resolver: unreachable,
 			contains: "failed to reach",
 		},
 		{
 			// A resolver that is down or unreachable is the commonest failure this feature
-			// has, and http.Client.Do reports it as a *url.Error built from
-			// stripPassword(req.URL) - which masks a password and nothing else. Nothing
-			// listens on port 1, so the dial is refused rather than hung.
-			name:     "the resolver cannot be reached, with a token in the endpoint username",
-			resolver: resolverFor(t, withCredential("http://127.0.0.1:1"), time.Second),
-			contains: "failed to reach",
-		},
-		{
-			name:     "the resolver cannot be reached, with a password in the endpoint",
-			resolver: resolverFor(t, "http://portainer:"+plantedValue+"@127.0.0.1:1", time.Second),
+			// has, and it is the one whose message is built by net/http rather than by this
+			// package - so it is driven through the http branch as well as the unix one
+			// above. Nothing listens on port 1, so the dial is refused rather than hung.
+			name:     "the resolver cannot be reached over http",
+			resolver: resolverFor(t, "http://127.0.0.1:1", time.Second),
 			contains: "failed to reach",
 		},
 		{

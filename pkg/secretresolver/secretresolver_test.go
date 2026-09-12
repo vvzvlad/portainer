@@ -267,8 +267,8 @@ func newTestClient(t *testing.T, endpoint string) *Client {
 	return client
 }
 
-// withUserinfo splices a credential into an endpoint, which is the only way this protocol
-// offers to authenticate to a remote resolver.
+// withUserinfo splices a credential into an endpoint, which is the shape New refuses: the
+// endpoint is PORTAINER_SECRET_RESOLVER, and compose interpolates that into every project.
 func withUserinfo(endpoint, userinfo string) string {
 	scheme, rest, _ := strings.Cut(endpoint, "://")
 
@@ -719,135 +719,58 @@ func TestFetch(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("sends the endpoint credential as basic auth", func(t *testing.T) {
+	t.Run("sends no Authorization header", func(t *testing.T) {
 		t.Parallel()
 
-		// The credential is kept out of the URL so that no transport error can print it,
-		// which means the header net/http would have derived from the userinfo has to be
-		// built by hand. Without this a resolver behind authentication would start refusing
-		// every deploy, and nothing else in the suite would notice.
-		type credential struct {
-			username string
-			password string
-			ok       bool
-		}
+		// The request carries no credential at all, and that is the whole protocol: an
+		// endpoint whose userinfo holds one is refused by New, because the endpoint is
+		// PORTAINER_SECRET_RESOLVER and compose interpolates it into every project. Pinned
+		// so that reintroducing per-request auth is a test change rather than a quiet one,
+		// and pinned on the http branch, which is the only one a credential ever reached.
+		got := make(chan string, 1)
 
-		tests := []struct {
-			name     string
-			userinfo string
-			want     credential
-		}{
-			{
-				name:     "a token in the username",
-				userinfo: "Zt9mLr5Vb2nHd8",
-				want:     credential{username: "Zt9mLr5Vb2nHd8", ok: true},
-			},
-			{
-				name:     "a username and a password",
-				userinfo: "portainer:Zt9mLr5Vb2nHd8",
-				want:     credential{username: "portainer", password: "Zt9mLr5Vb2nHd8", ok: true},
-			},
-		}
+		endpoint := startOverHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// A channel and not a plain variable: the handler runs on its own goroutine,
+			// and a response body read is not an ordering the race detector knows about.
+			got <- r.Header.Get("Authorization")
 
-		for _, test := range tests {
-			t.Run(test.name, func(t *testing.T) {
-				t.Parallel()
+			_ = json.NewEncoder(w).Encode(resolveResponse{Values: map[string]string{"secret:vw:a": "value-a"}})
+		}))
 
-				// A channel and not a plain variable: the handler runs on its own goroutine,
-				// and a response body read is not an ordering the race detector knows about.
-				got := make(chan credential, 1)
+		_, err := newTestClient(t, endpoint).Fetch(t.Context(), []string{"secret:vw:a"})
+		require.NoError(t, err)
 
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					username, password, ok := r.BasicAuth()
-					got <- credential{username: username, password: password, ok: ok}
-
-					_ = json.NewEncoder(w).Encode(resolveResponse{Values: map[string]string{"secret:vw:a": "value-a"}})
-				}))
-				t.Cleanup(server.Close)
-
-				endpoint := withUserinfo(server.URL, test.userinfo)
-
-				_, err := newTestClient(t, endpoint).Fetch(t.Context(), []string{"secret:vw:a"})
-				require.NoError(t, err)
-
-				assert.Equal(t, test.want, <-got)
-			})
-		}
+		assert.Empty(t, <-got)
 	})
 
-	t.Run("keeps the endpoint credential out of a transport error", func(t *testing.T) {
+	t.Run("refuses a credentialed endpoint instead of reaching it", func(t *testing.T) {
 		t.Parallel()
 
-		// The most common failure this feature has - a resolver that is down, unreachable
-		// or wedged - and the one that publishes. http.Client.Do fails with a *url.Error
-		// whose URL is stripPassword(req.URL), and that masks the password only: a token in
-		// the username position, which is the form the endpoint documentation offers, comes
-		// back whole. The error is wrapped into the stack's deployment status message, which
-		// Portainer persists and StackInspect serves, and it repeats on every retry.
-		const token = "Zt9mLr5Vb2nHd8"
+		// A resolver that is down, unreachable or wedged is the commonest failure this
+		// feature has, and its error is persisted as the stack's deployment status message
+		// on every retry - so a credential in the endpoint used to need keeping out of that
+		// text. It is refused instead, and refused by New, which is earlier than any of it:
+		// no dial, no round trip, no error text to guard.
+		const (
+			user  = "Rk7nQw2Us3"
+			token = "Zt9mLr5Vb2nHd8"
+		)
 
-		wedged := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Released by the client's own deadline closing the connection; the timer is
-			// only a backstop so a failing case cannot wedge the suite.
-			select {
-			case <-r.Context().Done():
-			case <-time.After(2 * time.Second):
-			}
-		}))
-		t.Cleanup(wedged.Close)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		t.Cleanup(server.Close)
 
-		tests := []struct {
-			name     string
-			endpoint string
-			timeout  time.Duration
-			// contains is the diagnostic that must survive, so the assertion cannot be
-			// satisfied by a message that says nothing at all.
-			contains string
-		}{
-			{
-				name: "unreachable, with a token in the username",
-				// Nothing listens on port 1, so the dial is refused rather than hung.
-				endpoint: "http://" + token + "@127.0.0.1:1",
-				timeout:  5 * time.Second,
-				contains: "127.0.0.1:1",
-			},
-			{
-				name:     "unreachable, with a username and a password",
-				endpoint: "http://portainer:" + token + "@127.0.0.1:1",
-				timeout:  5 * time.Second,
-				contains: "127.0.0.1:1",
-			},
-			{
-				// The phrase is the classification's, not net/http's: a transport error is
-				// no longer wrapped, so "context deadline exceeded" no longer appears in the
-				// message. It is still reachable with errors.Is - see
-				// TestFetchClassifiesATransportFailure.
-				name:     "no answer in time, with a token in the username",
-				endpoint: withUserinfo(wedged.URL, token),
-				timeout:  50 * time.Millisecond,
-				contains: "no answer within",
-			},
-			{
-				name:     "no answer in time, with a username and a password",
-				endpoint: withUserinfo(wedged.URL, "portainer:"+token),
-				timeout:  50 * time.Millisecond,
-				contains: "no answer within",
-			},
-		}
+		// The endpoint itself is one New accepts - asserted here rather than assumed, so
+		// that the refusals below can only be about the userinfo spliced into it. A counter
+		// on the handler would say nothing: New never dials, so it would read zero whether
+		// the refusal works or not, and require.Error would abort before reaching it anyway.
+		accepted, err := New(server.URL, time.Second)
+		require.NoError(t, err)
+		assert.NotNil(t, accepted)
 
-		for _, test := range tests {
-			t.Run(test.name, func(t *testing.T) {
-				t.Parallel()
-
-				client, err := New(test.endpoint, test.timeout)
-				require.NoError(t, err)
-
-				_, err = client.Fetch(t.Context(), []string{"secret:vw:a"})
-				require.Error(t, err)
-
-				assert.NotContains(t, err.Error(), token)
-				assert.Contains(t, err.Error(), test.contains)
-			})
+		for _, userinfo := range []string{token, user + ":" + token} {
+			client, err := New(withUserinfo(server.URL, userinfo), time.Second)
+			require.Error(t, err, userinfo)
+			assert.Nil(t, client)
 		}
 	})
 }
@@ -864,8 +787,9 @@ var redirectStatuses = []int{
 }
 
 // TestFetchRefusesRedirects pins refuseRedirects, which is set on the http.Client of both
-// endpoint forms. Without it http.Client.Do follows up to ten redirects, and two things the
-// rest of this suite guards leak straight past their guards.
+// endpoint forms. Without it http.Client.Do follows up to ten redirects: the resolver's own
+// Location walks past every guard in this suite and into the persisted error, and the POST
+// that asks for the secret values is sent to a host the resolver named.
 func TestFetchRefusesRedirects(t *testing.T) {
 	t.Parallel()
 
@@ -945,35 +869,21 @@ func TestFetchRefusesRedirects(t *testing.T) {
 	t.Run("never sends a second request to the redirect target", func(t *testing.T) {
 		t.Parallel()
 
-		// This is the assertion for the credential. It used to ride in req.URL.User, where
-		// URL.ResolveReference dropped it on an absolute Location; it now goes out as an
-		// Authorization header set per request, and net/http's shouldCopyHeaderOnRedirect
-		// compares the HOSTNAME only - ignoring scheme and port - so the header would follow
-		// a redirect to another port on the same host, which is exactly what a second
-		// loopback listener is, and from https:// down to plain http:// on the same host.
-		//
-		// No second request is the strongest form of "the credential did not travel", so the
-		// counter staying at zero is the whole test.
-		const token = "Zt9mLr5Vb2nHd8"
-
+		// The request the resolver's Location asks for is never made: a redirect is an
+		// invitation to ask a host of the resolver's choosing for the secret values, and no
+		// part of this package is willing to take it. A counter at zero is the whole test,
+		// because refusing to send the second request is the only assertion that does not
+		// depend on what the second request would have carried.
 		for _, status := range redirectStatuses {
 			t.Run(strconv.Itoa(status), func(t *testing.T) {
 				t.Parallel()
 
-				// Atomics and not plain variables: the handlers run on the server's own
+				// An atomic and not a plain variable: the handlers run on the server's own
 				// goroutines, and nothing here synchronises them with the assertions.
-				var (
-					targetRequests  atomic.Int64
-					targetSawAuth   atomic.Bool
-					firstHopSawAuth atomic.Bool
-				)
+				var targetRequests atomic.Int64
 
 				target := startOverHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					targetRequests.Add(1)
-
-					if _, _, ok := r.BasicAuth(); ok {
-						targetSawAuth.Store(true)
-					}
 
 					// A perfectly good answer, so that a regression fails on the counter rather
 					// than on some incidental decode error further down.
@@ -981,29 +891,19 @@ func TestFetchRefusesRedirects(t *testing.T) {
 				}))
 
 				redirector := startOverHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if _, _, ok := r.BasicAuth(); ok {
-						firstHopSawAuth.Store(true)
-					}
-
 					w.Header().Set("Location", target+resolvePath)
 					w.WriteHeader(status)
 				}))
 
-				client, err := New(withUserinfo(redirector, token), time.Second)
+				client, err := New(redirector, time.Second)
 				require.NoError(t, err)
 
 				_, err = client.Fetch(t.Context(), []string{"secret:vw:a"})
 				require.Error(t, err)
 
 				assert.Equal(t, int64(0), targetRequests.Load())
-				assert.False(t, targetSawAuth.Load())
 
-				// The credential really was on the first hop, so the zero above is the redirect
-				// being refused and not the credential having gone missing altogether.
-				assert.True(t, firstHopSawAuth.Load())
-
-				// Neither the credential nor the host the resolver named reaches the message.
-				assert.NotContains(t, err.Error(), token)
+				// The host the resolver named does not reach the message either.
 				assert.NotContains(t, err.Error(), target)
 				assert.Contains(t, err.Error(), strconv.Itoa(status))
 			})
@@ -1601,24 +1501,49 @@ func TestNew(t *testing.T) {
 		assert.Equal(t, "http://resolver:9100"+resolvePath, client.url)
 	})
 
-	t.Run("keeps the endpoint credential out of the client URL", func(t *testing.T) {
+	t.Run("refuses an endpoint whose userinfo carries a credential", func(t *testing.T) {
 		t.Parallel()
 
-		const token = "Zt9mLr5Vb2nHd8"
+		// The endpoint is PORTAINER_SECRET_RESOLVER, and libstack.PortainerEnvVars sweeps
+		// every PORTAINER_-prefixed variable of the server process into the compose
+		// environment of every project - so a credential placed in the endpoint is
+		// interpolatable into any stack body and readable from that container's Config.Env.
+		// There is no channel here that can carry one safely, so it is refused at startup.
+		const (
+			user  = "Rk7nQw2Us3"
+			token = "Zt9mLr5Vb2nHd8"
+		)
 
-		// url is what net/http prints in every transport error, so the credential is held
-		// beside it and applied per request instead. Both forms: the password is the one
-		// net/http masks on its own, the token in the username position is the one it does
-		// not - and the latter is the form this protocol actually offers.
-		for _, userinfo := range []string{token, "portainer:" + token} {
-			client, err := New("http://"+userinfo+"@resolver:9100", time.Second)
-			require.NoError(t, err)
+		// Both halves are named separately, and each is asserted on its own: net/http masks
+		// a password in its own errors and leaves a username whole, so a suite that only
+		// watches the password half would not see the form that was actually documented -
+		// "http://<token>@resolver:9100", where the password is empty.
+		tests := []struct {
+			name     string
+			endpoint string
+		}{
+			{name: "a token in the username, no password", endpoint: "http://" + token + "@resolver:9100"},
+			{name: "a username and a password", endpoint: "http://" + user + ":" + token + "@resolver:9100"},
+			{name: "over https", endpoint: "https://" + user + ":" + token + "@resolver:9100"},
+		}
 
-			assert.Equal(t, "http://resolver:9100"+resolvePath, client.url)
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				t.Parallel()
 
-			// Stripped, not dropped: it is still sent, as a header built in Fetch.
-			require.NotNil(t, client.credential)
-			assert.Contains(t, client.credential.String(), token)
+				client, err := New(test.endpoint, time.Second)
+				require.Error(t, err)
+				assert.Nil(t, client)
+
+				assert.NotContains(t, err.Error(), token)
+				assert.NotContains(t, err.Error(), user)
+
+				// The diagnosis survives, so the two assertions above cannot be satisfied by a
+				// message that says nothing: the operator is told which endpoint was refused
+				// and which variable makes a credential in it readable.
+				assert.Contains(t, err.Error(), "resolver:9100")
+				assert.Contains(t, err.Error(), EndpointEnvVar)
+			})
 		}
 	})
 
@@ -1724,8 +1649,10 @@ func TestNew(t *testing.T) {
 
 		// redactEndpoint is the single place an endpoint is rendered and therefore the
 		// single place the bound belongs - but "every site goes through it" is only worth
-		// anything if every site is driven. These are the three that name an endpoint and
-		// return, and each takes a different branch of New.
+		// anything if every site is driven. These are the four whose length a bound can be
+		// measured on, and the first three each take a different branch of New. The fifth
+		// print site is New's "has no socket path", which is left out because nothing can be
+		// measured there: it is reachable only by the literal string "unix://".
 		const size = 1 << 20
 
 		tests := []struct {
@@ -1750,6 +1677,16 @@ func TestNew(t *testing.T) {
 				name:     "a unix socket path",
 				endpoint: "unix:///run/" + strings.Repeat("s", size) + ".sock",
 				contains: "",
+			},
+			{
+				// The newest site, and the one whose text is published most often: this
+				// refusal becomes configErr, which every Fetch returns and every deploy
+				// of every stack using references persists as its status message. The
+				// host carries the length here - the userinfo goes before printing, so
+				// it cannot be what the bound is measured on.
+				name:     "an endpoint whose userinfo carries a credential",
+				endpoint: "http://user:token@" + strings.Repeat("h", size),
+				contains: "carries a credential",
 			},
 		}
 
@@ -2219,14 +2156,11 @@ func TestFromEnv(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps endpoint credentials out of the log", func(t *testing.T) {
-		// Userinfo is the only way this protocol offers to authenticate to a remote
-		// resolver, and net/http itself treats it as secret, stripping the password from
-		// its own url.Error. New keeps it out of the client's URL, so these two startup
-		// lines are the last place the endpoint as configured is in hand at all.
-		const token = "Zt9mLr5Vb2nHd8"
-
-		t.Setenv(EndpointEnvVar, "http://portainer:"+token+"@resolver.example:9100")
+	t.Run("logs the endpoint it was given and warns about plain HTTP", func(t *testing.T) {
+		// Stands alone because the test below - the credential one - can no longer reach
+		// these lines: a refused endpoint returns before either is written, so without this
+		// the plain-HTTP warning would have no cover at all.
+		t.Setenv(EndpointEnvVar, "http://resolver.example:9100")
 
 		buf := captureLog(t)
 
@@ -2235,11 +2169,45 @@ func TestFromEnv(t *testing.T) {
 		output := buf.String()
 
 		// Plain HTTP to a non-loopback host, so both lines fire and both are covered.
-		require.Contains(t, output, "resolver.example:9100")
-		require.Contains(t, output, "clear text")
+		assert.Contains(t, output, "resolver.example:9100")
+		assert.Contains(t, output, "clear text")
+	})
 
+	t.Run("refuses an endpoint credential and keeps it out of the log", func(t *testing.T) {
+		// A credential in the endpoint is refused rather than used, because the endpoint is
+		// PORTAINER_SECRET_RESOLVER and compose interpolates that into every project. The
+		// refusal has to be loud: FromEnv turns it into configErr, so every Fetch fails with
+		// it rather than the resolver being called unauthenticated and the stack deploying.
+		//
+		// Both halves are named separately: net/http strips a password from its own
+		// url.Error and leaves a username whole, so a token in the username position - the
+		// form that used to be documented - is the one nothing else would catch.
+		const (
+			user  = "Rk7nQw2Us3"
+			token = "Zt9mLr5Vb2nHd8"
+		)
+
+		t.Setenv(EndpointEnvVar, "http://"+user+":"+token+"@resolver.example:9100")
+
+		buf := captureLog(t)
+
+		client := FromEnv()
+		require.NotNil(t, client)
+
+		_, err := client.Fetch(t.Context(), []string{"secret:vw:a"})
+		require.Error(t, err)
+
+		output := buf.String()
+
+		assert.NotContains(t, err.Error(), token)
+		assert.NotContains(t, err.Error(), user)
 		assert.NotContains(t, output, token)
-		assert.NotContains(t, output, "portainer:")
+		assert.NotContains(t, output, user)
+
+		// The diagnosis survives in both channels, so the four assertions above cannot be
+		// satisfied by silence: the operator is told which endpoint was refused.
+		assert.Contains(t, err.Error(), "resolver.example:9100")
+		assert.Contains(t, output, "resolver.example:9100")
 	})
 
 	t.Run("keeps endpoint credentials out of a configuration error", func(t *testing.T) {
