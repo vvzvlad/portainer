@@ -835,10 +835,8 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// Test_warnAboutStaleEnvFile pins the four properties the check exists for. Deleting the
-// warnAboutStaleEnvFile call from prepareEnvFile left the whole package green before this
-// test existed, so the first subtest deliberately goes through prepareEnvFile rather than
-// calling the check directly.
+// Test_warnAboutStaleEnvFile pins the four properties the check exists for. The first
+// subtest deliberately goes through prepareEnvFile rather than calling the check directly.
 //
 // It swaps one package-level value - the global logger - so it cannot run in parallel.
 // That is safe: the package's parallel tests resume only once every sequential test has
@@ -1203,11 +1201,6 @@ func Test_NewComposeStackManager_populatesResolverWhenConfigured(t *testing.T) {
 // INPUT of the verb rather than its output: %q renders an invalid UTF-8 byte and a C0 byte as
 // four characters each, a backslash and U+2028 as two per input byte, and an ordinary printable
 // as one. See secretresolver.TruncateName.
-//
-// "Non-printable multi-byte rune" is not a class with one cost, and U+2028 does not speak for
-// it: a C1 control prints as \u00NN, three per input byte, and an astral non-printable as
-// \UNNNNNNNN, two and a half. U+2028 is here because it is the one that ties the backslash at
-// two, not because it represents the others.
 type hostileFiller struct {
 	// name goes into the subtest name.
 	name string
@@ -1218,11 +1211,10 @@ type hostileFiller struct {
 
 // hostileFillers are the classes the ceiling below has to hold against, worst first.
 //
-// The fixture is parameterised over them because 'A', which this test used to use on its own,
-// is the cheapest of them: %q leaves it alone. A ceiling asserted only against 'A' therefore
-// passes for a reason unrelated to what it claims - the swarm refusal measures 635 bytes
-// filled with 'A' against 2081 filled with invalid UTF-8 - which is the exact failure mode
-// this feature exists to catch.
+// The fixture is parameterised over them because 'A' is the cheapest of them: %q leaves it
+// alone. A ceiling asserted only against 'A' therefore passes for a reason unrelated to what
+// it claims - the swarm refusal measures 635 bytes filled with 'A' against 2081 filled with
+// invalid UTF-8.
 var hostileFillers = []hostileFiller{
 	{name: "an invalid UTF-8 byte", text: "\xff"},
 	{name: "NUL", text: "\x00"},
@@ -1328,9 +1320,6 @@ func assertBoundedAndEscaped(t *testing.T, err error, wantNamed ...string) {
 //	U+2028               swarm 1113   no value resolved 1053
 //	backslash            swarm 1117   no value resolved 1057
 //	ordinary printable   swarm  635   no value resolved  575
-//
-// The last row is what this fixture used to assert on its own, and 635 bytes clears a 2048
-// ceiling three times over without ever approaching it - while the first row does not.
 func Test_secretErrors_boundAndEscapeHostileNames(t *testing.T) {
 	t.Parallel()
 

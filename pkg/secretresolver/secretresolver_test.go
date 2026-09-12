@@ -182,8 +182,7 @@ func answerWithoutReading(t *testing.T, listener net.Listener, response string) 
 // The counter is the point. maxResponseBytes is enforced twice - by the io.LimitReader that
 // decides how much is READ, and by the length check that turns the result into a diagnosable
 // error - and only the second of those is visible in the returned message. A test that asserts
-// on the message therefore passes with the limit reader deleted, which is the state this
-// package was in: the memory control its own comment describes was never exercised. What the
+// on the message therefore passes with the limit reader deleted. What the
 // reader does is stop the client short, and the only way to see that from outside is to ask
 // the server how far it got.
 func serveOversizedBody(t *testing.T, listener net.Listener, size int) (*atomic.Int64, <-chan struct{}) {
@@ -641,13 +640,6 @@ func TestFetch(t *testing.T) {
 	t.Run("stops reading at the cap rather than merely reporting it", func(t *testing.T) {
 		t.Parallel()
 
-		// The subtest above asserts the message, and the message comes from the length
-		// check - so it passes with the io.LimitReader deleted, leaving io.ReadAll to pull
-		// an unbounded body into the Portainer server's memory. That reader is what
-		// maxResponseBytes' own comment is about ("so a broken resolver cannot balloon the
-		// memory of the Portainer server") and it was the one bound in this package whose
-		// real job nothing drove.
-		//
 		// A raw listener, because what is being measured is how much went over the wire.
 		const streamed = 32 << 20
 
@@ -1109,9 +1101,7 @@ func TestFetchClassifiesATransportFailure(t *testing.T) {
 	t.Run("an https endpoint in front of something that is not TLS", func(t *testing.T) {
 		t.Parallel()
 
-		// The commonest operator mistake this file has, in its two shapes - and for four
-		// rounds the code had one branch for both, written for the shape it could not
-		// actually catch.
+		// The commonest operator mistake this file has, in its two shapes.
 		//
 		// net/http inspects the failed TLS record header itself and, when it spells
 		// "HTTP/", REPLACES tls.RecordHeaderError with http.ErrSchemeMismatch. So the
@@ -1155,8 +1145,7 @@ func TestFetchClassifiesATransportFailure(t *testing.T) {
 
 				assert.Contains(t, err.Error(), test.contains)
 
-				// The catch-all is the wrong answer for both of these, and it is what each
-				// of them produced before its branch existed.
+				// The catch-all is the wrong answer for both of these.
 				assert.NotContains(t, err.Error(), "could not be read as an HTTP response")
 			})
 		}
@@ -1167,8 +1156,8 @@ func TestFetchClassifiesATransportFailure(t *testing.T) {
 // this package carried.
 //
 // The endpoint is the operator's own configuration rather than resolver text, which is why it
-// is named at all - "the secret resolver could not be reached" does not say which resolver -
-// and why it was left unbounded for four rounds. It is bounded because of where it goes, not
+// is named at all - "the secret resolver could not be reached" does not say which resolver.
+// It is bounded because of where it goes, not
 // because of who wrote it: the transport error is returned by Fetch, wrapped by api/exec into
 // the stack's deployment status message, persisted, and served by StackInspect on every retry.
 // Measured with a mebibyte in PORTAINER_SECRET_RESOLVER: 1048698 bytes.
@@ -1246,9 +1235,8 @@ func TestFetchBoundsTheLoggedTransportDetail(t *testing.T) {
 // deploy. The target is named in the log, reduced to scheme, host and port.
 //
 // The subtests are the four shapes a Location arrives in, and the split matters: only two of
-// them exercise maxRedirectTargetBytes at all, and for two rounds the only one written was the
-// one that does not. redactLocation drops the path BEFORE the bound is applied, so a mebibyte
-// planted in the path is gone either way - deleting the bound left the whole package green.
+// them exercise maxRedirectTargetBytes at all. redactLocation drops the path BEFORE the bound
+// is applied, so a mebibyte planted in the path is gone either way.
 // The payload has to sit in the HOST.
 //
 // The logger is global, so the subtests are sequential.
@@ -1312,9 +1300,7 @@ func TestFetchLogsARefusedRedirectTarget(t *testing.T) {
 			maxOutput: 2048,
 		},
 		{
-			// 300 and 304 carry no Location at all, and url.Parse("") succeeds - so this
-			// used to be logged as "(relative location)", an assertion about a header that
-			// was not there.
+			// 300 and 304 carry no Location at all, and url.Parse("") succeeds.
 			name:      "no location at all",
 			location:  "",
 			requires:  []string{"304", "(no location)"},
@@ -1403,8 +1389,7 @@ func TestRedactLocation(t *testing.T) {
 		},
 		{
 			// 300 and 304 carry no Location, and url.Parse("") succeeds with an empty
-			// scheme and an empty host - so without this case the line asserted that a
-			// header which was not sent was a relative one.
+			// scheme and an empty host.
 			name:     "reports an absent location as absent",
 			location: "",
 			want:     "(no location)",
@@ -1421,7 +1406,7 @@ func TestRedactLocation(t *testing.T) {
 }
 
 // TestFetchBoundsTheLoggedContentType pins the one bound in this package that nothing else
-// covers: replacing the truncation with the raw header left the whole suite green.
+// covers.
 //
 // The header is resolver-written text, capped only by net/http's 10 MiB response header
 // limit, and the log is a lesser channel than the database but not a free one.
@@ -1619,8 +1604,7 @@ func TestNew(t *testing.T) {
 	t.Run("bounds the parser's reason, which quotes a slice of the endpoint", func(t *testing.T) {
 		t.Parallel()
 
-		// The claim this branch's comment used to make - that the endpoint's text is
-		// withheld - was false, and unboundedly so. url.Parse reports a bad port as
+		// url.Parse reports a bad port as
 		// `invalid port ":<the port>" after host`, quoting it whole: measured at a
 		// mebibyte, New's error was 1048735 bytes. That error becomes configErr, which
 		// EVERY Fetch returns and Portainer persists as the stack's deployment status
@@ -1774,7 +1758,7 @@ func TestDefaultTimeoutMatchesTheDocumentedChain(t *testing.T) {
 	assert.Greater(t, DefaultTimeout, resolverRequestBudget)
 }
 
-// hostileResolverError is the payload the round-8 adversarial sweep persisted whole, inside
+// hostileResolverError is the payload the adversarial sweep persisted whole, inside
 // the 512-byte bound and therefore untouched by a control that only measures length.
 //
 // It is not a size attack. Every piece of it is aimed at a reader: two newlines and a forged

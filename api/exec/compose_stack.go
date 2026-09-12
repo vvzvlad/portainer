@@ -284,12 +284,7 @@ func (manager *ComposeStackManager) resolveStackSecrets(ctx context.Context, sta
 			// anyway rather than let the variable through undefined.
 			//
 			// %q and bounded, like every other site that names one of these in a message
-			// persisted as the stack's deployment status and read back by agents. A
-			// variable name is set through the API by whoever edits the stack, so it is
-			// Portainer's own data rather than the resolver's channel that
-			// pkg/secretresolver sanitises - a far narrower channel, and this branch is in
-			// addition unreachable against the real client, but the class is handled the
-			// same way at every site so that no site has to be argued about on its own. See
+			// persisted as the stack's deployment status and read back by agents. See
 			// secretresolver.TruncateName.
 			return nil, nil, fmt.Errorf("stack %q: no value resolved for variable %q", secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(pair.Name))
 		}
@@ -583,12 +578,8 @@ func (manager *ComposeStackManager) prepareEnvFile(stack *portainer.Stack, liter
 // in it, and the project directory is in filesToBackup, so it keeps riding out in
 // every POST /backup.
 //
-// Nothing here touches that file, neither unlinking nor truncating it. Truncation
-// breaks on the same case deletion does, and createEnvFile's comment argues that case
-// at length: <ProjectPath>/stack.env is not necessarily a file Portainer wrote - a
-// stack deployed from a repository is documented to carry its own stack.env in the git
-// clone, which lands in exactly this directory - and destroying such a file's contents
-// is as wrong as unlinking it. The operator is told where the file is instead.
+// Nothing here touches that file, neither unlinking nor truncating it. The operator is
+// told where the file is instead.
 //
 // The message does not tell the operator to delete the file, and deliberately so: the
 // firing condition cannot tell Portainer's own stack.env from the one a git-deployed
