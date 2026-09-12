@@ -9,6 +9,7 @@ import (
 	portainer "github.com/portainer/portainer/api"
 	"github.com/portainer/portainer/api/filesystem"
 	"github.com/portainer/portainer/pkg/libhttp/ssrf"
+	"github.com/portainer/portainer/pkg/secretresolver"
 
 	composeloader "github.com/compose-spec/compose-go/v2/loader"
 	composetypes "github.com/compose-spec/compose-go/v2/types"
@@ -96,10 +97,41 @@ func ValidateComposeURLs(ctx context.Context, stack *portainer.Stack, fileServic
 	return nil
 }
 
+// RefuseEdgeStackSecretReferences refuses a secret reference written inline in an edge
+// stack's body, whatever the deployment type.
+//
+// An edge stack's body is shipped verbatim to an agent, and no agent carries a secret
+// resolver: the reference would reach the container as its own text, starting a service
+// on the literal string "secret:..." as its credential, which is what every other path
+// in this feature refuses rather than deploys.
+//
+// Separate from ValidateEdgeStackComposeContent because one entry point needs this half
+// and not the other: the git one, which has never run the SSRF body check and must not
+// start now - see storeManifestFromGitRepository.
+func RefuseEdgeStackSecretReferences(content []byte) error {
+	refs, err := secretresolver.ComposeReferences(content)
+	if err != nil {
+		return errors.Wrap(err, "failed to check the stack file for secret references")
+	}
+
+	if len(refs) > 0 {
+		return errors.New("stack file uses a secret reference, but secret references are not supported for edge stacks")
+	}
+
+	return nil
+}
+
 // ValidateEdgeStackComposeContent checks that every external URL in an edge
 // stack's Compose file is permitted by the active SSRF policy. It is a no-op
 // when SSRF protection is disabled or the deployment type is not compose.
+//
+// It also refuses a secret reference written inline in the body, and refuses it
+// unconditionally - before the no-op check below, and whatever the deployment type.
 func ValidateEdgeStackComposeContent(ctx context.Context, deploymentType portainer.EdgeStackDeploymentType, content []byte) error {
+	if err := RefuseEdgeStackSecretReferences(content); err != nil {
+		return err
+	}
+
 	if !ssrf.IsEnabled() || deploymentType != portainer.EdgeStackDeploymentCompose {
 		return nil
 	}

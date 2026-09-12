@@ -454,3 +454,42 @@ services:
 	err := ValidateComposeURLs(t.Context(), stack, fileService)
 	require.NoError(t, err)
 }
+
+// TestValidateEdgeStackComposeContent_refusesASecretReference pins the refusal an edge
+// stack needs and the compose path does not: the body is shipped verbatim to an agent, and
+// no agent carries a secret resolver, so a reference would reach the container as its own
+// text. The refusal is unconditional - SSRF off, and whatever the deployment type - because
+// neither of those has anything to do with it.
+func TestValidateEdgeStackComposeContent_refusesASecretReference(t *testing.T) {
+	configureSSRF(t, portainer.SSRFModeOff, nil)
+
+	content := []byte(`
+services:
+  app:
+    image: nginx
+    environment:
+      METRICS_TOKEN: secret:vw:stack/nebula/arcextension/METRICS_TOKEN
+`)
+
+	for _, deploymentType := range []portainer.EdgeStackDeploymentType{
+		portainer.EdgeStackDeploymentCompose,
+		portainer.EdgeStackDeploymentKubernetes,
+	} {
+		err := ValidateEdgeStackComposeContent(t.Context(), deploymentType, content)
+		require.ErrorContains(t, err, "secret references")
+	}
+}
+
+func TestValidateEdgeStackComposeContent_acceptsABodyWithoutAReference(t *testing.T) {
+	configureSSRF(t, portainer.SSRFModeOff, nil)
+
+	content := []byte(`
+services:
+  app:
+    image: nginx
+    command: ["--secret", "s3cr3t"]
+`)
+
+	err := ValidateEdgeStackComposeContent(t.Context(), portainer.EdgeStackDeploymentCompose, content)
+	require.NoError(t, err)
+}

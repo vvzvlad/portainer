@@ -928,6 +928,57 @@ func Test_ComposeStackDeploymentConfig_Deploy_gatesSecretReferencesOnAdmin(t *te
 	}
 }
 
+// Test_ComposeStackDeploymentConfig_Deploy_gatesAnInlineBodyReference pins the same rule for
+// a reference written inline in the body, where the divergence is wider still: the deploy
+// rewrites that scalar into a placeholder and interpolates the value, so the string
+// ValidateStackFiles inspected is not the string that starts the containers.
+func Test_ComposeStackDeploymentConfig_Deploy_gatesAnInlineBodyReference(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`services:
+  app:
+    image: nginx
+    environment:
+      METRICS_TOKEN: secret:vw:stack/nebula/arcextension/METRICS_TOKEN
+`)
+
+	newConfig := func(role portainer.UserRole, deployer *countingDeployer) *ComposeStackDeploymentConfig {
+		return &ComposeStackDeploymentConfig{
+			stack: &portainer.Stack{
+				Name:       "arcextension",
+				EntryPoint: "docker-compose.yml",
+			},
+			endpoint:      &portainer.Endpoint{},
+			user:          &portainer.User{Role: role},
+			FileService:   stackFileServiceStub{content: body},
+			StackDeployer: deployer,
+		}
+	}
+
+	t.Run("a regular user cannot deploy it", func(t *testing.T) {
+		t.Parallel()
+
+		deployer := &countingDeployer{}
+
+		err := newConfig(portainer.StandardUserRole, deployer).Deploy(t.Context())
+		require.Error(t, err)
+
+		// The file is named, because a body reference has no variable name to be named by.
+		assert.Contains(t, err.Error(), "docker-compose.yml")
+		assert.Contains(t, err.Error(), "arcextension")
+		assert.Zero(t, deployer.composeDeploys)
+	})
+
+	t.Run("an administrator is not gated", func(t *testing.T) {
+		t.Parallel()
+
+		deployer := &countingDeployer{}
+
+		require.NoError(t, newConfig(portainer.AdministratorRole, deployer).Deploy(t.Context()))
+		assert.Equal(t, 1, deployer.composeDeploys)
+	})
+}
+
 // Test_ComposeStackDeploymentConfig_Deploy_refusesAReferenceWithoutAnEndpoint pins the
 // fail-closed direction: a missing endpoint means no policy check ran at all, which is a
 // reason to refuse a non-administrator rather than to let the deploy through.
@@ -1104,7 +1155,7 @@ func Test_secretRefusals_boundAndEscapeHostileNames(t *testing.T) {
 			t.Run("the non-administrator gate", func(t *testing.T) {
 				t.Parallel()
 
-				assertBoundedAndEscaped(t, refuseSecretReferencesForNonAdmin(stack), "STACKNAME", "VARNAME")
+				assertBoundedAndEscaped(t, refuseSecretReferencesForNonAdmin(stack, stackFileServiceStub{}), "STACKNAME", "VARNAME")
 			})
 
 			t.Run("the unpacker environment builder", func(t *testing.T) {

@@ -54,6 +54,28 @@ func (manager *SwarmStackManager) Deploy(
 		}
 	}
 
+	filePaths := stackutils.GetStackFilePaths(stack, true)
+
+	// A reference written inline in the body is refused for the same reason, and here it is
+	// the only thing that can catch it: the compose path rewrites such a body before it is
+	// deployed, and nothing on this path does.
+	//
+	// An escaped marker in a body is not a reference and keeps passing through verbatim,
+	// unlike an escaped variable, which is unescaped below. Swarm takes the body as it
+	// stands, so the escape would have to be resolved by rewriting the file, which is what
+	// this path deliberately does not do.
+	for _, filePath := range filePaths {
+		_, refs, err := readStackComposeFile(stack, filePath)
+		if err != nil {
+			return err
+		}
+
+		if len(refs) > 0 {
+			return fmt.Errorf("stack %q: compose file %q uses a secret reference, but secret references are not supported for swarm stacks",
+				secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(filePath))
+		}
+	}
+
 	url, proxy, err := fetchEndpointProxy(manager.proxyManager, endpoint)
 	if err != nil {
 		return fmt.Errorf("failed to fetch environment proxy: %w", err)
@@ -62,8 +84,6 @@ func (manager *SwarmStackManager) Deploy(
 	if proxy != nil {
 		defer proxy.Close()
 	}
-
-	filePaths := stackutils.GetStackFilePaths(stack, true)
 
 	env := make([]string, 0, len(stack.Env))
 	escaped := 0
