@@ -7,6 +7,7 @@ import (
 	"github.com/portainer/portainer/api/dataservices"
 	gittypes "github.com/portainer/portainer/api/git/types"
 	"github.com/portainer/portainer/api/internal/registryutils"
+	"github.com/portainer/portainer/pkg/secretresolver"
 )
 
 type StackRemoteOperation string
@@ -40,28 +41,77 @@ type unpackerCmdBuilderOptions struct {
 
 type buildCmdFunc func(stack *portainer.Stack, opts unpackerCmdBuilderOptions, registries []string, env []string) []string
 
-var funcmap = map[StackRemoteOperation]buildCmdFunc{
-	OperationDeploy:        buildDeployCmd,
-	OperationUndeploy:      buildUndeployCmd,
-	OperationComposeStart:  buildComposeStartCmd,
-	OperationComposeStop:   buildComposeStopCmd,
-	OperationSwarmDeploy:   buildSwarmDeployCmd,
-	OperationSwarmUndeploy: buildSwarmUndeployCmd,
-	OperationSwarmStart:    buildSwarmStartCmd,
-	OperationSwarmStop:     buildSwarmStopCmd,
+// unpackerCmd is one operation's builder together with the one thing the caller has
+// to know about it before calling: whether it reads the env argument at all.
+type unpackerCmd struct {
+	build buildCmdFunc
+
+	// usesEnv marks the operations that hand the stack's environment to the unpacker
+	// container as --env=NAME=VALUE arguments, and therefore the only ones that have to
+	// refuse a secret reference. It mirrors the builders' bodies exactly: the four
+	// deploy- and start-shaped commands read env, the four undeploy- and stop-shaped
+	// ones address the project by name and ignore it. Keep the two in step - a builder
+	// that starts consuming env without this flag would pass a reference through.
+	//
+	// remoteStack reads the same flag to refuse before it creates a docker client and
+	// pulls the unpacker image, so this is the single source of that decision.
+	usesEnv bool
+}
+
+var funcmap = map[StackRemoteOperation]unpackerCmd{
+	OperationDeploy:        {build: buildDeployCmd, usesEnv: true},
+	OperationUndeploy:      {build: buildUndeployCmd},
+	OperationComposeStart:  {build: buildComposeStartCmd, usesEnv: true},
+	OperationComposeStop:   {build: buildComposeStopCmd},
+	OperationSwarmDeploy:   {build: buildSwarmDeployCmd, usesEnv: true},
+	OperationSwarmUndeploy: {build: buildSwarmUndeployCmd},
+	OperationSwarmStart:    {build: buildSwarmStartCmd, usesEnv: true},
+	OperationSwarmStop:     {build: buildSwarmStopCmd},
+}
+
+// unpackerCmdFor returns one operation's entry in funcmap, refusing an operation that has
+// none.
+//
+// The lookup is a function rather than an indexing expression at each call site because a
+// missing key yields the zero unpackerCmd - a nil builder and usesEnv false - and the second
+// of those is a silently skipped secret-reference check in remoteStack. Both callers go
+// through here, so an unknown operation is refused in one place and before any work.
+func unpackerCmdFor(operation StackRemoteOperation) (unpackerCmd, error) {
+	cmd, known := funcmap[operation]
+	if !known {
+		return unpackerCmd{}, fmt.Errorf("unknown stack operation %s", operation)
+	}
+
+	return cmd, nil
 }
 
 // build the unpacker cmd for stack based on stackOperation
 func (d *stackDeployer) buildUnpackerCmdForStack(stack *portainer.Stack, operation StackRemoteOperation, opts unpackerCmdBuilderOptions) ([]string, error) {
-	fn := funcmap[operation]
-	if fn == nil {
-		return nil, fmt.Errorf("unknown stack operation %s", operation)
+	cmd, err := unpackerCmdFor(operation)
+	if err != nil {
+		return nil, err
 	}
 
 	registriesStrings := generateRegistriesStrings(opts.registries, d.dataStore)
-	envStrings := getEnv(stack.Env)
 
-	return fn(stack, opts, registriesStrings, envStrings), nil
+	// The environment is built - and a secret reference refused - only for the
+	// operations that actually pass it on. Refusing it for all of them would leave a
+	// stack that has migrated to references impossible to undeploy or stop through this
+	// path: the user migrates the stack, finds the deploy unsupported here, and can then
+	// no longer even clean it up. Removal needs no values, so it must not be gated on
+	// resolving them.
+	var envStrings []string
+
+	if cmd.usesEnv {
+		// getEnv fails for one reason only - a secret reference this path cannot resolve -
+		// so this wrap is on the feature's refusal path and bounds the stack name like the
+		// rest of it. See secretresolver.TruncateName.
+		if envStrings, err = getEnv(stack.Name, stack.Env); err != nil {
+			return nil, fmt.Errorf("stack %q: %w", secretresolver.TruncateName(stack.Name), err)
+		}
+	}
+
+	return cmd.build(stack, opts, registriesStrings, envStrings), nil
 }
 
 // deploy [-u username -p password] [--skip-tls-verify] [--force-recreate] [-r] [-k] [--env KEY1=VALUE1 --env KEY2=VALUE2] <git-repo-url> <ref> <project-name> <destination> <compose-file-path> [<more-file-paths>...]
@@ -169,7 +219,10 @@ func buildSwarmUndeployCmd(stack *portainer.Stack, opts unpackerCmdBuilderOption
 func buildSwarmStartCmd(stack *portainer.Stack, opts unpackerCmdBuilderOptions, registries []string, env []string) []string {
 	cmd := []string{UnpackerCmdSwarmDeploy, "-f", "-r", "-k"}
 	cmd = appendSkipTLSVerifyIfNeeded(cmd, opts.gitConfig)
-	cmd = append(cmd, getEnv(stack.Env)...)
+	// The env argument holds getEnv(stack.Env), already checked for secret references
+	// by buildUnpackerCmdForStack - this operation is marked usesEnv there. Calling
+	// getEnv again here would bypass that check.
+	cmd = append(cmd, env...)
 	cmd = append(cmd, registries...)
 	cmd = append(cmd, opts.gitConfig.URL,
 		opts.gitConfig.ReferenceName,
@@ -231,15 +284,63 @@ func generateRegistriesStrings(registries []portainer.Registry, dataStore datase
 	return cmds
 }
 
-func getEnv(env []portainer.Pair) []string {
+func getEnv(stackName string, env []portainer.Pair) ([]string, error) {
 	if len(env) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	cmd := []string{}
+	escaped := 0
+
 	for _, pair := range env {
-		cmd = append(cmd, fmt.Sprintf(`--env=%s=%s`, pair.Name, pair.Value))
+		// Every variable is handed to the compose-unpacker container as a literal
+		// --env=NAME=VALUE argument, and nothing on that side resolves a reference: the
+		// service would start with the string "secret:..." as its credential. There is no
+		// resolution path here, so refuse rather than pass it through - the same rule
+		// SwarmStackManager.Deploy applies. Refusing beats silently dropping the
+		// variable, which would start the same service on an undefined one.
+		//
+		// This path is unreachable in CE today only because stackutils.IsRelativePathStack
+		// is hardcoded to false; the guard must not rest on that stub.
+		if secretresolver.IsReference(pair.Value) {
+			return nil, unsupportedSecretReferenceError(pair.Name)
+		}
+
+		// The escaped marker is a literal: it is passed on as the same text the compose
+		// path would produce, one colon shorter.
+		value := secretresolver.Unescape(pair.Value)
+		if value != pair.Value {
+			escaped++
+		}
+
+		cmd = append(cmd, fmt.Sprintf(`--env=%s=%s`, pair.Name, value))
 	}
 
-	return cmd
+	// The one silent effect of the marker, so it is announced here as on the compose path.
+	secretresolver.LogEscapedValues(stackName, escaped)
+
+	return cmd, nil
+}
+
+// unsupportedSecretReferenceError reports a variable this path cannot deploy. It is one
+// function so that the checks hoisted ahead of the work - the compose pull in
+// DeployRemoteComposeStack, the docker client and image pull in remoteStack - and the one
+// inside getEnv cannot drift apart in their wording.
+//
+// The variable name is bounded and quoted, like every other name this feature names in a
+// persisted deploy error; see secretresolver.TruncateName.
+func unsupportedSecretReferenceError(name string) error {
+	return fmt.Errorf("variable %q uses a secret reference, but secret references are not supported for stacks deployed through the compose unpacker", secretresolver.TruncateName(name))
+}
+
+// checkNoSecretReferences reports the first variable of the stack that holds a secret
+// reference, wrapped exactly as buildUnpackerCmdForStack wraps it.
+func checkNoSecretReferences(stack *portainer.Stack) error {
+	for _, pair := range stack.Env {
+		if secretresolver.IsReference(pair.Value) {
+			return fmt.Errorf("stack %q: %w", secretresolver.TruncateName(stack.Name), unsupportedSecretReferenceError(pair.Name))
+		}
+	}
+
+	return nil
 }

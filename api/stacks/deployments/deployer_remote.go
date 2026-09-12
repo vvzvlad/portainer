@@ -59,6 +59,15 @@ func (d *stackDeployer) DeployRemoteComposeStack(
 	d.lock.Lock()
 	defer d.lock.Unlock()
 
+	// remoteStack refuses this stack as well, but the pull below happens before it is
+	// even called: Pull resolves every reference - a full vault sync - and pulls every
+	// image, for a deploy that was never going to proceed. So the refusal has to come
+	// ahead of the pull too, the way SwarmStackManager.Deploy refuses before it opens an
+	// endpoint proxy. Nothing leaks either way, the values stay in memory.
+	if err := checkNoSecretReferences(stack); err != nil {
+		return err
+	}
+
 	options := portainer.ComposeOptions{Registries: registries}
 
 	// --force-recreate doesn't pull updated images
@@ -168,6 +177,33 @@ func (d *stackDeployer) StopRemoteSwarmStack(ctx context.Context, stack *portain
 // * wait for deployment to end
 // * gather deployment logs and bubble them up
 func (d *stackDeployer) remoteStack(ctx context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint, operation StackRemoteOperation, opts unpackerCmdBuilderOptions) error {
+	// buildUnpackerCmdForStack refuses a secret reference, but it is called at the end of
+	// this function: by then the git config has been read, a docker client created and
+	// the unpacker image pulled, for a deploy that was never going to proceed. Refuse
+	// first instead - every entry point of this file goes through here, so one check
+	// covers them all.
+	//
+	// Which is why the operation is looked up rather than indexed: funcmap[operation] on an
+	// unknown key yields the zero unpackerCmd, whose usesEnv is false, so the check would
+	// silently not run and the operation would only be refused further down, after the
+	// docker client and the image pull. Unreachable today - all eight operations are in the
+	// map - but "one check covers them all" is only true if an unknown operation cannot
+	// walk past it.
+	unpacker, err := unpackerCmdFor(operation)
+	if err != nil {
+		return err
+	}
+
+	// Gated on the same usesEnv flag the builder keys on, so the two cannot drift: only
+	// the operations whose command line carries the environment can refuse. Undeploy and
+	// stop address the project by name and must keep working, or a stack that has
+	// migrated to references could no longer be removed through this path.
+	if unpacker.usesEnv {
+		if err := checkNoSecretReferences(stack); err != nil {
+			return err
+		}
+	}
+
 	if stack.WorkflowID != 0 && opts.gitConfig == nil {
 		src, file, err := workflows.GitSourceAndArtifactForStack(d.dataStore, stack.WorkflowID, stack.ID)
 		if err != nil {

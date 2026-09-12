@@ -8,6 +8,7 @@ import (
 	"github.com/portainer/portainer/api/http/proxy"
 	"github.com/portainer/portainer/api/stacks/stackutils"
 	"github.com/portainer/portainer/pkg/libstack/swarm"
+	"github.com/portainer/portainer/pkg/secretresolver"
 )
 
 // SwarmStackManager represents a service for managing stacks.
@@ -36,6 +37,23 @@ func (manager *SwarmStackManager) Deploy(
 	endpoint *portainer.Endpoint,
 	registries []portainer.Registry,
 ) error {
+	// Swarm stacks do not resolve secret references. Deploying one verbatim would
+	// start a service with the literal string "secret:..." as its credential, so
+	// refuse instead - the same rule ComposeStackManager.resolveStackSecrets applies
+	// when no resolver is configured.
+	//
+	// Checked before the proxy is fetched: a deploy that is refused outright has no
+	// reason to open an endpoint proxy and close it again.
+	//
+	// Both names bounded and quoted, as at every site that names one in a persisted deploy
+	// error; see secretresolver.TruncateName.
+	for _, ev := range stack.Env {
+		if secretresolver.IsReference(ev.Value) {
+			return fmt.Errorf("stack %q: variable %q uses a secret reference, but secret references are not supported for swarm stacks",
+				secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(ev.Name))
+		}
+	}
+
 	url, proxy, err := fetchEndpointProxy(manager.proxyManager, endpoint)
 	if err != nil {
 		return fmt.Errorf("failed to fetch environment proxy: %w", err)
@@ -48,9 +66,23 @@ func (manager *SwarmStackManager) Deploy(
 	filePaths := stackutils.GetStackFilePaths(stack, true)
 
 	env := make([]string, 0, len(stack.Env))
+	escaped := 0
+
 	for _, ev := range stack.Env {
-		env = append(env, ev.Name+"="+ev.Value)
+		// The escaped marker is a literal here too. A swarm stack cannot resolve a
+		// reference, but a value that merely looks like one has to reach the service as
+		// the same text the compose path would produce, or the escape would mean two
+		// different things depending on how the stack is deployed.
+		value := secretresolver.Unescape(ev.Value)
+		if value != ev.Value {
+			escaped++
+		}
+
+		env = append(env, ev.Name+"="+value)
 	}
+
+	// The one silent effect of the marker, so it is announced here as on the compose path.
+	secretresolver.LogEscapedValues(stack.Name, escaped)
 
 	return manager.deployer.Deploy(context.TODO(), filePaths, swarm.DeployOptions{
 		Options: swarm.Options{
