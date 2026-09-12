@@ -1,11 +1,15 @@
 package exec
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -87,11 +91,17 @@ func (manager *ComposeStackManager) ComposeSyntaxMaxVersion() string {
 func (manager *ComposeStackManager) Up(ctx context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint, options portainer.ComposeUpOptions) error {
 	// Resolved before the proxy is fetched: a deploy that cannot resolve its references
 	// has no reason to open an endpoint proxy and close it again. SwarmStackManager.Deploy
-	// and DeployRemoteComposeStack refuse a reference in the same order.
-	literals, secretEnv, err := manager.resolveStackSecrets(ctx, stack)
+	// refuses a reference in the same order, in the Env field and in a body alike.
+	//
+	// DeployRemoteComposeStack, the compose-unpacker path, refuses one in the Env field
+	// only: scanning a body would mean reading the stack's files on a path that never
+	// reads them, and that path is unreachable in CE anyway - every entry point into it
+	// is gated by stackutils.IsRelativePathStack, which is a hardcoded false here.
+	secrets, err := manager.resolveStackSecrets(ctx, stack)
 	if err != nil {
 		return err
 	}
+	defer secrets.cleanup()
 
 	url, proxy, err := fetchEndpointProxy(manager.proxyManager, endpoint)
 	if err != nil {
@@ -102,17 +112,19 @@ func (manager *ComposeStackManager) Up(ctx context.Context, stack *portainer.Sta
 		defer proxy.Close()
 	}
 
-	envFilePath, err := manager.prepareEnvFile(stack, literals)
+	envFilePath, err := manager.prepareEnvFile(stack, secrets.literals)
 	if err != nil {
 		return fmt.Errorf("failed to create env file: %w", err)
 	}
 
-	filePaths := stackutils.GetStackFilePaths(stack, true)
-	if err = manager.deployer.Deploy(ctx, filePaths, libstack.DeployOptions{
+	if err = manager.deployer.Deploy(ctx, secrets.filePaths, libstack.DeployOptions{
 		Options: libstack.Options{
-			WorkingDir:  stack.ProjectPath,
+			WorkingDir: stack.ProjectPath,
+			// Pinned to the stack's own directory, because the files above may be
+			// rewritten copies somewhere else. See stackSecrets.projectDir.
+			ProjectDir:  secrets.projectDir,
 			EnvFilePath: envFilePath,
-			Env:         secretEnv,
+			Env:         secrets.env,
 			Host:        url,
 			ProjectName: stack.Name,
 			Registries:  portainerRegistriesToAuthConfigs(options.Registries),
@@ -121,7 +133,7 @@ func (manager *ComposeStackManager) Up(ctx context.Context, stack *portainer.Sta
 		AbortOnContainerExit: options.AbortOnContainerExit,
 		RemoveOrphans:        options.Prune,
 	}); err != nil {
-		return deployFailure(stack, secretEnv, "failed to deploy a stack", err)
+		return deployFailure(stack, secrets.env, "failed to deploy a stack", err)
 	}
 	return nil
 }
@@ -129,10 +141,11 @@ func (manager *ComposeStackManager) Up(ctx context.Context, stack *portainer.Sta
 // Run runs a one-off command on a service. Wraps `docker-compose run` command
 func (manager *ComposeStackManager) Run(ctx context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint, serviceName string, options portainer.ComposeRunOptions) error {
 	// Before the proxy, for the reason given in Up.
-	literals, secretEnv, err := manager.resolveStackSecrets(ctx, stack)
+	secrets, err := manager.resolveStackSecrets(ctx, stack)
 	if err != nil {
 		return err
 	}
+	defer secrets.cleanup()
 
 	url, proxy, err := fetchEndpointProxy(manager.proxyManager, endpoint)
 	if err != nil {
@@ -143,17 +156,18 @@ func (manager *ComposeStackManager) Run(ctx context.Context, stack *portainer.St
 		defer proxy.Close()
 	}
 
-	envFilePath, err := manager.prepareEnvFile(stack, literals)
+	envFilePath, err := manager.prepareEnvFile(stack, secrets.literals)
 	if err != nil {
 		return fmt.Errorf("failed to create env file: %w", err)
 	}
 
-	filePaths := stackutils.GetStackFilePaths(stack, true)
-	if err = manager.deployer.Run(ctx, filePaths, serviceName, libstack.RunOptions{
+	if err = manager.deployer.Run(ctx, secrets.filePaths, serviceName, libstack.RunOptions{
 		Options: libstack.Options{
-			WorkingDir:  stack.ProjectPath,
+			WorkingDir: stack.ProjectPath,
+			// Pinned to the stack's own directory, as in Up.
+			ProjectDir:  secrets.projectDir,
 			EnvFilePath: envFilePath,
-			Env:         secretEnv,
+			Env:         secrets.env,
 			Host:        url,
 			ProjectName: stack.Name,
 			Registries:  portainerRegistriesToAuthConfigs(options.Registries),
@@ -162,7 +176,7 @@ func (manager *ComposeStackManager) Run(ctx context.Context, stack *portainer.St
 		Args:     options.Args,
 		Detached: options.Detached,
 	}); err != nil {
-		return deployFailure(stack, secretEnv, "failed to deploy a stack", err)
+		return deployFailure(stack, secrets.env, "failed to deploy a stack", err)
 	}
 	return nil
 }
@@ -194,10 +208,11 @@ func (manager *ComposeStackManager) Down(ctx context.Context, stack *portainer.S
 // but does not start containers based on those images.
 func (manager *ComposeStackManager) Pull(ctx context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint, options portainer.ComposeOptions) error {
 	// Before the proxy, for the reason given in Up.
-	literals, secretEnv, err := manager.resolveStackSecrets(ctx, stack)
+	secrets, err := manager.resolveStackSecrets(ctx, stack)
 	if err != nil {
 		return err
 	}
+	defer secrets.cleanup()
 
 	url, proxy, err := fetchEndpointProxy(manager.proxyManager, endpoint)
 	if err != nil {
@@ -206,21 +221,22 @@ func (manager *ComposeStackManager) Pull(ctx context.Context, stack *portainer.S
 		defer proxy.Close()
 	}
 
-	envFilePath, err := manager.prepareEnvFile(stack, literals)
+	envFilePath, err := manager.prepareEnvFile(stack, secrets.literals)
 	if err != nil {
 		return fmt.Errorf("failed to create env file: %w", err)
 	}
 
-	filePaths := stackutils.GetStackFilePaths(stack, true)
-	if err = manager.deployer.Pull(ctx, filePaths, libstack.Options{
-		WorkingDir:  stack.ProjectPath,
+	if err = manager.deployer.Pull(ctx, secrets.filePaths, libstack.Options{
+		WorkingDir: stack.ProjectPath,
+		// Pinned to the stack's own directory, as in Up.
+		ProjectDir:  secrets.projectDir,
 		EnvFilePath: envFilePath,
-		Env:         secretEnv,
+		Env:         secrets.env,
 		Host:        url,
 		ProjectName: stack.Name,
 		Registries:  portainerRegistriesToAuthConfigs(options.Registries),
 	}); err != nil {
-		return deployFailure(stack, secretEnv, "failed to pull images of the stack", err)
+		return deployFailure(stack, secrets.env, "failed to pull images of the stack", err)
 	}
 	return nil
 }
@@ -230,8 +246,45 @@ func (manager *ComposeStackManager) NormalizeStackName(name string) string {
 	return normalizeStackName(name)
 }
 
-// resolveStackSecrets splits stack.Env into the pairs that may be written to disk
-// and the ones that must not.
+// stackSecrets is what one deploy needs once a stack's secret references have been
+// resolved: what may be written to disk, what must not, and the compose files to hand
+// the deployer.
+type stackSecrets struct {
+	// literals are the env pairs that carry no reference, for the env file.
+	literals []portainer.Pair
+
+	// env are the "NAME=value" entries for libstack.Options.Env: the resolved values of
+	// the stack's own variables, and of the placeholders a rewritten compose body
+	// interpolates. One slice and not two on purpose - it is also what deployFailure
+	// redacts the deployer's text against, so a value kept anywhere else would be the
+	// one value that redaction does not cover.
+	env []string
+
+	// filePaths are the compose files to deploy, the stack's own with a rewritten copy
+	// substituted for every file that carried an inline reference.
+	filePaths []string
+
+	// projectDir is the directory of the stack's FIRST ORIGINAL compose file, and it is
+	// passed to the deployer on every deploy, rewritten or not.
+	//
+	// There is no docker compose process on this path: compose-go runs in-process and
+	// resolves every relative path in a body - a build context, a bind mount source, an
+	// env_file, an include - against filepath.Dir(configFilepaths[0]) unless
+	// libstack.Options.ProjectDir says otherwise. A rewritten copy lives in a temporary
+	// directory, so without this every relative path in that body would silently start
+	// meaning a path under /tmp. Setting it is an exact no-op when nothing was rewritten,
+	// because it is then the very directory compose-go would have derived itself.
+	projectDir string
+
+	// cleanup removes the temporary directory holding the rewritten copies. Non-nil on
+	// every successful return, so that a caller can defer it unconditionally - but the
+	// zero value returned alongside an error carries a nil one, so the defer belongs
+	// AFTER the error check and not before it, as it does in Up, Run and Pull.
+	cleanup func()
+}
+
+// resolveStackSecrets resolves every secret reference of a stack - the ones in stack.Env
+// and the ones written inline in its compose files - and returns what the deploy needs.
 //
 // Values marked as references are fetched from the resolver in a single batch and
 // returned as "NAME=value" entries for libstack.Options.Env, which compose applies
@@ -239,36 +292,86 @@ func (manager *ComposeStackManager) NormalizeStackName(name string) string {
 // serialised anywhere. That is the whole point of the design: a resolved value must
 // not reach stack.env, the project directory, or a Portainer backup. The remaining
 // literal pairs are returned untouched for the env file.
-func (manager *ComposeStackManager) resolveStackSecrets(ctx context.Context, stack *portainer.Stack) ([]portainer.Pair, []string, error) {
+//
+// compose interpolates ${VAR} and nothing else, so a reference written inline in a body
+// cannot be reached through Options.Env alone: the body itself has to be rewritten, its
+// reference scalars replaced by placeholders that the same Env defines. The rewritten
+// copies go to a temporary directory and carry placeholders only, never a value.
+func (manager *ComposeStackManager) resolveStackSecrets(ctx context.Context, stack *portainer.Stack) (stackSecrets, error) {
+	filePaths := stackutils.GetStackFilePaths(stack, true)
+
+	projectDir := ""
+	if len(filePaths) > 0 {
+		projectDir = filepath.Dir(filePaths[0])
+	}
+
+	// One batch for the whole stack, its env field and its bodies together: one backend
+	// refresh costs the same for one reference as for twenty, and the same vault entry is
+	// commonly named from both. Deduplicated on the way in for the same reason.
 	var refs []string
+
+	requested := make(map[string]struct{})
+
+	addRef := func(ref string) {
+		if _, duplicate := requested[ref]; duplicate {
+			return
+		}
+
+		requested[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
 
 	for _, pair := range stack.Env {
 		if secretresolver.IsReference(pair.Value) {
-			refs = append(refs, pair.Value)
+			addRef(pair.Value)
 		}
 	}
 
-	// The path every stack that has not migrated to references takes: no I/O, no
-	// allocation, exactly the behaviour of the unpatched code. unescapeLiterals returns
-	// the slice untouched unless something in it actually uses the escape.
-	if len(refs) == 0 {
-		return unescapeLiterals(stack.Name, stack.Env), nil, nil
+	// Every compose file is read on every deploy: a reference in the body is invisible to
+	// stack.Env, and so is an escaped marker, which has to mean the same thing in a body
+	// as it does in a variable. Scanning one costs a substring search for a body that does
+	// not carry the marker at all, which is the body of every stack that has not migrated.
+	contents := make([][]byte, len(filePaths))
+	bodyRefs := make([][]string, len(filePaths))
+
+	for i, filePath := range filePaths {
+		content, fileRefs, err := readStackComposeFile(stack, filePath)
+		if err != nil {
+			return stackSecrets{}, err
+		}
+
+		contents[i] = content
+		bodyRefs[i] = fileRefs
+
+		for _, ref := range fileRefs {
+			addRef(ref)
+		}
 	}
 
-	// Never fall through to deploying the reference itself. A container started with
-	// the literal string "secret:..." as its password is a service quietly running on
-	// a garbage credential, which is far worse than a refused deploy.
-	if manager.secretResolver == nil {
-		return nil, nil, fmt.Errorf("stack %q uses secret references but no secret resolver is configured, set %s", secretresolver.TruncateName(stack.Name), secretresolver.EndpointEnvVar)
-	}
+	values := map[string]string{}
 
-	values, err := manager.secretResolver.Fetch(ctx, refs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to resolve secret references of stack %q: %w", secretresolver.TruncateName(stack.Name), err)
+	if len(refs) > 0 {
+		// Never fall through to deploying the reference itself. A container started with
+		// the literal string "secret:..." as its password is a service quietly running on
+		// a garbage credential, which is far worse than a refused deploy.
+		if manager.secretResolver == nil {
+			return stackSecrets{}, fmt.Errorf("stack %q uses secret references but no secret resolver is configured, set %s", secretresolver.TruncateName(stack.Name), secretresolver.EndpointEnvVar)
+		}
+
+		fetched, err := manager.secretResolver.Fetch(ctx, refs)
+		if err != nil {
+			return stackSecrets{}, fmt.Errorf("failed to resolve secret references of stack %q: %w", secretresolver.TruncateName(stack.Name), err)
+		}
+
+		values = fetched
 	}
 
 	literals := make([]portainer.Pair, 0, len(stack.Env))
-	env := make([]string, 0, len(refs))
+
+	// Nil and not an empty slice when nothing was resolved: deployFailure keeps the
+	// unpatched behaviour for a stack that resolved nothing, and it tells the two apart
+	// by the length of this slice.
+	var env []string
 
 	for _, pair := range stack.Env {
 		if !secretresolver.IsReference(pair.Value) {
@@ -286,13 +389,166 @@ func (manager *ComposeStackManager) resolveStackSecrets(ctx context.Context, sta
 			// %q and bounded, like every other site that names one of these in a message
 			// persisted as the stack's deployment status and read back by agents. See
 			// secretresolver.TruncateName.
-			return nil, nil, fmt.Errorf("stack %q: no value resolved for variable %q", secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(pair.Name))
+			return stackSecrets{}, fmt.Errorf("stack %q: no value resolved for variable %q", secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(pair.Name))
 		}
 
 		env = append(env, pair.Name+"="+value)
 	}
 
-	return unescapeLiterals(stack.Name, literals), env, nil
+	// The placeholders are numbered across the whole stack, file by file and then in
+	// document order, so that a reference written twice gets a name each and no name is
+	// ever defined twice.
+	names := make([][]string, len(filePaths))
+	index := 0
+
+	for i, fileRefs := range bodyRefs {
+		fileNames := make([]string, 0, len(fileRefs))
+
+		for _, ref := range fileRefs {
+			value, ok := values[ref]
+			if !ok {
+				// As above: guaranteed by Fetch, refused rather than deployed with an
+				// undefined placeholder, and naming the file because a body reference has
+				// no variable name to be named by.
+				return stackSecrets{}, fmt.Errorf("stack %q: no value resolved for a secret reference in compose file %q", secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(filePaths[i]))
+			}
+
+			name := fmt.Sprintf("%s%d", secretresolver.ComposePlaceholderPrefix, index)
+			index++
+
+			fileNames = append(fileNames, name)
+			env = append(env, name+"="+value)
+		}
+
+		names[i] = fileNames
+	}
+
+	deployPaths, cleanup, err := rewriteStackFiles(stack, filePaths, contents, names)
+	if err != nil {
+		return stackSecrets{}, err
+	}
+
+	return stackSecrets{
+		literals:   unescapeLiterals(stack.Name, literals),
+		env:        env,
+		filePaths:  deployPaths,
+		projectDir: projectDir,
+		cleanup:    cleanup,
+	}, nil
+}
+
+// readStackComposeFile reads one of a stack's compose files and returns the secret
+// references written inline in it.
+//
+// Fail closed on a read error: a body that cannot be read cannot be scanned, and a deploy
+// that cannot read its own compose file has nothing to deploy anyway.
+//
+// The file is named bounded, and the reason is taken out of the *fs.PathError rather than
+// wrapped whole: that error prints the path it was given, an entry point is a stack field
+// with no bound anywhere upstream, and this message is persisted as the stack's deployment
+// status. See secretresolver.TruncateName.
+func readStackComposeFile(stack *portainer.Stack, filePath string) ([]byte, []string, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		reason := err
+
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			reason = pathErr.Err
+		}
+
+		return nil, nil, fmt.Errorf("stack %q: failed to read the compose file %q: %w", secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(filePath), reason)
+	}
+
+	refs, err := secretresolver.ComposeReferences(content)
+	if err != nil {
+		return nil, nil, fmt.Errorf("stack %q: compose file %q: %w", secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(filePath), err)
+	}
+
+	return content, refs, nil
+}
+
+// rewriteStackFiles writes a copy of every compose file whose body had to change - a
+// reference replaced by its placeholder, an escaped marker unescaped - and returns the
+// paths to deploy.
+//
+// Only a file that actually changed gets a copy; every other one is deployed from where it
+// has always been, so a stack that uses no references in its bodies deploys exactly the
+// files it always did. The copies carry placeholders and never a value, but they are still
+// not the operator's files and have no business outliving the deploy, hence the returned
+// cleanup.
+//
+// The temporary path does reach one persisted place: compose stamps the file list into the
+// com.docker.compose.project.config_files label of every container it creates, so a stack
+// deployed this way carries a label naming a directory that cleanup has already removed.
+// That is cosmetic and, in particular, causes no container churn: the label lives in
+// ServiceConfig.CustomLabels, which is `yaml:"-" json:"-"`, and compose hashes a service by
+// json.Marshal of that struct - so the changing path is not part of the hash that decides
+// whether a container is recreated. Only "docker compose ls" reads the label back, and only
+// to print it.
+func rewriteStackFiles(stack *portainer.Stack, filePaths []string, contents [][]byte, names [][]string) ([]string, func(), error) {
+	// A no-op until a temporary directory exists, so that the error paths below can call it
+	// unconditionally. What is RETURNED follows stackSecrets.cleanup: non-nil on every
+	// successful return, nil alongside an error - by then this has already run and the
+	// directory is gone.
+	cleanup := func() {}
+
+	var tempDir string
+
+	deployPaths := filePaths
+
+	for i, filePath := range filePaths {
+		rewritten, err := secretresolver.RewriteCompose(contents[i], names[i])
+		if err != nil {
+			cleanup()
+
+			return nil, nil, fmt.Errorf("stack %q: compose file %q: %w", secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(filePath), err)
+		}
+
+		// The body handed back as it stands: nothing in this file needs a copy.
+		if bytes.Equal(rewritten, contents[i]) {
+			continue
+		}
+
+		if tempDir == "" {
+			// os.MkdirTemp creates the directory 0700, so the copies are unreadable to
+			// anything but this process's user even before their own mode is applied.
+			tempDir, err = os.MkdirTemp("", "portainer-secret-compose-")
+			if err != nil {
+				return nil, nil, fmt.Errorf("stack %q: failed to create a directory for the rewritten compose files: %w", secretresolver.TruncateName(stack.Name), err)
+			}
+
+			cleanup = func() { _ = os.RemoveAll(tempDir) }
+
+			// Cloned rather than written through: the caller's slice still has to name the
+			// originals, since the project directory is derived from its first entry.
+			deployPaths = slices.Clone(filePaths)
+		}
+
+		// The index keeps two files with the same base name - an entry point and an
+		// additional file out of different directories - from landing on each other.
+		copyPath := filepath.Join(tempDir, fmt.Sprintf("%d-%s", i, filepath.Base(filePath)))
+		if err := os.WriteFile(copyPath, rewritten, 0o600); err != nil {
+			cleanup()
+
+			// The reason is taken out of the *fs.PathError rather than wrapped whole, for
+			// the reason readStackComposeFile gives: copyPath carries the base name of an
+			// entry point, which is a stack field with no bound anywhere upstream, and this
+			// message is persisted as the stack's deployment status.
+			reason := err
+
+			var pathErr *fs.PathError
+			if errors.As(err, &pathErr) {
+				reason = pathErr.Err
+			}
+
+			return nil, nil, fmt.Errorf("stack %q: failed to write the rewritten compose file %q: %w", secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(filePath), reason)
+		}
+
+		deployPaths[i] = copyPath
+	}
+
+	return deployPaths, cleanup, nil
 }
 
 // unescapeLiterals returns the pairs with every escaped marker turned back into the

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -69,14 +70,26 @@ func (f *failingFetcher) Fetch(ctx context.Context, refs []string) (map[string]s
 
 // stubDeployer records the options it was called with and returns err, if set.
 type stubDeployer struct {
-	err           error
-	deployOptions libstack.DeployOptions
-	runOptions    libstack.RunOptions
-	pullOptions   libstack.Options
+	err            error
+	deployOptions  libstack.DeployOptions
+	deployPaths    []string
+	deployContents [][]byte
+	runOptions     libstack.RunOptions
+	pullOptions    libstack.Options
 }
 
 func (d *stubDeployer) Deploy(ctx context.Context, filePaths []string, options libstack.DeployOptions) error {
 	d.deployOptions = options
+	d.deployPaths = filePaths
+
+	// A rewritten copy is deleted the moment the deploy returns, so what compose was
+	// handed can only be captured from in here.
+	d.deployContents = make([][]byte, 0, len(filePaths))
+
+	for _, filePath := range filePaths {
+		content, _ := os.ReadFile(filePath)
+		d.deployContents = append(d.deployContents, content)
+	}
 
 	return d.err
 }
@@ -136,13 +149,31 @@ func (d *stubSwarmDeployer) WaitForStatus(ctx context.Context, projectName strin
 	return libstack.WaitResult{Status: status}
 }
 
+// plainComposeBody carries no secret reference, so a fixture built on it exercises the
+// env-field path alone.
+const plainComposeBody = "services:\n  app:\n    image: nginx\n"
+
+// newStackProject returns a project directory holding body as the stack's entry point.
+//
+// Every fixture deployed through the compose path needs one: that path now reads each of
+// the stack's compose files to find the references written inline in them, and it fails
+// closed on a file it cannot read.
+func newStackProject(t *testing.T, body string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(body), 0o600))
+
+	return dir
+}
+
 // newSecretStack returns a stack mixing a literal env var with two references.
 func newSecretStack(t *testing.T) *portainer.Stack {
 	t.Helper()
 
 	return &portainer.Stack{
 		Name:        "arcextension",
-		ProjectPath: t.TempDir(),
+		ProjectPath: newStackProject(t, plainComposeBody),
 		EntryPoint:  "docker-compose.yml",
 		Env: []portainer.Pair{
 			{Name: literalName, Value: literalVal},
@@ -179,11 +210,13 @@ func Test_resolveStackSecrets(t *testing.T) {
 		fetcher := newFetcher()
 		manager := &ComposeStackManager{secretResolver: fetcher}
 
-		literals, env, err := manager.resolveStackSecrets(t.Context(), newSecretStack(t))
+		secrets, err := manager.resolveStackSecrets(t.Context(), newSecretStack(t))
 		require.NoError(t, err)
 
-		assert.Equal(t, []portainer.Pair{{Name: literalName, Value: literalVal}}, literals)
-		assert.Equal(t, []string{"ADMIN_TOKEN=" + tokenValue, "METRICS_TOKEN=" + metricsVal}, env)
+		defer secrets.cleanup()
+
+		assert.Equal(t, []portainer.Pair{{Name: literalName, Value: literalVal}}, secrets.literals)
+		assert.Equal(t, []string{"ADMIN_TOKEN=" + tokenValue, "METRICS_TOKEN=" + metricsVal}, secrets.env)
 		require.Len(t, fetcher.calls, 1)
 		assert.Equal(t, []string{tokenRef, metricsRef}, fetcher.calls[0])
 	})
@@ -194,16 +227,25 @@ func Test_resolveStackSecrets(t *testing.T) {
 		fetcher := newFetcher()
 		manager := &ComposeStackManager{secretResolver: fetcher}
 		stack := &portainer.Stack{
-			Name: "plain",
-			Env:  []portainer.Pair{{Name: "VAR1", Value: "value1"}},
+			Name:        "plain",
+			ProjectPath: newStackProject(t, plainComposeBody),
+			EntryPoint:  "docker-compose.yml",
+			Env:         []portainer.Pair{{Name: "VAR1", Value: "value1"}},
 		}
 
-		literals, env, err := manager.resolveStackSecrets(t.Context(), stack)
+		secrets, err := manager.resolveStackSecrets(t.Context(), stack)
 		require.NoError(t, err)
 
-		assert.Equal(t, stack.Env, literals)
-		assert.Nil(t, env)
+		defer secrets.cleanup()
+
+		assert.Equal(t, stack.Env, secrets.literals)
+		assert.Nil(t, secrets.env)
 		assert.Empty(t, fetcher.calls)
+
+		// Nothing was rewritten, so the stack's own file is deployed and the project
+		// directory is the one compose would have derived from it anyway.
+		assert.Equal(t, []string{filepath.Join(stack.ProjectPath, "docker-compose.yml")}, secrets.filePaths)
+		assert.Equal(t, stack.ProjectPath, secrets.projectDir)
 	})
 
 	t.Run("fails when no resolver is configured", func(t *testing.T) {
@@ -211,7 +253,7 @@ func Test_resolveStackSecrets(t *testing.T) {
 
 		manager := &ComposeStackManager{}
 
-		_, _, err := manager.resolveStackSecrets(t.Context(), newSecretStack(t))
+		_, err := manager.resolveStackSecrets(t.Context(), newSecretStack(t))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "arcextension")
 		assert.Contains(t, err.Error(), "PORTAINER_SECRET_RESOLVER")
@@ -223,7 +265,7 @@ func Test_resolveStackSecrets(t *testing.T) {
 		fetcher := &stubFetcher{values: map[string]string{tokenRef: tokenValue}}
 		manager := &ComposeStackManager{secretResolver: fetcher}
 
-		_, _, err := manager.resolveStackSecrets(t.Context(), newSecretStack(t))
+		_, err := manager.resolveStackSecrets(t.Context(), newSecretStack(t))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "METRICS_TOKEN")
 	})
@@ -467,7 +509,7 @@ func Test_resolveStackSecrets_errorPathsCarryNoSecretValue(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			manager := &ComposeStackManager{secretResolver: test.resolver}
 
-			_, _, err := manager.resolveStackSecrets(t.Context(), newSecretStack(t))
+			_, err := manager.resolveStackSecrets(t.Context(), newSecretStack(t))
 			require.Error(t, err)
 
 			assertNoValueLeak(t, err.Error(), plantedValue)
@@ -528,7 +570,7 @@ func upWithDeployerError(t *testing.T, value string, deployerErr error) error {
 
 	stack := &portainer.Stack{
 		Name:        "arcextension",
-		ProjectPath: t.TempDir(),
+		ProjectPath: newStackProject(t, plainComposeBody),
 		EntryPoint:  "docker-compose.yml",
 		Env:         []portainer.Pair{{Name: "ADMIN_TOKEN", Value: tokenRef}},
 	}
@@ -656,7 +698,7 @@ func Test_Up_keepsTheDeployerErrorWithoutResolvedSecrets(t *testing.T) {
 	// is the whole diagnostic value of a failed deploy and there is nothing to protect.
 	stack := &portainer.Stack{
 		Name:        "plain",
-		ProjectPath: t.TempDir(),
+		ProjectPath: newStackProject(t, plainComposeBody),
 		EntryPoint:  "docker-compose.yml",
 		Env:         []portainer.Pair{{Name: "VAR1", Value: "value1"}},
 	}
@@ -962,7 +1004,7 @@ func Test_Up_deploysAValueThatOnlyLooksLikeAReference(t *testing.T) {
 	fetcher := newFetcher()
 	stack := &portainer.Stack{
 		Name:        "plain",
-		ProjectPath: t.TempDir(),
+		ProjectPath: newStackProject(t, plainComposeBody),
 		EntryPoint:  "docker-compose.yml",
 		Env:         []portainer.Pair{{Name: "APP_URI", Value: escapedLiteral}},
 	}
@@ -988,16 +1030,18 @@ func Test_resolveStackSecrets_unescapesLiteralsAlongsideReferences(t *testing.T)
 	stack := newSecretStack(t)
 	stack.Env = append(stack.Env, portainer.Pair{Name: "APP_URI", Value: escapedLiteral})
 
-	literals, env, err := manager.resolveStackSecrets(t.Context(), stack)
+	secrets, err := manager.resolveStackSecrets(t.Context(), stack)
 	require.NoError(t, err)
+
+	defer secrets.cleanup()
 
 	// The escaped value is unescaped on the path that does resolve references too, not
 	// only on the early return.
 	assert.Equal(t, []portainer.Pair{
 		{Name: literalName, Value: literalVal},
 		{Name: "APP_URI", Value: escapedLiteralValue},
-	}, literals)
-	assert.Equal(t, []string{"ADMIN_TOKEN=" + tokenValue, "METRICS_TOKEN=" + metricsVal}, env)
+	}, secrets.literals)
+	assert.Equal(t, []string{"ADMIN_TOKEN=" + tokenValue, "METRICS_TOKEN=" + metricsVal}, secrets.env)
 
 	// Only the two real references were sent to the resolver.
 	require.Len(t, fetcher.calls, 1)
@@ -1011,7 +1055,7 @@ func Test_SwarmStackManager_Deploy_unescapesAValueThatOnlyLooksLikeAReference(t 
 	manager := &SwarmStackManager{deployer: deployer}
 	stack := &portainer.Stack{
 		Name:        "plain",
-		ProjectPath: t.TempDir(),
+		ProjectPath: newStackProject(t, plainComposeBody),
 		EntryPoint:  "docker-compose.yml",
 		Env:         []portainer.Pair{{Name: "APP_URI", Value: escapedLiteral}},
 	}
@@ -1038,7 +1082,7 @@ func Test_escapedValuesAreAnnounced(t *testing.T) {
 
 		return &portainer.Stack{
 			Name:        "arcextension",
-			ProjectPath: t.TempDir(),
+			ProjectPath: newStackProject(t, plainComposeBody),
 			EntryPoint:  "docker-compose.yml",
 			Env: []portainer.Pair{
 				{Name: literalName, Value: literalVal},
@@ -1080,7 +1124,7 @@ func Test_escapedValuesAreAnnounced(t *testing.T) {
 		// one more thing an operator learns to scroll past.
 		stack := &portainer.Stack{
 			Name:        "plain",
-			ProjectPath: t.TempDir(),
+			ProjectPath: newStackProject(t, plainComposeBody),
 			EntryPoint:  "docker-compose.yml",
 			Env:         []portainer.Pair{{Name: literalName, Value: literalVal}},
 		}
@@ -1134,7 +1178,7 @@ func Test_Up_withoutReferencesNeverCallsTheResolver(t *testing.T) {
 	fetcher := newFetcher()
 	stack := &portainer.Stack{
 		Name:        "plain",
-		ProjectPath: t.TempDir(),
+		ProjectPath: newStackProject(t, plainComposeBody),
 		EntryPoint:  "docker-compose.yml",
 		Env:         []portainer.Pair{{Name: "VAR1", Value: "value1"}},
 	}
@@ -1328,7 +1372,7 @@ func Test_secretErrors_boundAndEscapeHostileNames(t *testing.T) {
 
 		return &portainer.Stack{
 			Name:        hostileName("STACKNAME", filler),
-			ProjectPath: t.TempDir(),
+			ProjectPath: newStackProject(t, plainComposeBody),
 			EntryPoint:  "docker-compose.yml",
 			Env: []portainer.Pair{
 				{Name: hostileName("VARNAME", filler), Value: tokenRef},
@@ -1354,7 +1398,7 @@ func Test_secretErrors_boundAndEscapeHostileNames(t *testing.T) {
 
 				manager := &ComposeStackManager{}
 
-				_, _, err := manager.resolveStackSecrets(t.Context(), newStack(t, filler.text))
+				_, err := manager.resolveStackSecrets(t.Context(), newStack(t, filler.text))
 				assertBoundedAndEscaped(t, err, "STACKNAME", secretresolver.EndpointEnvVar)
 			})
 
@@ -1363,7 +1407,7 @@ func Test_secretErrors_boundAndEscapeHostileNames(t *testing.T) {
 
 				manager := &ComposeStackManager{secretResolver: &stubFetcher{err: errors.New("the vault is locked")}}
 
-				_, _, err := manager.resolveStackSecrets(t.Context(), newStack(t, filler.text))
+				_, err := manager.resolveStackSecrets(t.Context(), newStack(t, filler.text))
 				assertBoundedAndEscaped(t, err, "STACKNAME", "the vault is locked")
 			})
 
@@ -1375,7 +1419,7 @@ func Test_secretErrors_boundAndEscapeHostileNames(t *testing.T) {
 				// with none.
 				manager := &ComposeStackManager{secretResolver: &stubFetcher{values: map[string]string{}}}
 
-				_, _, err := manager.resolveStackSecrets(t.Context(), newStack(t, filler.text))
+				_, err := manager.resolveStackSecrets(t.Context(), newStack(t, filler.text))
 				assertBoundedAndEscaped(t, err, "STACKNAME", "VARNAME")
 			})
 
@@ -1390,4 +1434,212 @@ func Test_secretErrors_boundAndEscapeHostileNames(t *testing.T) {
 			})
 		})
 	}
+}
+
+// bodyRefComposeBody writes a reference where it cannot be reached through Options.Env
+// alone: compose interpolates ${VAR} and nothing else, so this scalar is handed to the
+// container as its own text unless the body itself is rewritten.
+const bodyRefComposeBody = `services:
+  app:
+    image: nginx
+    environment:
+      METRICS_TOKEN: ` + metricsRef + `
+`
+
+// newBodyRefStack returns a stack whose only reference is written inline in its body.
+func newBodyRefStack(t *testing.T) *portainer.Stack {
+	t.Helper()
+
+	return &portainer.Stack{
+		Name:        "arcextension",
+		ProjectPath: newStackProject(t, bodyRefComposeBody),
+		EntryPoint:  "docker-compose.yml",
+		Env:         []portainer.Pair{{Name: literalName, Value: literalVal}},
+	}
+}
+
+func Test_Up_rewritesAnInlineBodyReference(t *testing.T) {
+	t.Parallel()
+
+	stack := newBodyRefStack(t)
+	deployer := &stubDeployer{}
+	manager := &ComposeStackManager{deployer: deployer, secretResolver: newFetcher()}
+
+	require.NoError(t, manager.Up(t.Context(), stack, localEndpoint(), portainer.ComposeUpOptions{}))
+
+	// The value travels through Options.Env under a placeholder name, the same channel
+	// the stack's own variables use.
+	placeholder := secretresolver.ComposePlaceholderPrefix + "0"
+	assert.Equal(t, []string{placeholder + "=" + metricsVal}, deployer.deployOptions.Env)
+
+	// A rewritten copy is deployed, not the stack's own file, and the copy carries the
+	// placeholder and neither the reference nor the value.
+	entryPoint := filepath.Join(stack.ProjectPath, "docker-compose.yml")
+	require.Len(t, deployer.deployPaths, 1)
+	assert.NotEqual(t, entryPoint, deployer.deployPaths[0])
+
+	require.Len(t, deployer.deployContents, 1)
+	copied := string(deployer.deployContents[0])
+	assert.Contains(t, copied, "${"+placeholder+"}")
+	assert.NotContains(t, copied, metricsRef)
+	assert.NotContains(t, copied, metricsVal)
+
+	// The operator's file is not touched: the rewrite is a copy, and the stack keeps
+	// storing the reference.
+	original, err := os.ReadFile(entryPoint)
+	require.NoError(t, err)
+	assert.Equal(t, bodyRefComposeBody, string(original))
+
+	// The env file keeps the literals and nothing else.
+	assert.Equal(t, literalName+"="+literalVal+"\n", readStackEnvFile(t, stack))
+}
+
+func Test_Up_pinsTheProjectDirectoryToTheStackDirectory(t *testing.T) {
+	t.Parallel()
+
+	// compose-go resolves every relative path in a body - a build context, a bind mount
+	// source, an env_file, an include - against the directory of the first config file
+	// unless ProjectDir says otherwise. The rewritten copy lives somewhere else, so
+	// without this every such path would silently start meaning a path under the
+	// temporary directory.
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "with a rewritten body", body: bodyRefComposeBody},
+		{name: "with a body that needed no rewrite", body: plainComposeBody},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			stack := newBodyRefStack(t)
+			stack.ProjectPath = newStackProject(t, test.body)
+
+			deployer := &stubDeployer{}
+			manager := &ComposeStackManager{deployer: deployer, secretResolver: newFetcher()}
+
+			require.NoError(t, manager.Up(t.Context(), stack, localEndpoint(), portainer.ComposeUpOptions{}))
+
+			assert.Equal(t, stack.ProjectPath, deployer.deployOptions.ProjectDir)
+		})
+	}
+}
+
+func Test_Up_deletesTheRewrittenCopyAfterTheDeploy(t *testing.T) {
+	t.Parallel()
+
+	stack := newBodyRefStack(t)
+	deployer := &stubDeployer{}
+	manager := &ComposeStackManager{deployer: deployer, secretResolver: newFetcher()}
+
+	require.NoError(t, manager.Up(t.Context(), stack, localEndpoint(), portainer.ComposeUpOptions{}))
+
+	require.Len(t, deployer.deployPaths, 1)
+
+	// The copy carries placeholders and never a value, but it is still not the operator's
+	// file and has no business outliving the deploy.
+	assert.NoFileExists(t, deployer.deployPaths[0])
+	assert.NoDirExists(t, filepath.Dir(deployer.deployPaths[0]))
+}
+
+func Test_Up_batchesEnvAndBodyReferencesTogether(t *testing.T) {
+	t.Parallel()
+
+	stack := newBodyRefStack(t)
+	stack.Env = append(stack.Env,
+		portainer.Pair{Name: "ADMIN_TOKEN", Value: tokenRef},
+		// The same reference the body carries: one lookup, not two.
+		portainer.Pair{Name: "METRICS_TOKEN", Value: metricsRef},
+	)
+
+	fetcher := newFetcher()
+	deployer := &stubDeployer{}
+	manager := &ComposeStackManager{deployer: deployer, secretResolver: fetcher}
+
+	require.NoError(t, manager.Up(t.Context(), stack, localEndpoint(), portainer.ComposeUpOptions{}))
+
+	require.Len(t, fetcher.calls, 1)
+	assert.Equal(t, []string{tokenRef, metricsRef}, fetcher.calls[0])
+
+	// The stack's own variables first, then one placeholder per body reference.
+	assert.Equal(t, []string{
+		"ADMIN_TOKEN=" + tokenValue,
+		"METRICS_TOKEN=" + metricsVal,
+		secretresolver.ComposePlaceholderPrefix + "0=" + metricsVal,
+	}, deployer.deployOptions.Env)
+}
+
+func Test_Up_withholdsTheDeployerErrorForABodyValue(t *testing.T) {
+	t.Parallel()
+
+	// A value resolved for a body reference goes into the same slice the stack's own
+	// variables do, which is what deployFailure redacts the deployer's text against. A
+	// value kept anywhere else would be the one value that redaction does not cover.
+	stack := newBodyRefStack(t)
+	manager := &ComposeStackManager{
+		deployer:       &stubDeployer{err: fmt.Errorf("invalid containerPort: %s", distinctValue)},
+		secretResolver: &stubFetcher{values: map[string]string{metricsRef: distinctValue}},
+	}
+
+	err := manager.Up(t.Context(), stack, localEndpoint(), portainer.ComposeUpOptions{})
+	require.Error(t, err)
+
+	assert.NotContains(t, err.Error(), distinctValue)
+	assert.Contains(t, err.Error(), "failed to deploy a stack")
+
+	for fragment := range strings.SplitSeq(distinctValue, "-") {
+		assert.NotContains(t, err.Error(), fragment)
+	}
+}
+
+func Test_Up_failsOnABodyThatCannotBeScanned(t *testing.T) {
+	t.Parallel()
+
+	// A scalar whose extent cannot be established exactly is refused rather than deployed
+	// with the reference left in it, and it is refused before the resolver is called.
+	stack := newBodyRefStack(t)
+	stack.ProjectPath = newStackProject(t, "command: |\n  "+metricsRef+"\n")
+
+	deployer := &stubDeployer{}
+	manager := &ComposeStackManager{deployer: deployer, secretResolver: &failingFetcher{t: t}}
+
+	err := manager.Up(t.Context(), stack, localEndpoint(), portainer.ComposeUpOptions{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "arcextension")
+	assert.Contains(t, err.Error(), "docker-compose.yml")
+	assert.Empty(t, deployer.deployOptions.ProjectName)
+}
+
+func Test_SwarmStackManager_Deploy_refusesAnInlineBodyReference(t *testing.T) {
+	t.Parallel()
+
+	// Swarm has no rewriting path either, so the reference would reach the service
+	// verbatim in the body as it would in a variable.
+	manager := &SwarmStackManager{}
+
+	err := manager.Deploy(t.Context(), newBodyRefStack(t), false, false, localEndpoint(), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret references")
+	assert.Contains(t, err.Error(), "docker-compose.yml")
+}
+
+func Test_SwarmStackManager_Deploy_passesAnEscapedBodyScalarThrough(t *testing.T) {
+	t.Parallel()
+
+	// Unlike an escaped variable, which is unescaped on this path, an escaped marker in a
+	// body is not a reference and keeps travelling verbatim: resolving it would mean
+	// rewriting the file, which the swarm path deliberately does not do.
+	body := "services:\n  app:\n    command: " + escapedLiteral + "\n"
+
+	stack := newBodyRefStack(t)
+	stack.ProjectPath = newStackProject(t, body)
+
+	deployer := &stubSwarmDeployer{}
+	manager := &SwarmStackManager{deployer: deployer}
+
+	require.NoError(t, manager.Deploy(t.Context(), stack, false, false, localEndpoint(), nil))
+
+	survived, err := os.ReadFile(filepath.Join(stack.ProjectPath, "docker-compose.yml"))
+	require.NoError(t, err)
+	assert.Equal(t, body, string(survived))
 }
