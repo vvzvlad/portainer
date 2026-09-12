@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -388,7 +389,12 @@ func Test_resolveStackSecrets_errorPathsCarryNoSecretValue(t *testing.T) {
 				case <-time.After(2 * time.Second):
 				}
 			}),
-			contains: "deadline exceeded",
+			// The client no longer wraps a transport error - net/http quotes
+			// resolver-written header text in those - so the message carries its own
+			// classification of the failure rather than "context deadline exceeded". The
+			// sentinel is still reachable with errors.Is; see
+			// TestFetchClassifiesATransportFailure in pkg/secretresolver.
+			contains: "no answer within",
 		},
 		{
 			name: "the resolver fails without an error field",
@@ -401,14 +407,14 @@ func Test_resolveStackSecrets_errorPathsCarryNoSecretValue(t *testing.T) {
 			name: "the resolver fails with an error field",
 			resolver: resolverAt(t, time.Second, func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadGateway)
-				w.Write([]byte(`{"error":"vault sync failed"}`))
+				_, _ = w.Write([]byte(`{"error":"vault sync failed"}`))
 			}),
 			contains: "vault sync failed",
 		},
 		{
 			name: "the resolver answers 200 with an error field",
 			resolver: resolverAt(t, time.Second, func(w http.ResponseWriter, r *http.Request) {
-				w.Write([]byte(`{"error":"vault is locked"}`))
+				_, _ = w.Write([]byte(`{"error":"vault is locked"}`))
 			}),
 			contains: "vault is locked",
 		},
@@ -418,22 +424,22 @@ func Test_resolveStackSecrets_errorPathsCarryNoSecretValue(t *testing.T) {
 				// The JSON decoder quotes the first bytes of the buffer it choked on, and
 				// that buffer is the response body. The value sits at byte 6 here, well
 				// inside that window, so a decoder error let through would be caught below.
-				w.Write([]byte(`{"x":"` + plantedValue))
+				_, _ = w.Write([]byte(`{"x":"` + plantedValue))
 			}),
 			contains: "decode",
 		},
 		{
 			name: "the response is over the size cap",
 			resolver: resolverAt(t, 5*time.Second, func(w http.ResponseWriter, r *http.Request) {
-				w.Write([]byte(`{"values":{"` + plantedValue))
-				w.Write([]byte(strings.Repeat("a", 2<<20)))
+				_, _ = w.Write([]byte(`{"values":{"` + plantedValue))
+				_, _ = w.Write([]byte(strings.Repeat("a", 2<<20)))
 			}),
 			contains: "exceeds",
 		},
 		{
 			name: "the resolver skips a reference",
 			resolver: resolverAt(t, time.Second, func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"values":{%q:%q}}`, tokenRef, plantedValue)
+				_, _ = fmt.Fprintf(w, `{"values":{%q:%q}}`, tokenRef, plantedValue)
 			}),
 			// The reference is echoed: it is a lookup key, not a secret, and it is what a
 			// diagnosis of a mistyped reference needs.
@@ -442,7 +448,7 @@ func Test_resolveStackSecrets_errorPathsCarryNoSecretValue(t *testing.T) {
 		{
 			name: "the resolver returns an empty value",
 			resolver: resolverAt(t, time.Second, func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"values":{%q:"",%q:%q}}`, tokenRef, metricsRef, plantedValue)
+				_, _ = fmt.Fprintf(w, `{"values":{%q:"",%q:%q}}`, tokenRef, metricsRef, plantedValue)
 			}),
 			contains: tokenRef,
 		},
@@ -1186,4 +1192,211 @@ func Test_NewComposeStackManager_populatesResolverWhenConfigured(t *testing.T) {
 	manager := NewComposeStackManager(&stubDeployer{}, nil)
 
 	assert.NotNil(t, manager.secretResolver)
+}
+
+// hostileFiller is one class of byte for hostileName to overrun the bound with, named by what
+// %q costs to print it.
+//
+// The class is what decides the size of the finished message, because TruncateName bounds the
+// INPUT of the verb rather than its output: %q renders an invalid UTF-8 byte and a C0 byte as
+// four characters each, a backslash and U+2028 as two per input byte, and an ordinary printable
+// as one. See secretresolver.TruncateName.
+//
+// "Non-printable multi-byte rune" is not a class with one cost, and U+2028 does not speak for
+// it: a C1 control prints as \u00NN, three per input byte, and an astral non-printable as
+// \UNNNNNNNN, two and a half. U+2028 is here because it is the one that ties the backslash at
+// two, not because it represents the others.
+type hostileFiller struct {
+	// name goes into the subtest name.
+	name string
+
+	// text is repeated until the bound is overrun many times over.
+	text string
+}
+
+// hostileFillers are the classes the ceiling below has to hold against, worst first.
+//
+// The fixture is parameterised over them because 'A', which this test used to use on its own,
+// is the cheapest of them: %q leaves it alone. A ceiling asserted only against 'A' therefore
+// passes for a reason unrelated to what it claims - the swarm refusal measures 635 bytes
+// filled with 'A' against 2081 filled with invalid UTF-8 - which is the exact failure mode
+// this feature exists to catch.
+var hostileFillers = []hostileFiller{
+	{name: "an invalid UTF-8 byte", text: "\xff"},
+	{name: "NUL", text: "\x00"},
+	{name: "a non-printable multi-byte rune", text: "\u2028"},
+	{name: "a backslash", text: `\`},
+	{name: "an ordinary printable", text: "A"},
+}
+
+// hostileName returns a stack or variable name of the shape an attacker can actually set:
+// control bytes a terminal and an agent both act on, then a mebibyte of filler. Both halves
+// matter and they fail differently - the control bytes need a verb that escapes, the mebibyte
+// needs a bound - which is why every site takes both.
+//
+// The readable prefix is kept so a test can assert the diagnostic survived the treatment. A
+// message bounded into saying nothing would pass a size assertion and be useless.
+func hostileName(prefix, filler string) string {
+	return prefix + "\x00\x1b[31m\n" + strings.Repeat(filler, 1<<20)
+}
+
+// worstCaseQuotedNameBytes is the most one bounded name can occupy once %q has printed it.
+//
+// Measured from the production helper rather than written down, so that it tracks maxNameBytes
+// and the truncation marker without this file knowing either number. A name of nothing but
+// invalid UTF-8 is the worst input TruncateName can be handed, and strconv.Quote is what fmt's
+// %q calls for a string. It comes to 1029 bytes today - 4 per bounded byte, plus the marker and
+// the two quotes - against 261 for a bounded name of 'A'.
+//
+// One assumption remains, and it is what the mebibyte buys: the probe has to be LONGER than
+// maxNameBytes. Below that, TruncateName hands it straight back, no marker is appended, and the
+// figure stops tracking the bound - a 1 KiB probe froze at 4098 for every maxNameBytes of 1024
+// or more, and the tests below go red at 2048. 1<<20 is the same mebibyte hostileName already
+// uses and exceeds any plausible value of maxNameBytes; at today's 256 it measures identically.
+var worstCaseQuotedNameBytes = len(strconv.Quote(secretresolver.TruncateName(strings.Repeat("\xff", 1<<20))))
+
+// maxFixedMessageBytes is the allowance for everything in one of these messages that is not a
+// name: the sentence, the wrapping, the operation the withheld error names and the short
+// resolver error one case wraps. A flat number rather than a derived one, because it bounds
+// text we author and review rather than text a caller supplies - the longest of these messages
+// carries a little over 200 bytes of it - and it sits well over that so the prose can be
+// reworded without anybody having to retune a ceiling.
+const maxFixedMessageBytes = 512
+
+// maxRefusalMessageBytes is the ceiling the messages below are held to: the authored allowance
+// plus two worst-case names, which is the most any message here names.
+//
+// The previous value was a flat 2048, and the worst case exceeds it - two bounded names of
+// invalid UTF-8 print as 2058 bytes between them before a word of the message is added. It held
+// only because the fixture was filled with 'A'.
+var maxRefusalMessageBytes = maxFixedMessageBytes + 2*worstCaseQuotedNameBytes
+
+// assertBoundedAndEscaped holds one persisted message to the ceiling, to the absence of raw
+// control bytes, and to still naming what it is about.
+func assertBoundedAndEscaped(t *testing.T, err error, wantNamed ...string) {
+	t.Helper()
+
+	require.Error(t, err)
+
+	message := err.Error()
+
+	// The name is logged with the size because these subtests run in parallel and their
+	// output interleaves: the measurement is only evidence if it says which case produced it.
+	t.Logf("%s: message is %d bytes, ceiling is %d (%d authored + 2x%d for a worst-case name)",
+		t.Name(), len(message), maxRefusalMessageBytes, maxFixedMessageBytes, worstCaseQuotedNameBytes)
+
+	assert.LessOrEqual(t, len(message), maxRefusalMessageBytes)
+
+	// The bound fired rather than the name merely being short.
+	assert.Contains(t, message, "...")
+
+	for _, control := range []string{"\x00", "\x1b", "\n", "\r", "\t", "\x7f"} {
+		assert.NotContains(t, message, control)
+	}
+
+	for _, named := range wantNamed {
+		assert.Contains(t, message, named)
+	}
+}
+
+// Test_secretErrors_boundAndEscapeHostileNames pins both halves of the fix at every site in
+// this package that names a stack or a variable in an error raised on the deploy path.
+//
+// The channel: stackutils.UpdateStackStatusFromDeploymentResult writes these messages verbatim
+// into Stack.DeploymentStatus[].Message, which Portainer persists and StackInspect serves back
+// to operators and to agents. Neither name is validated on the way in - a stack's Env comes
+// straight out of the request body, and a stack name reaches the database unnormalised through
+// POST /stacks/{id}/migrate - so both the length and the bytes are the caller's.
+//
+// Measured on a copy with these inputs before the fix, a mebibyte in the variable name and an
+// ordinary stack name: SwarmStackManager.Deploy 1048700 bytes with the NUL, the ESC and the
+// newline intact, and "no value resolved" 1048649 bytes - escaped by the %q it already had,
+// and a mebibyte all the same, which is the half %q does not close. A mebibyte in both names
+// put the swarm refusal over 2 MiB.
+//
+// Reverting either half of the fix at any one site fails this test at that site: dropping the
+// bound fails the size assertion, dropping %q fails the control-byte assertion. See
+// secretresolver.TruncateName.
+//
+// Every site is run once per byte class in hostileFillers, because the bound applies to the
+// input of %q and the classes cost between one and four printed bytes each. Measured here, per
+// class, for the two sites that name both a stack and a variable:
+//
+//	invalid UTF-8, NUL   swarm 2081   no value resolved 2021
+//	U+2028               swarm 1113   no value resolved 1053
+//	backslash            swarm 1117   no value resolved 1057
+//	ordinary printable   swarm  635   no value resolved  575
+//
+// The last row is what this fixture used to assert on its own, and 635 bytes clears a 2048
+// ceiling three times over without ever approaching it - while the first row does not.
+func Test_secretErrors_boundAndEscapeHostileNames(t *testing.T) {
+	t.Parallel()
+
+	newStack := func(t *testing.T, filler string) *portainer.Stack {
+		t.Helper()
+
+		return &portainer.Stack{
+			Name:        hostileName("STACKNAME", filler),
+			ProjectPath: t.TempDir(),
+			EntryPoint:  "docker-compose.yml",
+			Env: []portainer.Pair{
+				{Name: hostileName("VARNAME", filler), Value: tokenRef},
+			},
+		}
+	}
+
+	for _, filler := range hostileFillers {
+		t.Run("filled with "+filler.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("the swarm refusal", func(t *testing.T) {
+				t.Parallel()
+
+				manager := &SwarmStackManager{}
+
+				err := manager.Deploy(t.Context(), newStack(t, filler.text), false, false, localEndpoint(), nil)
+				assertBoundedAndEscaped(t, err, "STACKNAME", "VARNAME")
+			})
+
+			t.Run("no resolver is configured", func(t *testing.T) {
+				t.Parallel()
+
+				manager := &ComposeStackManager{}
+
+				_, _, err := manager.resolveStackSecrets(t.Context(), newStack(t, filler.text))
+				assertBoundedAndEscaped(t, err, "STACKNAME", secretresolver.EndpointEnvVar)
+			})
+
+			t.Run("the resolver failed", func(t *testing.T) {
+				t.Parallel()
+
+				manager := &ComposeStackManager{secretResolver: &stubFetcher{err: errors.New("the vault is locked")}}
+
+				_, _, err := manager.resolveStackSecrets(t.Context(), newStack(t, filler.text))
+				assertBoundedAndEscaped(t, err, "STACKNAME", "the vault is locked")
+			})
+
+			t.Run("a variable is left without a value", func(t *testing.T) {
+				t.Parallel()
+
+				// Unreachable against the real client, which guarantees a value for
+				// every requested reference, so it is driven by a stub that answers
+				// with none.
+				manager := &ComposeStackManager{secretResolver: &stubFetcher{values: map[string]string{}}}
+
+				_, _, err := manager.resolveStackSecrets(t.Context(), newStack(t, filler.text))
+				assertBoundedAndEscaped(t, err, "STACKNAME", "VARNAME")
+			})
+
+			t.Run("the withheld deploy error", func(t *testing.T) {
+				t.Parallel()
+
+				// The one site here that names no variable: its whole point is that it
+				// carries nothing of the deployer's text. The stack name was the
+				// exception it carried anyway, unbounded, at 1048781 bytes.
+				err := deployFailure(newStack(t, filler.text), []string{"ADMIN_TOKEN=" + tokenValue}, "failed to deploy a stack", errors.New("boom"))
+				assertBoundedAndEscaped(t, err, "STACKNAME")
+			})
+		})
+	}
 }

@@ -44,9 +44,13 @@ func (manager *SwarmStackManager) Deploy(
 	//
 	// Checked before the proxy is fetched: a deploy that is refused outright has no
 	// reason to open an endpoint proxy and close it again.
+	//
+	// Both names bounded and quoted, as at every site that names one in a persisted deploy
+	// error; see secretresolver.TruncateName.
 	for _, ev := range stack.Env {
 		if secretresolver.IsReference(ev.Value) {
-			return fmt.Errorf("stack %q: variable %s uses a secret reference, but secret references are not supported for swarm stacks", stack.Name, ev.Name)
+			return fmt.Errorf("stack %q: variable %q uses a secret reference, but secret references are not supported for swarm stacks",
+				secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(ev.Name))
 		}
 	}
 

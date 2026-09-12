@@ -52,6 +52,9 @@ type unpackerCmd struct {
 	// deploy- and start-shaped commands read env, the four undeploy- and stop-shaped
 	// ones address the project by name and ignore it. Keep the two in step - a builder
 	// that starts consuming env without this flag would pass a reference through.
+	//
+	// remoteStack reads the same flag to refuse before it creates a docker client and
+	// pulls the unpacker image, so this is the single source of that decision.
 	usesEnv bool
 }
 
@@ -66,11 +69,27 @@ var funcmap = map[StackRemoteOperation]unpackerCmd{
 	OperationSwarmStop:     {build: buildSwarmStopCmd},
 }
 
-// build the unpacker cmd for stack based on stackOperation
-func (d *stackDeployer) buildUnpackerCmdForStack(stack *portainer.Stack, operation StackRemoteOperation, opts unpackerCmdBuilderOptions) ([]string, error) {
+// unpackerCmdFor returns one operation's entry in funcmap, refusing an operation that has
+// none.
+//
+// The lookup is a function rather than an indexing expression at each call site because a
+// missing key yields the zero unpackerCmd - a nil builder and usesEnv false - and the second
+// of those is a silently skipped secret-reference check in remoteStack. Both callers go
+// through here, so an unknown operation is refused in one place and before any work.
+func unpackerCmdFor(operation StackRemoteOperation) (unpackerCmd, error) {
 	cmd, known := funcmap[operation]
 	if !known {
-		return nil, fmt.Errorf("unknown stack operation %s", operation)
+		return unpackerCmd{}, fmt.Errorf("unknown stack operation %s", operation)
+	}
+
+	return cmd, nil
+}
+
+// build the unpacker cmd for stack based on stackOperation
+func (d *stackDeployer) buildUnpackerCmdForStack(stack *portainer.Stack, operation StackRemoteOperation, opts unpackerCmdBuilderOptions) ([]string, error) {
+	cmd, err := unpackerCmdFor(operation)
+	if err != nil {
+		return nil, err
 	}
 
 	registriesStrings := generateRegistriesStrings(opts.registries, d.dataStore)
@@ -84,10 +103,11 @@ func (d *stackDeployer) buildUnpackerCmdForStack(stack *portainer.Stack, operati
 	var envStrings []string
 
 	if cmd.usesEnv {
-		var err error
-
+		// getEnv fails for one reason only - a secret reference this path cannot resolve -
+		// so this wrap is on the feature's refusal path and bounds the stack name like the
+		// rest of it. See secretresolver.TruncateName.
 		if envStrings, err = getEnv(stack.Name, stack.Env); err != nil {
-			return nil, fmt.Errorf("stack %q: %w", stack.Name, err)
+			return nil, fmt.Errorf("stack %q: %w", secretresolver.TruncateName(stack.Name), err)
 		}
 	}
 
@@ -303,10 +323,14 @@ func getEnv(stackName string, env []portainer.Pair) ([]string, error) {
 }
 
 // unsupportedSecretReferenceError reports a variable this path cannot deploy. It is one
-// function so that the check hoisted ahead of the image pull in DeployRemoteComposeStack
-// and the one inside getEnv cannot drift apart in their wording.
+// function so that the checks hoisted ahead of the work - the compose pull in
+// DeployRemoteComposeStack, the docker client and image pull in remoteStack - and the one
+// inside getEnv cannot drift apart in their wording.
+//
+// The variable name is bounded and quoted, like every other name this feature names in a
+// persisted deploy error; see secretresolver.TruncateName.
 func unsupportedSecretReferenceError(name string) error {
-	return fmt.Errorf("variable %s uses a secret reference, but secret references are not supported for stacks deployed through the compose unpacker", name)
+	return fmt.Errorf("variable %q uses a secret reference, but secret references are not supported for stacks deployed through the compose unpacker", secretresolver.TruncateName(name))
 }
 
 // checkNoSecretReferences reports the first variable of the stack that holds a secret
@@ -314,7 +338,7 @@ func unsupportedSecretReferenceError(name string) error {
 func checkNoSecretReferences(stack *portainer.Stack) error {
 	for _, pair := range stack.Env {
 		if secretresolver.IsReference(pair.Value) {
-			return fmt.Errorf("stack %q: %w", stack.Name, unsupportedSecretReferenceError(pair.Name))
+			return fmt.Errorf("stack %q: %w", secretresolver.TruncateName(stack.Name), unsupportedSecretReferenceError(pair.Name))
 		}
 	}
 

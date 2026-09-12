@@ -549,6 +549,211 @@ func Test_DeployRemoteComposeStack_refusesSecretReferencesBeforePulling(t *testi
 	assert.Equal(t, fromBuilder.Error(), err.Error())
 }
 
+// gitConfigProbe is the dataStore the ordering tests below hand to a stackDeployer. It records
+// whether remoteStack reached the git-config block, and answers with an error rather than by
+// crashing if it did.
+//
+// It replaces a nil dataStore, and the replacement is the whole point. A nil one did pin the
+// ordering - moving the gate below the git-config block made the test fail - but it failed by
+// dereferencing nil, and a panic does not fail one test, it takes the package's whole test
+// binary down. A regression in this one gate would therefore have hidden every other result
+// in api/stacks/deployments under CI, which is the opposite of what a pin is for. The counter
+// below is what goes red instead, with a message naming what happened.
+//
+// Workflow().Read is the first thing GitSourceAndArtifactForStack does after its workflowID
+// check, so recording at the accessor and refusing at the read covers the block: nothing else
+// on the embedded nil DataStore is reached.
+type gitConfigProbe struct {
+	dataservices.DataStore
+
+	// reads is a plain counter: each subtest builds its own probe and drives it from its
+	// own goroutine, so there is nothing here for two goroutines to share.
+	reads int
+}
+
+func (p *gitConfigProbe) Workflow() dataservices.WorkflowService {
+	p.reads++
+
+	return refusingWorkflowService{}
+}
+
+// refusingWorkflowService answers every read with an error of its own, so a call that gets
+// past the gate fails by assertion and says why.
+type refusingWorkflowService struct {
+	dataservices.WorkflowService
+}
+
+func (refusingWorkflowService) Read(portainer.WorkflowID) (*portainer.Workflow, error) {
+	return nil, errGitConfigWasRead
+}
+
+// errGitConfigWasRead names the thing the gate is supposed to come before, so a call that got
+// past it says so in its own error as well as on the counter.
+var errGitConfigWasRead = errors.New("the git config was read")
+
+// secretReferenceStack is a stack holding one literal variable and one reference.
+//
+// workflowID is a parameter because it decides what remoteStack does before it ever reaches
+// the docker client: a non-zero one sends it into the git-config block, which calls
+// workflows.GitSourceAndArtifactForStack and therefore trips gitConfigProbe. That is what
+// pins the refusal ahead of THAT block rather than merely somewhere in the function - with a
+// zero WorkflowID the block is skipped, so a reviewer could move the gate below it and the
+// test would stay green. The gated operations therefore use 1.
+//
+// The operations that are meant to walk past the gate use 0: they have to get as far as the
+// docker client for their own assertion to mean anything.
+func secretReferenceStack(workflowID portainer.WorkflowID) *portainer.Stack {
+	return &portainer.Stack{
+		Name:       "arcextension",
+		WorkflowID: workflowID,
+		EntryPoint: "docker-compose.yml",
+		Env: []portainer.Pair{
+			{Name: "LOG_LEVEL", Value: "debug"},
+			{Name: "ADMIN_TOKEN", Value: "secret:vw:stack/nebula/arcextension/ADMIN_TOKEN"},
+		},
+	}
+}
+
+// Test_remoteStack_refusesSecretReferencesBeforeTouchingTheEnvironment pins the refusal
+// ahead of the work every unpacker operation does before buildUnpackerCmdForStack is
+// reached: reading the git config, creating a docker client and pulling the unpacker
+// image, all for a deploy that was never going to proceed.
+//
+// Both halves of that ordering are load bearing and both are enforced. The git config comes
+// first and is reached only for a stack with a WorkflowID, so the refused stack carries one
+// and gitConfigProbe turns an ungated call into a counted, asserted failure. The docker
+// client comes next, and the endpoint can never yield one, so a call that gets that far
+// fails with an unrelated error instead and these assertions go red.
+func Test_remoteStack_refusesSecretReferencesBeforeTouchingTheEnvironment(t *testing.T) {
+	t.Parallel()
+
+	stack := secretReferenceStack(1)
+	endpoint := &portainer.Endpoint{Type: portainer.AzureEnvironment}
+
+	newDeployer := func() (*stackDeployer, *gitConfigProbe) {
+		probe := &gitConfigProbe{}
+
+		return &stackDeployer{lock: &sync.Mutex{}, composeStackManager: &composeManagerStub{}, dataStore: probe}, probe
+	}
+
+	// Every entry point of deployer_remote.go, so a new one cannot be added with the
+	// same shape and no check.
+	refused := map[string]func(d *stackDeployer) error{
+		"DeployRemoteComposeStack": func(d *stackDeployer) error {
+			return d.DeployRemoteComposeStack(t.Context(), stack, endpoint, nil, false, true, false)
+		},
+		"StartRemoteComposeStack": func(d *stackDeployer) error {
+			return d.StartRemoteComposeStack(t.Context(), stack, endpoint, nil)
+		},
+		"DeployRemoteSwarmStack": func(d *stackDeployer) error {
+			return d.DeployRemoteSwarmStack(t.Context(), stack, endpoint, nil, false, true)
+		},
+		"StartRemoteSwarmStack": func(d *stackDeployer) error {
+			return d.StartRemoteSwarmStack(t.Context(), stack, endpoint, nil)
+		},
+	}
+
+	for name, call := range refused {
+		t.Run(name+" refuses the reference before reaching the environment", func(t *testing.T) {
+			t.Parallel()
+
+			deployer, probe := newDeployer()
+
+			err := call(deployer)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "ADMIN_TOKEN")
+			assert.Contains(t, err.Error(), "arcextension")
+
+			// The git config is never read, which is the first half of the ordering and the
+			// half a zero counter is the whole proof of: move the gate below that block and
+			// this goes to 1 and the message below changes, by assertion rather than by
+			// signal. See gitConfigProbe.
+			assert.Zero(t, probe.reads)
+			assert.NotContains(t, err.Error(), errGitConfigWasRead.Error())
+
+			// The docker client is never created, so no image is pulled either.
+			assert.NotContains(t, err.Error(), "docker client")
+			assert.False(t, deployer.composeStackManager.(*composeManagerStub).pulled)
+
+			// And the wording is the builder's, so the two checks cannot drift apart.
+			_, fromBuilder := deployer.buildUnpackerCmdForStack(stack, OperationDeploy, unpackerCmdBuilderOptions{})
+			require.Error(t, fromBuilder)
+			assert.Equal(t, fromBuilder.Error(), err.Error())
+		})
+	}
+
+	// Removal and stop address the project by name and pass no environment, so they must
+	// stay usable on a stack that has migrated to references - otherwise a user could
+	// migrate a stack and then no longer be able to clean it up.
+	//
+	// No WorkflowID on this one: these calls are supposed to run past the gate and fail at
+	// the docker client, so the git-config block they would hit on the way must not be the
+	// thing that stops them. See secretReferenceStack.
+	ungated := secretReferenceStack(0)
+
+	unaffected := map[string]func(d *stackDeployer) error{
+		"UndeployRemoteComposeStack": func(d *stackDeployer) error {
+			return d.UndeployRemoteComposeStack(t.Context(), ungated, endpoint)
+		},
+		"StopRemoteComposeStack": func(d *stackDeployer) error {
+			return d.StopRemoteComposeStack(t.Context(), ungated, endpoint)
+		},
+		"UndeployRemoteSwarmStack": func(d *stackDeployer) error {
+			return d.UndeployRemoteSwarmStack(t.Context(), ungated, endpoint)
+		},
+		"StopRemoteSwarmStack": func(d *stackDeployer) error {
+			return d.StopRemoteSwarmStack(t.Context(), ungated, endpoint)
+		},
+	}
+
+	for name, call := range unaffected {
+		t.Run(name+" is not gated on the reference", func(t *testing.T) {
+			t.Parallel()
+
+			// It gets as far as the environment and fails there, which is the proof that
+			// the reference did not stop it.
+			deployer, _ := newDeployer()
+
+			err := call(deployer)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "docker client")
+			assert.NotContains(t, err.Error(), "ADMIN_TOKEN")
+		})
+	}
+}
+
+// Test_remoteStack_refusesAnUnknownOperation pins the explicit lookup that the gate above
+// depends on.
+//
+// funcmap[operation] on an unknown key yields the zero unpackerCmd, whose usesEnv is false -
+// so with an indexing expression the secret-reference check silently does not run, and the
+// operation is only refused at the very end of remoteStack, after the git config has been
+// read, a docker client created and the unpacker image pulled. Unreachable through the eight
+// exported entry points, all of which pass a constant, and pinned anyway so that "one check
+// covers them all" holds by construction rather than by inventory.
+func Test_remoteStack_refusesAnUnknownOperation(t *testing.T) {
+	t.Parallel()
+
+	probe := &gitConfigProbe{}
+	deployer := &stackDeployer{lock: &sync.Mutex{}, composeStackManager: &composeManagerStub{}, dataStore: probe}
+
+	err := deployer.remoteStack(
+		t.Context(),
+		secretReferenceStack(1),
+		&portainer.Endpoint{Type: portainer.AzureEnvironment},
+		StackRemoteOperation("compose-teleport"),
+		unpackerCmdBuilderOptions{},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown stack operation")
+
+	// And refused before anything was touched: the stack carries a WorkflowID, so a lookup
+	// that fell through to the git config would show up on the probe. See gitConfigProbe for
+	// why this is a counter and not a nil dataStore.
+	assert.Zero(t, probe.reads)
+	assert.NotContains(t, err.Error(), "docker client")
+}
+
 func Test_buildUnpackerCmdForStack_refusesSecretReferencesOnlyWhereEnvIsUsed(t *testing.T) {
 	t.Parallel()
 
@@ -610,4 +815,321 @@ func Test_buildUnpackerCmdForStack_refusesSecretReferencesOnlyWhereEnvIsUsed(t *
 			}
 		}
 	})
+}
+
+// stackFileServiceStub serves one compose file to the validation step.
+type stackFileServiceStub struct {
+	portainer.FileService
+	content []byte
+}
+
+func (s stackFileServiceStub) GetFileContent(trustedRootPath, filePath string) ([]byte, error) {
+	return s.content, nil
+}
+
+// countingDeployer records how many times the compose deploy was actually reached.
+type countingDeployer struct {
+	noopDeployer
+	composeDeploys int
+}
+
+func (d *countingDeployer) DeployComposeStack(_ context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint, registries []portainer.Registry, prune, forcePullImage, forceRecreate bool) error {
+	d.composeDeploys++
+
+	return nil
+}
+
+// Test_ComposeStackDeploymentConfig_Deploy_gatesSecretReferencesOnAdmin pins the deploy-time
+// half of the rule in docs/secret-resolver.md §3.11: for a user who is not an administrator
+// or an environment administrator, stackutils.ValidateStackFiles enforces the environment's
+// policy against the interpolated *reference* while the deploy runs on the interpolated
+// *value*, so the policy check and the containers see different strings. The deploy is
+// refused for that class of user rather than left to run on an unvalidated string.
+func Test_ComposeStackDeploymentConfig_Deploy_gatesSecretReferencesOnAdmin(t *testing.T) {
+	t.Parallel()
+
+	const composeFile = `services:
+  app:
+    image: nginx
+`
+
+	reference := []portainer.Pair{
+		{Name: "LOG_LEVEL", Value: "debug"},
+		{Name: "ADMIN_TOKEN", Value: "secret:vw:stack/nebula/arcextension/ADMIN_TOKEN"},
+	}
+
+	tests := []struct {
+		name        string
+		role        portainer.UserRole
+		env         []portainer.Pair
+		wantRefused bool
+	}{
+		{
+			name:        "a regular user cannot deploy a stack carrying a reference",
+			role:        portainer.StandardUserRole,
+			env:         reference,
+			wantRefused: true,
+		},
+		{
+			// The gate must bite on references and on nothing else: an ordinary stack of
+			// the same user goes through untouched.
+			name: "a regular user's ordinary stack is unaffected",
+			role: portainer.StandardUserRole,
+			env:  []portainer.Pair{{Name: "LOG_LEVEL", Value: "debug"}},
+		},
+		{
+			// The escaped marker is a literal, not a reference: validation and deploy see
+			// the same string, so there is no divergence to close and nothing to refuse.
+			name: "a regular user's value that only looks like a reference is unaffected",
+			role: portainer.StandardUserRole,
+			env:  []portainer.Pair{{Name: "APP_URI", Value: "secret::app/config"}},
+		},
+		{
+			// An administrator is not subject to the policy this gate protects, so gating
+			// one would only break the feature for the users expected to run it.
+			name: "an administrator is not gated",
+			role: portainer.AdministratorRole,
+			env:  reference,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			deployer := &countingDeployer{}
+
+			config := &ComposeStackDeploymentConfig{
+				stack: &portainer.Stack{
+					Name:       "arcextension",
+					EntryPoint: "docker-compose.yml",
+					Env:        test.env,
+				},
+				endpoint:      &portainer.Endpoint{},
+				user:          &portainer.User{Role: test.role},
+				FileService:   stackFileServiceStub{content: []byte(composeFile)},
+				StackDeployer: deployer,
+			}
+
+			err := config.Deploy(t.Context())
+
+			if test.wantRefused {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "ADMIN_TOKEN")
+				assert.Contains(t, err.Error(), "arcextension")
+				assert.Zero(t, deployer.composeDeploys)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, 1, deployer.composeDeploys)
+		})
+	}
+}
+
+// Test_ComposeStackDeploymentConfig_Deploy_refusesAReferenceWithoutAnEndpoint pins the
+// fail-closed direction: a missing endpoint means no policy check ran at all, which is a
+// reason to refuse a non-administrator rather than to let the deploy through.
+func Test_ComposeStackDeploymentConfig_Deploy_refusesAReferenceWithoutAnEndpoint(t *testing.T) {
+	t.Parallel()
+
+	deployer := &countingDeployer{}
+
+	config := &ComposeStackDeploymentConfig{
+		stack: &portainer.Stack{
+			Name:       "arcextension",
+			EntryPoint: "docker-compose.yml",
+			Env:        []portainer.Pair{{Name: "ADMIN_TOKEN", Value: "secret:vw:stack/nebula/arcextension/ADMIN_TOKEN"}},
+		},
+		user:          &portainer.User{Role: portainer.StandardUserRole},
+		FileService:   stackFileServiceStub{content: []byte("services:\n  app:\n    image: nginx\n")},
+		StackDeployer: deployer,
+	}
+
+	err := config.Deploy(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ADMIN_TOKEN")
+	assert.Zero(t, deployer.composeDeploys)
+}
+
+// hostileFiller is one class of byte for hostileName to overrun the bound with, named by what
+// %q costs to print it.
+//
+// The class is what decides the size of the finished message, because TruncateName bounds the
+// INPUT of the verb rather than its output: %q renders an invalid UTF-8 byte and a C0 byte as
+// four characters each, a backslash and U+2028 as two per input byte, and an ordinary printable
+// as one. See secretresolver.TruncateName.
+//
+// "Non-printable multi-byte rune" is not a class with one cost, and U+2028 does not speak for
+// it: a C1 control prints as \u00NN, three per input byte, and an astral non-printable as
+// \UNNNNNNNN, two and a half. U+2028 is here because it is the one that ties the backslash at
+// two, not because it represents the others.
+type hostileFiller struct {
+	// name goes into the subtest name.
+	name string
+
+	// text is repeated until the bound is overrun many times over.
+	text string
+}
+
+// hostileFillers are the classes the ceiling below has to hold against, worst first.
+//
+// The fixture is parameterised over them because 'A', which this test used to use on its own,
+// is the cheapest of them: %q leaves it alone. A ceiling asserted only against 'A' therefore
+// passes for a reason unrelated to what it claims - the non-administrator gate measures 690
+// bytes filled with 'A' against 2136 filled with invalid UTF-8 - which is the exact failure
+// mode this feature exists to catch.
+var hostileFillers = []hostileFiller{
+	{name: "an invalid UTF-8 byte", text: "\xff"},
+	{name: "NUL", text: "\x00"},
+	{name: "a non-printable multi-byte rune", text: "\u2028"},
+	{name: "a backslash", text: `\`},
+	{name: "an ordinary printable", text: "A"},
+}
+
+// hostileName returns a stack or variable name of the shape an attacker can actually set:
+// control bytes a terminal and an agent both act on, then a mebibyte of filler. Both halves
+// matter and they fail differently - the control bytes need a verb that escapes, the mebibyte
+// needs a bound - which is why every site takes both.
+//
+// The readable prefix is kept so a test can assert the diagnostic survived the treatment. A
+// message bounded into saying nothing would pass a size assertion and be useless.
+func hostileName(prefix, filler string) string {
+	return prefix + "\x00\x1b[31m\n" + strings.Repeat(filler, 1<<20)
+}
+
+// worstCaseQuotedNameBytes is the most one bounded name can occupy once %q has printed it.
+//
+// Measured from the production helper rather than written down, so that it tracks maxNameBytes
+// and the truncation marker without this file knowing either number. A name of nothing but
+// invalid UTF-8 is the worst input TruncateName can be handed, and strconv.Quote is what fmt's
+// %q calls for a string. It comes to 1029 bytes today - 4 per bounded byte, plus the marker and
+// the two quotes - against 261 for a bounded name of 'A'.
+//
+// One assumption remains, and it is what the mebibyte buys: the probe has to be LONGER than
+// maxNameBytes. Below that, TruncateName hands it straight back, no marker is appended, and the
+// figure stops tracking the bound - a 1 KiB probe froze at 4098 for every maxNameBytes of 1024
+// or more, and the tests below go red at 2048. 1<<20 is the same mebibyte hostileName already
+// uses and exceeds any plausible value of maxNameBytes; at today's 256 it measures identically.
+var worstCaseQuotedNameBytes = len(strconv.Quote(secretresolver.TruncateName(strings.Repeat("\xff", 1<<20))))
+
+// maxFixedMessageBytes is the allowance for everything in one of these messages that is not a
+// name: the sentence and the wrapping. A flat number rather than a derived one, because it
+// bounds text we author and review rather than text a caller supplies - the longest of these
+// messages carries 154 bytes of it - and it sits well over that so the prose can be reworded
+// without anybody having to retune a ceiling.
+const maxFixedMessageBytes = 512
+
+// maxRefusalMessageBytes is the ceiling the refusals below are held to: the authored allowance
+// plus two worst-case names, which is the most any message here names.
+//
+// The previous value was a flat 2048, and the worst case exceeds it - two bounded names of
+// invalid UTF-8 print as 2058 bytes between them before a word of the message is added, and the
+// non-administrator gate measures 2212. It held only because the fixture was filled with 'A'.
+var maxRefusalMessageBytes = maxFixedMessageBytes + 2*worstCaseQuotedNameBytes
+
+// assertBoundedAndEscaped holds one persisted refusal message to the ceiling, to the absence
+// of raw control bytes, and to still naming what it is about.
+func assertBoundedAndEscaped(t *testing.T, err error, wantNamed ...string) {
+	t.Helper()
+
+	require.Error(t, err)
+
+	message := err.Error()
+
+	// The name is logged with the size because these subtests run in parallel and their
+	// output interleaves: the measurement is only evidence if it says which case produced it.
+	t.Logf("%s: message is %d bytes, ceiling is %d (%d authored + 2x%d for a worst-case name)",
+		t.Name(), len(message), maxRefusalMessageBytes, maxFixedMessageBytes, worstCaseQuotedNameBytes)
+
+	assert.LessOrEqual(t, len(message), maxRefusalMessageBytes)
+
+	// The bound fired rather than the name merely being short.
+	assert.Contains(t, message, "...")
+
+	for _, control := range []string{"\x00", "\x1b", "\n", "\r", "\t", "\x7f"} {
+		assert.NotContains(t, message, control)
+	}
+
+	for _, named := range wantNamed {
+		assert.Contains(t, message, named)
+	}
+}
+
+// Test_secretRefusals_boundAndEscapeHostileNames pins both halves of the fix at every site in
+// this package that names a stack or a variable in a refusal.
+//
+// The channel: stackutils.UpdateStackStatusFromDeploymentResult writes these messages verbatim
+// into Stack.DeploymentStatus[].Message, which Portainer persists and StackInspect serves back
+// to operators and to agents. Neither name is validated on the way in - a stack's Env comes
+// straight out of the request body and updateComposeStackPayload.Validate looks only at the
+// compose file - so both the length and the bytes are the caller's.
+//
+// Measured on a copy with these inputs before the fix, a mebibyte in the variable name and an
+// ordinary stack name: refuseSecretReferencesForNonAdmin 1048755 bytes, getEnv 1048710,
+// checkNoSecretReferences 1048732, each with the NUL, the ESC and the newline intact. A
+// mebibyte in both names put the first and the third over 2 MiB.
+//
+// Reverting either half of the fix at any one site fails this test at that site: dropping the
+// bound fails the size assertion, dropping %q fails the control-byte assertion. See
+// secretresolver.TruncateName.
+//
+// Every site is run once per byte class in hostileFillers, because the bound applies to the
+// input of %q and the classes cost between one and four printed bytes each. Measured here, per
+// class, for the non-administrator gate and the two unpacker sites that name both names:
+//
+//	invalid UTF-8, NUL   gate 2136   unpacker 2113
+//	U+2028               gate 1168   unpacker 1145
+//	backslash            gate 1172   unpacker 1149
+//	ordinary printable   gate  690   unpacker  667
+//
+// The last row is what this fixture used to assert on its own, and 690 bytes clears a 2048
+// ceiling three times over without ever approaching it - while the first row does not clear it
+// at all.
+func Test_secretRefusals_boundAndEscapeHostileNames(t *testing.T) {
+	t.Parallel()
+
+	for _, filler := range hostileFillers {
+		t.Run("filled with "+filler.name, func(t *testing.T) {
+			t.Parallel()
+
+			stack := &portainer.Stack{
+				Name: hostileName("STACKNAME", filler.text),
+				Env: []portainer.Pair{
+					{Name: hostileName("VARNAME", filler.text), Value: "secret:vw:stack/nebula/arcextension/ADMIN_TOKEN"},
+				},
+			}
+
+			t.Run("the non-administrator gate", func(t *testing.T) {
+				t.Parallel()
+
+				assertBoundedAndEscaped(t, refuseSecretReferencesForNonAdmin(stack), "STACKNAME", "VARNAME")
+			})
+
+			t.Run("the unpacker environment builder", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := getEnv(stack.Name, stack.Env)
+
+				// getEnv names the variable only; its caller adds the stack.
+				assertBoundedAndEscaped(t, err, "VARNAME")
+			})
+
+			t.Run("the unpacker check hoisted ahead of the pull", func(t *testing.T) {
+				t.Parallel()
+
+				assertBoundedAndEscaped(t, checkNoSecretReferences(stack), "STACKNAME", "VARNAME")
+			})
+
+			t.Run("the unpacker command builder", func(t *testing.T) {
+				t.Parallel()
+
+				deployer := &stackDeployer{}
+
+				_, err := deployer.buildUnpackerCmdForStack(stack, OperationDeploy, unpackerCmdBuilderOptions{})
+				assertBoundedAndEscaped(t, err, "STACKNAME", "VARNAME")
+			})
+		})
+	}
 }

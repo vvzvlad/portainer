@@ -259,12 +259,12 @@ func (manager *ComposeStackManager) resolveStackSecrets(ctx context.Context, sta
 	// the literal string "secret:..." as its password is a service quietly running on
 	// a garbage credential, which is far worse than a refused deploy.
 	if manager.secretResolver == nil {
-		return nil, nil, fmt.Errorf("stack %q uses secret references but no secret resolver is configured, set %s", stack.Name, secretresolver.EndpointEnvVar)
+		return nil, nil, fmt.Errorf("stack %q uses secret references but no secret resolver is configured, set %s", secretresolver.TruncateName(stack.Name), secretresolver.EndpointEnvVar)
 	}
 
 	values, err := manager.secretResolver.Fetch(ctx, refs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to resolve secret references of stack %q: %w", stack.Name, err)
+		return nil, nil, fmt.Errorf("failed to resolve secret references of stack %q: %w", secretresolver.TruncateName(stack.Name), err)
 	}
 
 	literals := make([]portainer.Pair, 0, len(stack.Env))
@@ -282,7 +282,16 @@ func (manager *ComposeStackManager) resolveStackSecrets(ctx context.Context, sta
 			// Fetch already guarantees a value for every requested reference, so
 			// reaching here means a broken client rather than a resolver answer. Fail
 			// anyway rather than let the variable through undefined.
-			return nil, nil, fmt.Errorf("stack %q: no value resolved for variable %s", stack.Name, pair.Name)
+			//
+			// %q and bounded, like every other site that names one of these in a message
+			// persisted as the stack's deployment status and read back by agents. A
+			// variable name is set through the API by whoever edits the stack, so it is
+			// Portainer's own data rather than the resolver's channel that
+			// pkg/secretresolver sanitises - a far narrower channel, and this branch is in
+			// addition unreachable against the real client, but the class is handled the
+			// same way at every site so that no site has to be argued about on its own. See
+			// secretresolver.TruncateName.
+			return nil, nil, fmt.Errorf("stack %q: no value resolved for variable %q", secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(pair.Name))
 		}
 
 		env = append(env, pair.Name+"="+value)
@@ -362,8 +371,14 @@ type withheldError struct {
 
 // Error returns a fixed description built from the stack name and the operation.
 // Nothing derived from the deployer's text appears in it.
+//
+// "Fixed" was true of the operation, which is a literal at every call site, and not of the
+// stack name, which arrives in the request body and had no bound: a mebibyte of it came back
+// as a 1048781-byte message, persisted. Bounded here rather than at the two field
+// assignments, so that the bound sits at the format verb like every other one on this path;
+// see secretresolver.TruncateName.
 func (e *withheldError) Error() string {
-	return fmt.Sprintf("%s %q: the underlying error is withheld because this stack resolves secret references and compose quotes offending values verbatim, see the Portainer server log for the redacted text", e.operation, e.stackName)
+	return fmt.Sprintf("%s %q: the underlying error is withheld because this stack resolves secret references and compose quotes offending values verbatim, see the Portainer server log for the redacted text", e.operation, secretresolver.TruncateName(e.stackName))
 }
 
 // Unwrap keeps errors.Is and errors.As working against the deployer's error.
