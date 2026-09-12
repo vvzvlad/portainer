@@ -1,8 +1,10 @@
 # Secret resolver: keeping secret values out of Portainer
 
-Design document for a fork feature. Nothing here is implemented yet — this is the
-handoff from the investigation that produced the design, so that whoever picks it
-up does not re-derive it or re-walk the dead ends.
+Design document for a fork feature. It began as the handoff from the investigation that
+produced the design, so that whoever picked it up would not re-derive it or re-walk the dead
+ends; the feature is now **implemented** in `pkg/secretresolver`, `api/exec` and
+`api/stacks/deployments`, and the sections below say "now enforced in code" and name the test
+that pins each decision. §7 is the only part that is still a plan.
 
 Everything marked **verified** was confirmed against source or by running a command;
 the command or the file:function is named. Everything else is explicitly flagged.
@@ -93,7 +95,7 @@ cmdcompose "github.com/docker/compose/v2/cmd/compose"
 ```
 
 There is no `exec.Command("docker-compose", …)` anywhere. The comment
-`// CompomposeStackManager is a wrapper for docker-compose binary` in
+`// ComposeStackManager is a wrapper for docker-compose binary` in
 `api/exec/compose_stack.go` is a stale artifact and does not describe the code.
 
 ### 3.2 Local socket vs Portainer Agent differ only in the Docker API address
@@ -121,18 +123,25 @@ at a path on the target host is therefore invisible to compose.
 
 ### 3.3 What Portainer does with `Stack.Env`
 
-`api/exec/compose_stack.go`, `createEnvFile(stack)`:
+`api/exec/compose_stack.go`, `createEnvFile` — **as this patch leaves it**. Vanilla took
+only the stack and read `stack.Env` directly; the second parameter is the change, and it is
+the whole mechanism by which a resolved value never reaches the file:
 
 ```go
-if len(stack.Env) == 0 { return "", nil }
+func createEnvFile(stack *portainer.Stack, env []portainer.Pair) (string, error) {
+    if len(env) == 0 { return "", nil }            // literals only; references are not here
 
-envFilePath := path.Join(stack.ProjectPath, "stack.env")
-envfile, err := os.OpenFile(envFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-defaultEnvPath := path.Join(stack.ProjectPath, path.Dir(stack.EntryPoint), ".env")
-copyDefaultEnvFile(envfile, defaultEnvPath)   // .env content first
-copyConfigEnvVars(envfile, stack.Env)         // stack.Env appended, wins
-return envFilePath, nil
+    envFilePath := stackEnvFilePath(stack)         // <ProjectPath>/stack.env
+    envfile, err := os.OpenFile(envFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+    defaultEnvPath := path.Join(stack.ProjectPath, path.Dir(stack.EntryPoint), ".env")
+    copyDefaultEnvFile(envfile, defaultEnvPath)    // .env content first
+    copyConfigEnvVars(envfile, env)                // the literals appended, they win
+    return envFilePath, nil
+}
 ```
+
+The caller passes the literal half of `stack.Env`, so a stack whose every variable is a
+reference writes no file at all.
 
 The path flows into `libstack.Options.EnvFilePath` → `cli.WithEnvFiles(...)` in
 `createProject()`. If `Env` is empty, `envFiles` is empty and `cli.WithEnvFiles()`
@@ -205,11 +214,11 @@ image update is not a rotation. This has to be in the migration runbook, because
 failure is silent: the service keeps working on the old credential until the day the
 old credential is revoked.
 
-The env reuse is by construction, not incidental. `autoupdate.go:301` and
+The env reuse is by construction, not incidental. `autoupdate.go:342` and
 `rollback.go:367` both call the same `containerService.Recreate`
-(`seams.go:36` → `api/docker/container.go:212`), which inspects the container
+(`seams.go:38` → `api/docker/container.go:407`), which inspects the container
 (`ContainerInspectWithRaw`), mutates **exactly one field** — `container.Config.Image`
-at line 241 — and hands the same struct to creation:
+at line 436 — and hands the same struct to creation:
 
 ```go
 create, err := cli.ContainerCreate(ctx, container.Config, container.HostConfig, &initialNetwork, nil, container.Name)
@@ -262,6 +271,7 @@ left as tempting restore points.
 | Deploy logs | **Narrow but real, and not closed.** Was written here as "safe by name"; that was too confident. See below. |
 | `compose-unpacker` command line | **Was open; closed by a guard.** `getEnv` in `api/stacks/deployments/compose_unpacker_cmd_builder.go` builds `--env=NAME=VALUE` verbatim from `Stack.Env`. See below. |
 | `PORTAINER_*` on the server process, via compose interpolation | **Open, pre-existing, and worth knowing about.** |
+| `Stack.DeploymentStatus[].Message` as a *size and byte* channel, separately from the value question | **Partly closed.** The refusals this feature adds are bounded and escaped — §3.13. The pre-existing one next to them is not: `stackutils.ValidateComposeURLs` and `ValidateStackFiles` return the compose-go loader's error almost unchanged, and it quotes the compose file's own text verbatim, raw control bytes included, bounded by nothing. `ValidateComposeURLs` runs for **every** user, so no admin gate covers it. Not this feature's to close; an agent reading a deployment status message must still treat it as untrusted. |
 
 **On the `DeploymentStatus` row.** This was written as a guess — "compose errors
 normally name variables, not values, but it is not proven" — and the guess was wrong.
@@ -293,8 +303,9 @@ formatted, and it fails in two verified ways:
   prints `depends on undefined service %q`; `types/project.go:838`, `types/device.go:46`
   and the jsonschema path all quote too. A value containing `"` or `\` therefore appears
   **escaped**, and a raw-substring search misses it completely.
-- **Split fragments.** `docker/go-connections@v0.6.0/nat/nat.go:198,205` emit
-  `"invalid containerPort: " + containerPort`, where that string is already a *fragment*
+- **Split fragments.** `docker/go-connections@v0.6.0/nat/nat.go:198` emits
+  `"invalid containerPort: " + containerPort` and `:205` the matching
+  `"invalid hostPort: " + hostPort`, where that string is already a *fragment*
   produced by splitting on `:` — and `nat.go:176` lowercases another one. A value
   `Ab3xYz:Qw7` in `ports:` yields `invalid containerPort: Qw7`: no whole-value match, and
   the fragment goes to the database.
@@ -441,7 +452,7 @@ at default verbosity. Roughly a two-line fix (accept a `level=` prefix as well, 
 Found while closing the compose-unpacker pass-through; **independent of this feature and
 live in the current fork.**
 
-`api/stacks/deployments/deployer_remote.go:215-218` logs the unpacker's whole command
+`api/stacks/deployments/deployer_remote.go:251-254` logs the unpacker's whole command
 line:
 
 ```go
@@ -464,8 +475,9 @@ of the logging.
 **Two related boundary facts, recorded so the withholding is not over-trusted:**
 
 - **The withholding boundary is the `libstack.Deployer` return, not the compose process.**
-  `pkg/libstack/compose/composeplugin.go:352-355` and `pkg/libstack/compose/status.go:65,80`
-  do `log.Warn().Err(err)` *inside* the deployer, upstream of anything this fork wraps. No
+  `pkg/libstack/compose/composeplugin.go:352-355` does `log.Warn().Err(err)` and
+  `pkg/libstack/compose/status.go:65,80` does `log.Error().Err(err)`, both *inside* the
+  deployer, upstream of anything this fork wraps. No
   outer error type can protect those: if a compose error there ever quotes a value, it
   lands in the log unredacted. This is the same channel §3.7's deploy-logs row leaves
   open, reached by a second route.
@@ -523,11 +535,69 @@ Exploiting it requires the ability to create a vault entry with the chosen value
 not reachable by a Portainer user alone. That is a mitigation, not a fix.
 
 **The rule that follows, and it is a real constraint on rollout: a stack carrying secret
-references must not be editable by a user who is not an environment administrator.**
-Resolving secrets for validation as well would close the divergence — validation runs in
-the same process and the same memory as the deploy, so it costs nothing in exposure — but
-it doubles the resolver traffic and puts the vault on the path of every stack *save*, not
-just every deploy. Deliberately not done here; recorded so the choice is visible.
+references must not be deployed — or edited — by a user who is not an environment
+administrator.** It was recorded here as prose with nothing enforcing it. **The deploy half is
+now enforced in code on every path that builds a `ComposeStackDeploymentConfig`** — stack
+create (`stackbuilders`), `PUT /stacks/{id}`, the git redeploy handler and `POST
+/stacks/{id}/migrate` — and nowhere else, because the gate sits inside
+`ComposeStackDeploymentConfig.Deploy`. The edit half stays an access-control matter for
+whoever grants stack access, though in practice `PUT /stacks/{id}` redeploys and therefore
+meets the same gate.
+
+**Two callers reach `DeployComposeStack` without building a config, and both are deliberately
+ungated. Verified rather than assumed**, because §3.6 already lists `StackStart` as a separate
+caller and an unqualified "the deploy half is enforced" contradicts it:
+
+- `POST /stacks/{id}/start` (`api/http/handler/stacks/stack_start.go`) calls
+  `StackDeployer.DeployComposeStack` directly. It decodes **no request body** — it reads the
+  stack from the database by id and touches only `stack.Name` (normalisation) and
+  `AutoUpdate.JobID` — so neither the compose file nor `Env` can change on that path. There is
+  no user-submitted string to validate, and therefore no validated-versus-deployed divergence
+  to open: whatever divergence exists was already settled when the stack was created or
+  updated, on a path that does hold the gate.
+- `RedeployWhenChanged` (`api/stacks/deployments/deploy.go`), reached from the auto-update
+  scheduler and from `POST /stacks/{id}/webhooks/{token}`, has the same shape for the same
+  reason: it loads the stack by id and passes no environment. The compose file can change
+  there, but from **git** rather than from a user, and that path runs no `ValidateStackFiles`
+  at all — in this fork or in vanilla — so this gate has nothing to add to it.
+
+Gating either would refuse to restart a stack that an administrator legitimately created,
+which is an availability cost with no policy gained.
+
+`ComposeStackDeploymentConfig.Deploy` (`api/stacks/deployments/deployment_compose_config.go`)
+refuses, by variable name, a deploy of a stack holding any value `secretresolver.IsReference`
+accepts when the user is not an administrator or an environment administrator. The check sits at
+the existing `isAdminOrEndpointAdmin` gate — the same condition that decides whether
+`ValidateStackFiles` runs at all, which is exactly the class of user whose policy check would
+otherwise inspect a different string than the one that starts the containers. It fails closed:
+the refusal does not depend on an endpoint being present, because a missing endpoint means the
+policy check did not run either. Administrators are deliberately **not** gated — the policy this
+divergence evades does not apply to them, so gating one would only take the feature away from
+the people expected to run it. Pinned by
+`Test_ComposeStackDeploymentConfig_Deploy_gatesSecretReferencesOnAdmin`, which also pins that an
+ordinary stack of the same user is untouched.
+
+**The swarm deployment config needs no such gate — verified rather than assumed.**
+`SwarmStackDeploymentConfig.Deploy` reaches either `SwarmStackManager.Deploy`
+(`api/exec/swarm_stack.go`), which refuses a reference for *every* user before it opens the
+endpoint proxy, or `DeployRemoteSwarmStack`, which refuses it before it touches the environment.
+A reference-carrying stack never deploys on that path at all, so there is no divergence between
+the validated string and the deployed one to close. Its `ValidateStackFiles` can still
+interpolate a reference on the way to that refusal — a validation error there may therefore name
+the wrong problem, which is the noise §5 already warns about, not a bypass.
+
+Two things remain, and both remain deliberate:
+
+- **`ValidateComposeURLs` — the SSRF half — still probes the reference.** It applies to every
+  user, administrators included, so an admin gate cannot fix it; this is an accepted, documented
+  divergence whose mitigation is the one above: exploiting it requires the ability to write the
+  vault entry in the first place.
+- **Secrets are still not resolved for validation.** Doing so would close the divergence outright
+  — validation runs in the same process and the same memory as the deploy, so it costs nothing in
+  exposure — but it doubles the resolver traffic and puts the vault on the path of every stack
+  *save*, not just every deploy. Still not done; recorded so the choice stays visible, and so
+  that the enforcement above is read as what it is: a refusal for the affected users, not a
+  repair of the divergence.
 
 ### 3.12 The resolver's `error` field is the only external text that reaches the API
 
@@ -547,16 +617,20 @@ dropping the text with no log copy at all — strictly worse than what it replac
 - `manager.secretResolver == nil` — "stack %q uses secret references but no secret resolver
   is configured, set PORTAINER_SECRET_RESOLVER": constants, the stack name, an env var name.
 - from `Fetch` — the configuration error (an env var name and the operator's own bad value),
-  the dial error, the timeout, a non-200 status with no error field, "response exceeds N
-  bytes", "no value for reference %q" (that is the **reference**, not the value), the
-  decode failure, and `parsed.Error`.
-- "no value resolved for variable %s" — a variable name.
+  a **classified** transport failure (see below), a non-200 status with no error field,
+  "response exceeds N bytes", "no value for reference %q" (that is the **reference**, not the
+  value), the decode failure, and `parsed.Error`.
+- `stack %q: no value resolved for variable %q` — a stack name and a variable name, both
+  bounded by `TruncateName` and escaped by the `%q` that prints them; see §3.13.
 
 Every component of every one of those, `parsed.Error` aside, is constructed by Portainer out
 of data that is already public in the stack config — **with one exception, which had to be
-engineered away rather than argued away.** The list above once said the dial error and the
-timeout were safe because they are built from public data. They are not, as written: they
-are safe only because of what `New` now does to the endpoint before either can be raised.
+engineered away rather than argued away.** The list above once named the dial error and the
+timeout outright, and called them safe because they are built from public data. They were
+not, as written. They are safe now for two separate reasons, added a round apart: what `New`
+does to the endpoint before either can be raised, and — for everything that gets far enough
+for `net/http` to parse a response — the fact that `Fetch` no longer wraps a transport error
+at all, which is why that bullet now says *classified*.
 
 Both come back as a `*url.Error`, and a `*url.Error` prints the URL of the request. The
 endpoint is *not* wholly public — its userinfo is the only way this protocol offers to
@@ -584,12 +658,150 @@ covers `New`'s own error strings, which matter more than they look: a bad endpoi
 `configErr` and returned by **every** `Fetch`, so a single misconfiguration publishes on
 every deploy rather than once. Substituting `redactEndpoint` for `%q` is not enough there —
 `url.Parse` fails with a `*url.Error` whose `Error()` prints the raw URL whatever verb wraps
-it, so the parse path keeps the inner reason and drops the endpoint entirely.
+it, so the parse path drops the `*url.Error` and keeps only its inner reason.
 
-Nothing the resolver *sent* is quoted
-back: an undecodable body, an oversized body and the raw body behind a non-2xx status all
-produce an error built from non-content facts, with the status, the content type and the
-body length going to the server log instead. That is not a theoretical precaution — the JSON
+**"Drops the endpoint entirely" is what this paragraph said for four rounds, and it was
+false.** `url.Parse` builds those inner reasons by quoting the fragment that failed — `invalid
+port ":<the port>" after host`, `invalid URL escape "%zz"` — so a slice of the endpoint rides
+out inside the reason, and nothing bounded it: measured with a mebibyte in the port position,
+`configErr` came back at **1048735 bytes**, on every `Fetch` of every stack that uses
+references. No credential reaches it — verified over a 38-input corpus rather than reasoned
+about, because `url.Parse` splits the userinfo off in `parseAuthority` before `parseHost` runs
+and the one userinfo-side reason quotes three characters of a percent escape — so this is the
+operator's own configuration rather than resolver text. It is bounded to `maxEndpointBytes`
+all the same, and the message now says what actually happens: the endpoint is not named, and
+the parser's own reason is kept, bounded.
+
+**The endpoint itself was the last unbounded term anywhere in this package, for the same
+reason: it is the operator's text, so it was treated as free.** It is not free, because of
+where it goes — `Client.endpoint` is in every transport error `Fetch` returns and in every log
+line the failure writes, and the transport error is persisted as the stack's deployment status
+message. Measured with a mebibyte in `PORTAINER_SECRET_RESOLVER`, before and after:
+
+```text
+transport error, unix endpoint       1048698 → 364 bytes
+configErr, unparsable port           1048735 → 390 bytes
+configErr, endpoint with no host     1048621 → 296 bytes
+configErr, unsupported scheme        1048682 → 359 bytes
+```
+
+The last two are sites this round's brief did not name — `"secret resolver endpoint %q has no
+host"` printed `parsed.String()` directly, and the unsupported-scheme message printed
+`redactEndpoint`'s then-unbounded output — so "`c.endpoint` is the only unbounded term left"
+was three claims short rather than one. Two more terms of the same kind turned up in the same
+sweep and are bounded with it —
+the raw `PORTAINER_SECRET_RESOLVER_TIMEOUT` value, which `%q` quoted once and
+`time.ParseDuration`'s own error quoted again (that second copy is now dropped rather than
+wrapped, and the expected form named instead), and the reference named by "no value for
+reference", which is a stack env value and therefore as long as whoever edited the stack made
+it. Pinned by `TestFetchBoundsTheEndpointItNames`, `TestNew/"bounds every other endpoint it
+names"` and `TestFromEnv/"bounds the environment values it quotes back"`.
+
+`redactEndpoint` applies that bound, and it is deliberately **not** the function
+`redactLocation` bounds through. The two share the userinfo rule and nothing else, so the rule
+now lives in `stripUserinfo` and each caller bounds its own channel. This is not tidiness: while
+this round was being written, routing the Location through `redactEndpoint` applied
+`maxEndpointBytes` to it as well and made `maxRedirectTargetBytes` unreachable — deleting that
+truncation left the whole package green, which is the third time this package has produced a
+bound nothing could see. See §3.12's note on the redirect target below.
+
+**The transport error itself was the other half of that trap, and hiding the credential did
+not close it.** A `*url.Error` prints the URL *and* whatever it wraps, and what it wraps for a
+response `net/http` cannot parse is the resolver's own header text, quoted whole: `bad
+Content-Length "…"`, `unsupported transfer encoding "…"`, `malformed HTTP response "…"`,
+`http: message cannot contain multiple Content-Length headers; got […]`. Nothing bounds those
+below `MaxResponseHeaderBytes`, 10 MiB. Measured against the client before this was fixed,
+with the text planted in the header and the marker present in every case:
+
+```text
+bad Content-Length, 1 MiB      1048724 bytes
+bad Content-Length, 8 MiB      8388756 bytes
+duplicate Content-Length          4297 bytes
+Transfer-Encoding, 1 MiB       1048736 bytes
+malformed status line, 1 MiB   1048729 bytes
+```
+
+These are copied from `transportLeakShapes` in `pkg/secretresolver/secretresolver_test.go`,
+which is the authoritative record: an earlier revision of this table carried a second column
+of its own and one cell of it had already drifted from the test by two bytes, which is the
+whole argument for citing the source rather than restating it.
+
+That is the same publication channel the redirect refusal closed, reached with no redirect at
+all — and `%w` carried all of it into `Stack.DeploymentStatus[].Message`. The fix is
+**classification rather than wrapping**: `Client.transportFailure` reduces the failure to one
+of a closed set of reasons and returns a `transportError` whose text is that reason, the step,
+the endpoint as `redactEndpoint` renders it, and a pointer at the server log. Nothing else.
+The set is closed and it is **eleven**, enumerated here because the point of this section is
+that it is enumerable — a member missing from this list is exactly the divergence the section
+forbids, and one was missing for two rounds:
+
+| # | Reason | Note |
+| --- | --- | --- |
+| 1 | the deploy was cancelled | the caller's context, checked first |
+| 2 | the deploy's own deadline expired | likewise |
+| 3 | no answer within *&lt;the client's budget&gt;* | the characteristic wedged-resolver failure |
+| 4 | the call was cancelled | **defence in depth**, see below |
+| 5 | the endpoint's host name did not resolve | |
+| 6 | the resolver's TLS certificate did not verify | |
+| 7 | the endpoint is https but the resolver answered in plain HTTP | |
+| 8 | the endpoint is https but the resolver did not answer with TLS | |
+| 9 | the connection could not be opened | a dial failure |
+| 10 | the connection failed during the exchange | |
+| 11 | *its answer could not be read as an HTTP response* | the catch-all |
+
+**Rows 7 and 8 were one row, and it was written for the case it could not catch.** The
+commonest operator mistake in this area is an `https://` endpoint in front of a resolver
+serving plain HTTP, and the single branch — a type assertion on `tls.RecordHeaderError` — never
+fired for it. `net/http` inspects the failed record header itself and, when it spells `HTTP/`,
+**replaces** the error with `http.ErrSchemeMismatch` (`net/http/client.go`, `send()`), so that
+case fell through to row 11 and the persisted message then asserted something **false**: that
+the answer could not be read as an HTTP response, about an answer that was a perfectly good
+HTTP response which simply was not TLS. Row 7 matches the sentinel `net/http` provides, by
+identity through `errors.Is` and never by text; row 8 keeps the type assertion, which is a real
+case rather than a leftover — `net/http` leaves `tls.RecordHeaderError` alone when the first
+record is neither TLS nor HTTP. Both shapes are driven, from a raw listener that answers
+without reading, by `TestFetchClassifiesATransportFailure/"an https endpoint in front of
+something that is not TLS"`, and each branch is separately revert-proofed.
+
+**Row 4 is marked defence in depth and the mark is part of the contract.** No path was found on
+which it fires: the call's context is derived from the deploy's and cancelled only by it, by
+row 3's deadline, or by the deferred `cancel` that runs after `Fetch` has returned — and Go
+propagates a cancellation parent-first, so rows 1 and 2 have already answered whenever the
+parent is the source. It stays because the alternative to a wrong classification here is not
+silence but row 11, which would make a statement about the resolver out of a cancellation of
+ours. It is listed here so that "the set is closed and enumerable" holds against the code.
+
+Each of those reasons is a fact **this**
+process produced; the catch-all is where every error built out of resolver text lands, and it
+is a fixed phrase. `net/http`'s real message goes to the server log, sanitised and bounded to
+`maxTransportDetailBytes` — and the returned error now says *see the Portainer server log*, as
+the decode branch already did, because that log line is the only place the real reason exists.
+`errors.Is` still reaches `context.Canceled` and
+`context.DeadlineExceeded` — the error unwraps to those two sentinels and to nothing else, so
+no sink anywhere can unwrap its way back to the withheld text. Pinned from a **raw
+`net.Listener`** by `TestFetchBoundsATransportError`, on both endpoint forms and all five
+shapes: an `httptest`-based probe is falsely green here, because Go's own server caps the
+request header it will read and quietly ends the exchange instead.
+
+**A 1xx flood was raised as an unbounded-work channel and is not one — recorded because the
+reasoning that makes it safe is not obvious and the obvious "fix" would create the problem.**
+The concern was that `net/http` resets its 10 MiB header budget for each informational
+response, so a hostile resolver could stream `103 Early Hints` for ever and be bounded only by
+`DefaultTimeout`. It does reset it — **but only when the caller has installed an
+`httptrace.ClientTrace` with a `Got1xxResponse` hook** (`net/http/transport.go`: the reset is
+inside `if trace != nil && trace.Got1xxResponse != nil`, with the comment "if the user didn't
+examine the 1xx response, then we limit the size of all headers … to maxHeaderResponseSize").
+This client installs no trace, so the budget is **shared** across every 1xx and the final
+response. Measured against a listener streaming 4 KiB `103` responses in a loop: the client
+read **10562370 bytes** and failed in **55 ms**, on row 11 of the table above — not at the
+60-second timeout. Peak memory is one header's worth, and no text channel results. The knob
+`net/http` offers for this — returning an error from `Got1xxResponse` — is therefore the one
+thing that must **not** be added casually: installing the hook to count 1xx responses is
+precisely what turns the shared 10 MiB budget into a per-response one.
+
+Nothing the resolver *sent* is quoted back either: an undecodable body, an oversized body and
+the raw body behind a non-2xx status all produce an error built from non-content facts, with
+the status, the content type and the body length going to the server log instead. That is not a theoretical precaution — the JSON
 decoder in use (`segmentio/encoding`, mandated by depguard) appends the first 32 bytes of
 the buffer it choked on to its syntax errors, and that buffer is the response body
 `{"values":{"<ref>":"<value>"…`, so for a short reference the window reaches into the value.
@@ -610,6 +822,50 @@ content type it logs beside it. Reviewed and reproduced: a raw TCP server answer
 `TestFetch/keeps the status line reason phrase out of the returned error` pins it from a
 raw `net.Listener`, because an `httptest` server can only ever write the canonical phrase.
 
+**The widest resolver-chosen header is `Location`, and the refusal of redirects is what keeps
+it out of the returned error — but refusing alone left the operator with nothing.** A 3xx
+lands on the non-2xx branch, which names the status code and the bounded `error` field, so a
+deploy behind a path-canonicalising proxy failed with exactly `secret resolver returned status
+308` and no hint of where the request was being sent (§4.6 names the proxy configurations that
+do this, and they are the common ones). The gap is now closed on the **log** side only:
+`logRefusedRedirect` writes a Warn naming the status and the Location reduced by
+`redactLocation` to **scheme, host and port** — no path, no query, no userinfo — sanitised and
+bounded to `maxRedirectTargetBytes` on top, because a host name is resolver-written text too.
+The returned error is unchanged. So the precise claim, and it is deliberately narrow: no part
+of a `Location` and no other resolver-chosen header reaches **the returned error**, which is
+the channel Portainer persists and serves; two bounded things reach the **log**, this reduced
+target and `maxTransportDetailBytes` of `net/http`'s own message. The log is a lesser channel
+— not persisted with the stack, not served by the API, not read by an agent — but not a free
+one, which is why both are bounded rather than merely tolerated.
+
+**The warning is written from the transport, not from the response `Fetch` is handed, and that
+is a fix rather than a detail.** `http.Client.do` parses the `Location` at the top of its
+redirect loop, **before** it consults `CheckRedirect`, and on a Location `url.Parse` refuses it
+returns an error instead of the response — `failed to parse Location header "<the whole
+Location>"`. `Fetch` therefore never saw that response and the warning never fired, in a shape
+squarely inside the case the diagnostic exists for: a proxy in front of the resolver writing a
+Location Go cannot parse. A `RoundTripper` (`redirectReporter`) sees every response before any
+of that, so both shapes are reported. `redactLocation` answers **`(unparsable location)`** for
+that one and **`(no location)`** for a 3xx carrying no `Location` at all — 300 and 304 routinely
+carry none, and `url.Parse("")` succeeds, so that case used to be logged as `(relative
+location)`, an assertion about a header that was not sent.
+
+**One margin is worth stating, because nothing else states it.** `net/http`'s error for the
+unparsable Location quotes the whole header, unbounded below the 10 MiB header limit — and the
+only thing keeping it out of the persisted message is that it is not a `*net.OpError`, not a
+`*net.DNSError`, not a TLS error and not a context sentinel, so it lands on row 11 of the table
+above, which is a fixed phrase. Measured with a mebibyte of unparsable Location: the returned
+error was **172 bytes**. The cost of narrowing that catch-all is therefore written at
+`refuseRedirects`: any new branch that returns text derived from `err` rather than a fixed
+phrase reopens this channel, with no redirect followed and no header of ours involved.
+
+`TestFetchLogsARefusedRedirectTarget` drives all four shapes. **Three of them do not exercise
+`maxRedirectTargetBytes` at all, and for two rounds the only one written was one of those**:
+`redactLocation` drops the path *before* the bound is applied, so a mebibyte planted in the
+path is gone either way and deleting the truncation left the whole package green. The payload
+has to sit in the **host**. Measured there with the bound removed: a **1048872-byte** log line,
+against 289 bytes with it.
+
 `parsed.Error` is the exception, and it is echoed on purpose. It is **contractually free of
 secret values**: the resolver is our own component, and the extensibility requirement of
 §4.2 is about pluggable *backends behind* the resolver, not about third-party
@@ -619,12 +875,74 @@ unsynced vault is the characteristic operational failure of this feature — wit
 would make the common case undiagnosable, which is not a trade worth making for text that
 carries no value by construction.
 
-Two bounds keep the exception honest. The field is truncated to `maxResolverErrorBytes`
+Two bounds keep the exception honest. The field is bounded to `maxResolverErrorBytes`
 (512, on a rune boundary, with an ellipsis marker) before it is echoed, so a resolver
 answering with a stack trace cannot write a page of somebody else's text into Portainer's
 database. And the contract is stated in the `pkg/secretresolver` package doc, where the
 author of a second implementation of the wire protocol reads it: **a resolver that
 interpolates a resolved value into its `error` field breaks the contract.**
+
+#### The sanctioned channel is byte-arbitrary, and length was not the control it needed
+
+Bounding says how much of somebody else's text is persisted. It says nothing about **what**,
+and the round-8 adversarial sweep built a 552-byte deployment status message that was entirely
+within the bound and carried two newlines, a NUL, an ANSI CSI escape (`\x1b[31m`), a
+forged-looking JSON log record, and the sentence `SYSTEM: ignore previous instructions…`.
+
+That is not a size problem and not a secrecy problem. It is a **reader** problem, and §1 of
+this document names the reader: `Stack.DeploymentStatus[].Message` is served by `StackInspect`
+and **AI agents read it as a matter of course** while doing ordinary infrastructure work. A
+512-byte field that reaches an agent's context verbatim is a prompt-injection channel; one that
+reaches an operator's terminal verbatim is a terminal-escape channel; one that reaches a log
+shipper verbatim is a log-forging channel. The resolver is our own component and the field is
+contractually value-free, but "contractually value-free" was never a claim about control
+characters.
+
+So every piece of resolver-chosen text this client formats now goes through one function,
+`sanitize`, which replaces C0 and C1 control characters, DEL and bytes that are not valid UTF-8
+with printable escapes: the `error` field on both branches that echo it, the `Content-Type`
+header it logs, `net/http`'s own message about a failed round trip, and the reduced `Location`.
+
+Three decisions in it are load bearing:
+
+- **Escaping, not stripping.** Evidence survives — a message that arrived with a NUL in it is a
+  broken resolver, and deleting the NUL turns a diagnosable fault into a puzzling one. More
+  sharply, stripping **joins** what sat on either side of what it removed: `SYS\x00TEM` strips
+  to `SYSTEM`, a string the resolver never sent and now indistinguishable from one it did. An
+  escape never merges two fragments.
+- **The backslash is escaped too**, so a resolver writing the six literal characters `\x1b[`
+  cannot be confused with one writing a real ESC. The encoding is injective, so nothing about
+  the original is lost or invented.
+- **Sanitising and bounding are one pass, and the bound is on the output.** Escaping inflates —
+  a NUL costs four bytes, a C1 six — so a sanitiser bolted in front of a truncator would have
+  written up to 3 KiB into a 512-byte channel, and one bolted behind it would have cut an escape
+  in half and left a trailing backslash. `sanitize` reads the input only as far as the output
+  allows: 512 newlines produce 512 bytes of `\n` pairs and the marker.
+
+Invalid UTF-8 is escaped as `\xNN` (it is a byte, not a code point) and C1 as `\u00NN` (a valid
+two-byte rune), so the two cannot be confused. `TestSanitizeResolverError` drives the hostile
+payload, a lone continuation byte, an overlong encoding, a surrogate half, a multi-byte sequence
+cut short at the end of the string, and each inflation shape;
+`TestFetchSanitizesTheResolverErrorField` drives the payload end to end through a real resolver
+on both echoing branches.
+
+**The configured endpoint is sanitised too, and is therefore printed with `%s` and never with
+`%q`.** `redactEndpoint` is the one place every printed endpoint passes through and it does
+both — strip the userinfo, then `sanitize` to `maxEndpointBytes` — so by the time an endpoint
+reaches a format string it is already escaped, and `%q` on top would escape its escapes.
+Doing both in `redactEndpoint` is cheaper to review than deciding, site by site, what this
+particular endpoint can contain; the price is that the verb is part of the rule rather than a
+free choice. It is stated here and in the package doc together, because a site added by
+somebody following only the *other* half of the rule lands in exactly the double escaping the
+comment at `New` warns against.
+
+**The rest of Portainer's and the operator's own text is bounded only, and escaped by the `%q`
+that prints it** — a reference (`truncateReference`), the raw timeout value
+(`truncateTimeoutValue`) and the stack and variable names `api/*` names in a deploy refusal
+(`TruncateName`). Bounded **and** `%q`, never one of the two: `%q` leaves a mebibyte a
+mebibyte, and a bound leaves an `ESC` an `ESC`. §3.13 is the worked case.
+
+That split is stated in the package doc so the next site added lands on the right side of it.
 
 `Test_resolveStackSecrets_errorPathsCarryNoSecretValue` (`api/exec`) is the pin. It drives
 every path listed above — against the real client and a fake resolver, so the two halves
@@ -633,9 +951,110 @@ error path that carries a value fails it.
 
 That table missed the credential for three rounds, because it reached the resolver over a
 `unix://` socket and a bare `httptest` URL, neither of which has userinfo. It now plants the
-value **as the endpoint's credential**, in the username position, so every case in the table
-carries one and an operator's token is under the same assertion as a resolved value rather
-than under a case written specially for it.
+value **as the endpoint's credential** on every case that reaches a resolver through the real
+client over the network — eleven of its fifteen: the eight `resolverAt` cases, which splice it
+into the `httptest` URL's username position, the two unreachable-endpoint cases, which carry it
+in the username and in the password respectively, and the misconfigured-endpoint case. So an
+operator's token is under the same assertion as a resolved value on those paths, rather than
+under a single case written specially for it.
+
+**Four cases cannot carry one, and they are the exception rather than a gap.** Two of them have
+no endpoint at all: "no resolver is configured" runs with a nil resolver, and "a variable is left
+without a value" is driven by a stub, because the real client guarantees a value for every
+requested reference and the path is otherwise unreachable. The other two — "the resolver
+configuration is broken" and "the resolver cannot be reached" — address a `unix://` socket path,
+which has no userinfo position to hold a credential. Those two are covered anyway, by the
+credential-carrying twin that sits beside each of them in the table: the broken configuration is
+followed by "…names an endpoint carrying a credential", and the unreachable socket by the two
+"…cannot be reached, with a token/password in the endpoint" cases, which raise the same two
+errors — `configErr` and the dial failure — from an endpoint that does have one.
+
+### 3.13 The text that was *not* the resolver's was the unbounded one
+
+§3.12 is about the one field a resolver is allowed to put into `DeploymentStatus[].Message`,
+and it ends with that field sanitised and bounded to 512 bytes. Everything it says is true and
+it was guarding the wrong door.
+
+The same message is built from Portainer's own data — the stack's name and the name of the
+variable that carries the reference — and **three refusals this feature adds formatted the
+variable name with `%s`**: `deployment_compose_config.go` (the non-administrator gate),
+`compose_unpacker_cmd_builder.go` and `swarm_stack.go`. Neither name is validated on the way
+in. `updateComposeStackPayload.Validate` checks that the compose file is non-empty and says
+nothing about `Env` at all, nothing in the server caps a request body, and `normalizeStackName`
+— which does restrict a stack name to `[-_a-z0-9]` on the create and update paths — is not
+applied by `POST /stacks/{id}/migrate`. So both the length and the bytes were the caller's.
+The hostile name throughout is `"NAME\x00\x1b[31m\n"` + 1 MiB of `A`. The left figure is the
+message **before** the fix, with that name in the *variable* position and an ordinary stack name
+— except `withheldError`, which names no variable, where it is the stack name. The right figure
+is the same message **after** it, with a hostile name in *both* positions, which is what the two
+pins below drive; with an ordinary stack name the right column would instead read 433, 410, 378,
+318 and 213.
+
+```text
+refuseSecretReferencesForNonAdmin  1048755 →  690 bytes
+checkNoSecretReferences            1048732 →  667 bytes
+SwarmStackManager.Deploy           1048700 →  635 bytes
+no value resolved for variable     1048649 →  575 bytes
+withheldError                      1048781 →  470 bytes
+```
+
+with the NUL, the ESC and the newline present in the first three and gone from all five. A
+mebibyte in *both* names put the four that name two names over 2 MiB; `withheldError` names only
+the stack and stayed at one.
+
+**The inversion is the point.** `refuseSecretReferencesForNonAdmin` fires precisely *for* a
+non-administrator — the lowest-privileged actor in this threat model, and the one the gate
+exists to contain — while the resolver's text, from an adjacent component we run ourselves,
+had been sanitised for a round already. The privileged component was guarded and the
+unprivileged one was not.
+
+**Escaped *and* bounded, because neither half is a fix alone.** `%q` closes the control
+characters and leaves the mebibyte; a bound closes the mebibyte and leaves the `ESC`. The
+fourth site, `"no value resolved for variable %q"`, already had the verb and had no bound —
+1048649 bytes of perfectly escaped text — which is the cleanest demonstration of that available.
+The bound is `secretresolver.TruncateName`, and it lives in `pkg/secretresolver` because
+`api/*` already depends on that package and the reverse edge does not exist; its doc comment is
+where the class is argued once for all four files.
+`Test_secretRefusals_boundAndEscapeHostileNames` (`api/stacks/deployments`) and
+`Test_secretErrors_boundAndEscapeHostileNames` (`api/exec`) are the pins: each drives a hostile
+name through its site and asserts a byte ceiling, the absence of raw control bytes, and that
+the diagnostic still names what it is about. Reverting either half at any one site reddens
+exactly that site.
+
+**The bound is on the *input* of `%q`, and `%q` inflates.** `TruncateName` runs before the verb,
+which is the right order — an escape sequence cannot be cut in half that way — but it means
+`maxNameBytes` bounds what `%q` is *handed*, not what it writes: an invalid UTF-8 byte and a C0
+byte each come back out as four characters of `\xNN`. A 256-byte name of either prints as 1029
+bytes, so the gate reaches **2212** bytes in the worst case rather than the 690 the table above
+shows for a name filled with `A`. Both pins are therefore parameterised over the byte classes
+that differ — invalid UTF-8, NUL, `U+2028`, a backslash, an ordinary printable — and derive
+their ceiling from `strconv.Quote(TruncateName(…))` rather than writing a number down, so it
+cannot drift from `maxNameBytes`. The `A`-only fixture measured 690 against a declared ceiling
+of 2048: it passed for a reason unrelated to what it claimed. The same fixture filled with
+invalid UTF-8 measures **2136** and does not clear 2048 at all. `sanitize` is the deliberate
+contrast — it escapes and bounds in one pass, so *its* limit bounds its output — and the two
+doc comments now say which channel gets which and why.
+
+**The log sites are outside this rule, deliberately.** Four statements in three functions name a
+stack with no bound and no call: `LogEscapedValues` (reached from all three deploy paths),
+`logWithheldError`'s two branches, and `warnAboutStaleEnvFile`. The log is a smaller channel
+than `DeploymentStatus[].Message` — the server's stderr, stored with nothing, served by no API —
+and vanilla Portainer already opens it wider on paths this feature does not touch, logging
+`fmt.Sprintf("%+v", stack)` in `create_compose_stack.go` and an unbounded `stack.Name` in
+`deploy.go`. The usual justification for it is wrong, though, and was checked rather than
+assumed against zerolog v1.34.0: `ConsoleWriter` — which is what the default `--log-mode PRETTY`
+gives — escapes as well as JSON mode does, because `writeFields` puts every string field through
+`needsQuote` and then `strconv.Quote`, so no raw NUL, ESC or newline reaches the terminal in any
+of the three modes. What is genuinely unbounded is the *length*: 1048698–1048734 bytes for a
+mebibyte name, in every mode. That is the half being accepted, and it is accepted on the
+channel, not on the escaping — the escaping is zerolog's and is pinned by no test of this fork.
+
+**What this does not make trusted.** `DeploymentStatus[].Message` still carries pre-existing
+vanilla channels that are wider than the one just closed — above all the compose-go loader
+error echoed by `stackutils.ValidateComposeURLs` and `ValidateStackFiles`, which quotes the
+compose file's own text verbatim, raw control bytes included, bounded by nothing. Those are
+listed in §3.7; closing them is not this feature's to do, and an agent reading a deployment
+status message should still treat it as untrusted.
 
 ---
 
@@ -647,7 +1066,7 @@ than under a case written specially for it.
 compose body        stack.Env            resolver socket        Vaultwarden
 ────────────        ─────────            ───────────────        ───────────
 ${DB_PASSWORD:?}    DB_PASSWORD=         batch fetch, one       collection
-                      vw:stack/...       per compose call       `infra`
+                      secret:vw:stack/…  per compose call       `infra`
       │                    │                     │                   │
       └──── Portainer patch ────────────────────►│──── rbw ─────────►│
                   Options.Env (memory only)
@@ -658,9 +1077,10 @@ ${DB_PASSWORD:?}    DB_PASSWORD=         batch fetch, one       collection
 - **`stack.Env`**: holds *references*, not values. UI round-trips them untouched
   (the frontend treats `Env[].Value` as an opaque string), so no TypeScript changes.
 - **Portainer patch**: resolves references at deploy and injects via
-  `libstack.Options.Env`. Roughly 50 lines in `api/exec/compose_stack.go`, covering
-  all three entry points (`Up`, `Run`, `Pull` — every compose deploy funnels through
-  them via `api/stacks/deployments/deployer.go`).
+  `libstack.Options.Env`, covering all three entry points (`Up`, `Run`, `Pull` — every
+  compose deploy funnels through them via `api/stacks/deployments/deployer.go`). This was
+  planned at "roughly 50 lines"; it came to a little under 500 in that file alone, almost
+  all of it the withholding, the redaction and the reasons for both.
 - **Resolver**: a separate service on borneo behind a unix socket.
 
 ### 4.2 The abstraction boundary is the wire, not a Go interface
@@ -675,9 +1095,15 @@ a value or an error:
 ```go
 // Portainer never parses the scheme — routing is the resolver's job, so adding a
 // backend never requires touching (and rebuilding) Portainer.
-vals, err := resolver.Fetch(ctx, refs)   // ["vw:stack/nebula/arcextension/ADMIN_TOKEN", ...]
+//
+// The marker is part of the reference on the wire: refs are sent exactly as the stack
+// stores them, and the resolver requires the "secret:" prefix. It is also the key the
+// values map comes back under.
+vals, err := resolver.Fetch(ctx, refs)   // ["secret:vw:stack/nebula/arcextension/ADMIN_TOKEN", ...]
 if err != nil {
-    return fmt.Errorf("secret resolution failed: %w", err)  // hard fail, never a fallback
+    // Hard fail, never a fallback. The implemented wording is
+    // "failed to resolve secret references of stack %q: %w", with the name bounded.
+    return err
 }
 ```
 
@@ -717,7 +1143,58 @@ POST /v1/resolve      {"version":1,"refs":["secret:vw:stack/<env>/<stack>/<VAR>"
   non-2xx             {"error":"<reason>"}
 GET  /healthz         200 when the vault is unlocked, 503 otherwise; never touches
                       the network — it is the compose healthcheck
+
+limits, all four load bearing and none of them negotiable at run time:
+  MAX_BODY_BYTES      256 KiB   request body; over it the answer is 413, not 400
+  MAX_REFS            256       refs per request; over it, 400
+  maxResponseBytes    1 MiB     CLIENT-side cap on the response; the resolver has none
+  the version field   accepted values are absent or 1 — see below
 ```
+
+**The two request caps are the resolver's and the operator sees them as ordinary errors.**
+Over `MAX_BODY_BYTES` the status is **413** rather than 400, which matters because the client
+formats the status code and the `error` field and nothing else: an operator reading "413" has
+to be able to find it here. Over `MAX_REFS` it is a 400, and the real reason reaches the
+operator intact — measured with 300 refs, the answer was a 400 whose `error` field named the
+limit, echoed into the deployment status message through the usual bounded path.
+
+**The response cap is the client's, and the resolver has no counterpart.** `maxResponseBytes`
+is 1 MiB and it is enforced in `pkg/secretresolver` after the answer is on the wire: over it
+the deploy fails with "secret resolver response exceeds 1048576 bytes" and the body is
+discarded unread. Nothing on the resolver side bounds what it sends, so the two limits can
+disagree, and they do: measured with 256 refs of 5000 bytes each, the resolver produced a
+**legitimate 200 of 1288204 bytes** — comfortably inside its own request budget, since the
+request carrying those 256 refs is small — and the client refused it outright. A second
+implementation of this protocol has no way to discover that number except from here, so it is
+stated here: **a resolver must keep one response under 1 MiB**, which with `MAX_REFS` at 256
+means an average value under about 4 KiB.
+
+It is enforced **twice**, and the distinction is worth a sentence because only one of the two
+is visible from outside: an `io.LimitReader` decides how much is *read*, and a length check
+beside it turns the result into a message saying which of "oversized" and "corrupt" it was. The
+limit reader is the memory control — without it `io.ReadAll` pulls whatever a hostile resolver
+streams into the Portainer server's heap, bounded only by `DefaultTimeout` — and it was
+invisible to the suite, because the only test drove the *message*, which the length check
+produces on its own. Deleting the limit reader left the whole package green. It is now measured
+from the far end: `TestFetch/"stops reading at the cap rather than merely reporting it"` streams
+32 MiB from a raw listener and asserts the resolver never got past 8 MiB before the client hung
+up.
+
+**The `version` field does not do what both sides assume, and the rule that makes it work has
+to be written down.** The intent recorded above — "a version field in the request lets the
+resolver evolve without touching the fork" — is only true if a bump keeps the old version
+working. Today the resolver accepts **absent or 1** and nothing else, and the client always
+emits **1**, with no way to configure it. So a resolver bumped to 2 answers every deployed
+Portainer with `400 unsupported request version 1`: the field produces the exact lockstep
+break it exists to prevent, and it produces it on every stack at once. The rule, then:
+
+> **A version bump must keep accepting the previous version for at least one release.** The
+> resolver adds the new shape and goes on serving the old one; Portainer is rebuilt to emit
+> the new version; only then may the old one be dropped. A resolver that accepts exactly one
+> version has a field that names the coupling instead of removing it.
+
+No code changes for this — the client's emitted version is correct as it stands, and the
+constraint is on whoever changes the resolver next.
 
 **The marker is `secret:`, and Portainer's parsing stops there.** A stack env value
 beginning with `secret:` is a reference; everything after it — including the inner
@@ -765,7 +1242,7 @@ moment it happens.
 
 Configuration is **environment variables, not CLI flags** —
 `PORTAINER_SECRET_RESOLVER` (endpoint, `unix://` or `http://`) and
-`PORTAINER_SECRET_RESOLVER_TIMEOUT` (default 30 s, see §4.3). A fork carries every added flag
+`PORTAINER_SECRET_RESOLVER_TIMEOUT` (default 60 s, see §4.3). A fork carries every added flag
 through every future rebase, across `api/cli`, the flags struct and the composition
 root; an env var read at construction costs one call site. `NewComposeStackManager`
 keeps its signature for the same reason.
@@ -795,7 +1272,8 @@ func (d *stackDeployer) createDockerClient(ctx context.Context, endpoint *portai
 the unpacker path, which is **unreachable in CE** — `IsRelativePathStack()` in
 `api/stacks/stackutils/util.go` is a hardcoded `return false` — so it is a precedent
 for the failure mode rather than live code. The live instance of the same bug, in
-`ContainerService.Recreate`, is being fixed separately.
+`ContainerService.Recreate`, has since been fixed on `develop` (commit `929816f25`,
+"bound an image pull by progress, not by a 60s exchange timeout").
 
 A neighbouring fix raised the adjacent question, and it is worth answering here because
 this whole design rests on failing loudly. Docker can report a pull failure *inside* the
@@ -813,16 +1291,16 @@ Check the digest, not the deploy's exit status.
 
 For the resolver the requirement is the **opposite direction**: the call is a local
 round trip over a unix socket to fetch a handful of short strings, so it gets its own
-explicit, *short* deadline, independent of any docker client. A wedged or unresponsive
-resolver must fail the deploy quickly and loudly, not hang it for a minute — still
-less inherit an hour. Do not create a docker client for this and do not pass `nil`
-anywhere near it.
+explicit, *bounded* deadline, independent of any docker client. A wedged or unresponsive
+resolver must fail the deploy loudly and on a budget of its own — not hang it for the
+length of an image pull, and still less inherit the hour a docker client would give it.
+Do not create a docker client for this and do not pass `nil` anywhere near it.
 
-**The chain, and the order it must keep.** `secretresolver.DefaultTimeout` is **30 s**, and
+**The chain, and the order it must keep.** `secretresolver.DefaultTimeout` is **60 s**, and
 it is the outermost of three nested budgets that span both halves of this system:
 
 ```text
-RBW_TIMEOUT_SECONDS(20)  <  REQUEST_TIMEOUT_SECONDS(25)  <  DefaultTimeout(30)
+RBW_TIMEOUT_SECONDS(20)  <  REQUEST_TIMEOUT_SECONDS(45)  <  DefaultTimeout(60)
    one vault subprocess       one whole resolve request      the client round trip
 ```
 
@@ -833,6 +1311,23 @@ belongs here and not only in a Go doc comment, because this document is the spec
 resolver is configured from: an operator who reads a wrong number here sets the inner budgets
 around it and inverts the order, which is the exact breakage the comment on `DefaultTimeout`
 warns about.
+
+**Why 45 and 60, and not the 25 and 30 this section carried until now.** The middle budget
+was sized as though a resolve request were one subprocess call. It is **1+N**: one `rbw sync`
+followed by one `rbw get` per reference. A worst-case sync of 20 s plus the process-spawn
+overhead at `MAX_REFS=256` — 257 spawns at about 46 ms each, measured on an idle eight-core
+box, so 11.8 s — is **31.8 s**, which fits 45 and never fitted 25. At 25 the middle budget
+could only fire in the first seconds of a request that was going to take half a minute.
+Nothing is added on top for network latency, because `rbw get` reads a local cache and never
+contacts the Vaultwarden server (§4.5).
+
+Both numbers moved together, which is the point of the chain: the client's deadline is the
+one the operator does **not** set, so a resolver raised to 45 behind a client still at 30
+would abandon deploys the resolver was still happily working on — and the resolver's own
+startup warning could not catch the mismatch, since it now compares against 60. The client
+side is `DefaultTimeout`, pinned by `TestDefaultTimeoutMatchesTheDocumentedChain`; the
+resolver's compose fragment sets `PORTAINER_SECRET_RESOLVER_TIMEOUT: 60s` explicitly so the
+two halves are stated in the same file the operator edits.
 
 ### 4.4 Why `rbw` and not our own Bitwarden client
 
@@ -917,6 +1412,46 @@ in the entrypoint at start.
 - image: multi-stage, our resolver plus an `rbw` binary. `rbw` is **not** packaged for
   Debian (`apt-cache policy rbw` on borneo is empty), so build it in a rust stage.
 
+**Do not put a reverse proxy in front of the resolver, and never one that rewrites paths.**
+The client refuses redirects outright — it does not follow them, on either endpoint form, for
+the reasons in `refuseRedirects` — so a proxy that answers `POST /v1/resolve` with a 301 or a
+308 breaks every deploy of every stack that uses references. The two configurations that do
+this by default are the common ones: trailing-slash canonicalisation (nginx `rewrite`,
+Traefik's `redirectregex`, Apache `DirectorySlash`) and an http→https upgrade on the same
+host. **The symptom is exact and unmistakable:** every deploy fails with
+
+```text
+secret resolver returned status 308
+```
+
+and the Portainer server log carries, next to it, a `Secret resolver answered with a
+redirect` warning naming the scheme, host and port it was being sent to — the path is
+deliberately not logged, because a Location is resolver-written text (§3.12). If a proxy is
+unavoidable, it must pass `/v1/resolve` through untouched.
+
+**A proxy writing a `Location` that Go cannot parse looks different and is worth recognising**,
+because the deploy then fails with the generic
+
+```text
+failed to reach the secret resolver at <endpoint>: its answer could not be read as an HTTP
+response, see the Portainer server log
+```
+
+The warning is still there, with `location="(unparsable location)"` beside the status — that is
+the shape §3.12 describes as having produced no diagnostic at all until it was moved onto the
+transport. A 3xx carrying no `Location` header at all (a 300 or a 304) logs `"(no location)"`.
+
+**The `https://` endpoint in front of a plain-HTTP resolver is the other misconfiguration this
+section should let an operator recognise on sight.** Every deploy fails with
+
+```text
+failed to reach the secret resolver at https://<host>: the endpoint is https but the resolver
+answered in plain HTTP, see the Portainer server log
+```
+
+which is a different message from *the resolver did not answer with TLS* — that one means the
+far end wrote something that is neither TLS nor HTTP. Both are rows of the closed set in §3.12.
+
 ### 4.7 Network path (verified on borneo)
 
 DNS resolves `vaultwarden.vvzvlad.xyz` to a public address, but the internal path is
@@ -981,12 +1516,15 @@ before systemd restarts it — from the deploy critical path.
   `environment:` entries with `${VAR:?}`. The `:?` is what turns this silent failure into
   a loud one.
 - **A reference is visible to pre-deploy validation.** `stackutils.BuildEnvMap` puts the
-  raw `secret:vw:…` string into the map used by `ValidateStackFiles` (for non-admins) and
+  raw `secret:vw:…` string into the map used by `ValidateStackFiles` and
   `ValidateComposeURLs` (when SSRF protection is on). No secret is exposed — a reference
   is not secret — but a reference substituted into a typed field fails validation with a
   *different* message than the same mistake produces at deploy time, and
   `ValidateComposeURLs` may go and probe a meaningless registry host. Expect the
-  discrepancy rather than debugging it twice.
+  discrepancy rather than debugging it twice. On the compose path `ValidateStackFiles`
+  no longer sees a reference at all: it runs only for a user who is not an environment
+  administrator, and that user's deploy is now refused before it (§3.11). It still runs
+  on the swarm path, where the deploy is refused further down instead.
 - **A forced pull resolves twice.** `DeployComposeStack` calls `Pull` and then `Up` when
   `forcePullImage` is set (`api/stacks/deployments/deployer.go`), and each does its own
   full `Fetch`. Harmless in itself — but it doubles the vault syncs per deploy, and if a
@@ -1029,8 +1567,9 @@ Recorded so they are not re-proposed.
    and the two deliberate deviations from that guide are in its own `docs/SPEC.md`.
 2. **Fork patch** (this branch): reference detection in `stack.Env`, batch call to the
    resolver, injection through `libstack.Options.Env`, hard failure on any error.
-   ~50 lines in `api/exec/compose_stack.go`, no frontend. PR into `develop` in the
-   fork's usual style (`feat(...)` with an issue number, Go tests next to the code).
+   Estimated at ~50 lines in `api/exec/compose_stack.go` and no frontend; the frontend
+   half held, the line estimate did not — see §4.1. PR into `develop` in the fork's usual
+   style (`feat(...)` with an issue number, Go tests next to the code).
 3. **Pilot**: `arcextension` on nebula.lc — two variables (`METRICS_TOKEN`,
    `ADMIN_TOKEN`), small blast radius.
 4. **Migration tooling** (`home-network`, modelled on `projects/vw-agent-secrets`
