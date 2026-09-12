@@ -32,9 +32,16 @@ has no reason to open is not.
    Infisical) were explored and rejected by the owner.
 3. **A deploy fetches the current value at deploy time.** No pre-materialised copy
    that can drift, no "remember to re-sync before redeploying" ritual.
-4. **The compose body stays vanilla and portable.** Plain `${VAR}`, so a third party
+4. ~~**The compose body stays vanilla and portable.** Plain `${VAR}`, so a third party
    clones the repo, writes an ordinary `.env` next to it, and runs
-   `docker compose up -d` with none of our tooling.
+   `docker compose up -d` with none of our tooling.~~ **Dropped by the owner.** The
+   reference is written inline, `METRICS_TOKEN: secret:vw:…`, and the body is no longer
+   something stock compose can run — it would start the service on the literal string.
+   That is the intended trade: the portability this bought was a defence against rolling
+   the image back, which is not a situation anyone is in, and it cost a second place
+   (the `Env` field) that every variable had to be kept in sync with. The `${VAR}` route
+   through `Env` still works and is still the right form for a value several services
+   share; it is no longer the required one. §3.4.1 for how, §5 for the rules.
 5. **No dependency on anyone's workstation.** Deploy and rotation must work with
    every laptop switched off.
 6. **The stack stays a Portainer stack** — editing and redeploying from the UI keeps
@@ -168,6 +175,70 @@ with no file at all); the compose manager simply never caught up.
 
 **Values passed this way never touch disk.** No `stack.env`, no `.env`, nothing in a
 backup, no transient file to clean up and no window where a crash leaves one behind.
+
+#### 3.4.1 A reference written inline in the body: the file is rewritten
+
+`Options.Env` is compose's *interpolation* environment, which means it substitutes
+`${VAR}` and nothing else. A scalar written as
+
+```yaml
+environment:
+  METRICS_TOKEN: secret:vw:stack/nebula.lc/tabscurator/METRICS_TOKEN
+```
+
+is not a `${VAR}`, so no amount of `Options.Env` reaches it — measured: with
+`METRICS_TOKEN` defined in `Options.Env`, compose-go loaded that scalar verbatim and the
+container would have started on the literal string. For a reference to live in the body,
+the body itself has to change before compose reads it.
+
+That is what `pkg/secretresolver/compose.go` does, and it does it by **byte-splicing**
+rather than by re-serialising: `scanComposeBody` parses the document to find the reference
+scalars, records each one's exact token extent in the file, and the rewrite replaces those
+byte ranges and nothing else. A round trip through `yaml.Marshal` would rewrite the whole
+file — comments gone, key order normalised, anchors expanded — and the deployed file would
+no longer be the operator's file.
+
+One deploy, in `ComposeStackManager.resolveStackSecrets`:
+
+1. Collect references from `stack.Env` **and** from every file of
+   `GetStackFilePaths(stack, true)`. A body that does not contain the text `secret:` is
+   never parsed at all — the scan costs one substring search, which is what every
+   unmigrated stack pays.
+2. Fetch all of them in **one** batch, deduplicated.
+3. Number a placeholder `__PORTAINER_SECRET_<n>` per body reference, across the whole
+   stack, and replace the i-th reference scalar with the double-quoted scalar
+   `"${__PORTAINER_SECRET_<n>}"`.
+4. Write the rewritten bodies — only those that actually changed — into a `0700` temp
+   directory as `0600` files, and hand the deployer those paths.
+5. Put every value, the stack's own variables and the placeholders alike, into
+   `Options.Env`, and `defer` the removal of the temp directory.
+
+**No value is ever written to disk.** What lands in the temp directory says
+`"${__PORTAINER_SECRET_0}"`; the values travel in `Options.Env` exactly as before, and
+they are also what `deployFailure` redacts the deployer's error text against — one slice,
+so there is no value the redaction does not cover.
+
+Two details are load-bearing:
+
+- **The placeholder must not start with `PORTAINER_`.** `libstack.PortainerEnvVars()`
+  sweeps every `PORTAINER_`-prefixed variable of the *server process* into every project,
+  so a placeholder inside that namespace could be shadowed from outside the stack.
+  `__PORTAINER_SECRET_` is outside it, and a body that already spells that prefix is
+  refused rather than rewritten.
+- **`Options.ProjectDir` is now set on every compose deploy**, to the directory of the
+  stack's first *original* file. There is no `docker compose` process on this path and so
+  no `--project-directory` flag; `createProject` derives the project directory from
+  `filepath.Dir(configFilepaths[0])` unless `ProjectDir` says otherwise, and compose-go
+  resolves `build:`, bind-mount sources, `env_file:`, `.env`, `extends.file` and
+  `include.path` against it (verified in `compose-go/loader/{loader,extends,include}.go` —
+  all of them go through `configDetails.WorkingDir`). A copy in `/tmp` would silently move
+  every one of them. Setting it is an exact no-op when nothing was rewritten, because it
+  is then the very value compose-go would have derived itself.
+
+Paths that have no resolver refuse a body reference instead of deploying it: swarm
+(`SwarmStackManager.Deploy`), edge (`ValidateEdgeStackComposeContent` — an edge body is
+shipped verbatim to an agent that carries no resolver), and a non-administrator's compose
+deploy (`refuseSecretReferencesForNonAdmin`, §3.11).
 
 ### 3.5 What the API exposes (verified)
 
@@ -492,6 +563,16 @@ create (`stackbuilders`), `PUT /stacks/{id}`, the git redeploy handler and `POST
 `ComposeStackDeploymentConfig.Deploy`. The edit half stays an access-control matter for
 whoever grants stack access, though in practice `PUT /stacks/{id}` redeploys and therefore
 meets the same gate.
+
+**A reference written inline in the body widens the divergence rather than changing its
+shape, and the gate had to follow it there.** The same example works with no `Env` field
+at all — `volumes: ["secret:vw:stack/app/TOKEN"]` is classified as a named volume by the
+same `isFilePath` rule, passes the bind-mount policy, and is then rewritten to
+`"${__PORTAINER_SECRET_0}"` and resolved to whatever the vault holds. Worse than the `Env`
+case in one respect: `BuildEnvMap` is not involved, so the divergence exists even for a
+body that interpolates nothing. `refuseSecretReferencesForNonAdmin` therefore scans the
+bodies as well as `stack.Env`; without that, moving a reference out of the `Env` field and
+into the body would have been enough to walk around the gate entirely.
 
 **The swarm deployment config needs no such gate.**
 `SwarmStackDeploymentConfig.Deploy` reaches either `SwarmStackManager.Deploy`
@@ -1140,9 +1221,37 @@ before systemd restarts it — from the deploy critical path.
 
 ## 5. Compose-level rules for migrated stacks
 
-- **Always use `${VAR:?message}`**, never bare `${VAR}`. An undefined variable is a
-  warning plus an empty string, not an error (compose-go `template/template.go`), so
-  a bare reference means a service silently starting with a blank password.
+A reference can be written in two places, and the inline one is the default:
+
+- **In the body, as the value itself.** This is the normal form:
+
+  ```yaml
+  environment:
+    METRICS_TOKEN: secret:vw:stack/nebula.lc/tabscurator/METRICS_TOKEN
+  ```
+
+  The deploy rewrites that scalar and injects the value for it (§3.4.1). The stack's
+  `Env` field is not involved at all, the reference reads as what it is, and there is no
+  second place to keep in sync. No `:?` is needed: nothing is being interpolated by hand,
+  and a reference that fails to resolve refuses the deploy outright.
+- **In the stack's `Env` field**, with `${VAR}` in the body. Still supported, and still
+  the form to use for a value several services share. There, **always write
+  `${VAR:?message}`, never bare `${VAR}`**: an undefined variable is a warning plus an
+  empty string, not an error (compose-go `template/template.go`), so a bare reference
+  means a service silently starting with a blank password.
+
+Rules that apply to both:
+
+- **A reference can go anywhere a value can**, not only in `environment:` — `command:`,
+  `entrypoint:`, `healthcheck.test`, a list-form entry `- "ADMIN_TOKEN=secret:vw:…"`, an
+  element of a flow sequence. Not in a **key**: keys are skipped by the scan, as they are
+  by interpolation. And not as a multi-line, block, folded, tagged or anchored scalar —
+  the rewrite refuses what it cannot splice exactly, naming line and column, rather than
+  leaving the reference in the deployed file as its own text.
+- **`secret::` is the escape**, in a body exactly as in `Env`: a value that only *looks*
+  like a reference is written with a doubled colon and reaches the container one colon
+  shorter. It is the one silent effect of the marker, so a deploy that applies it logs a
+  line naming the stack.
 - **Interpolation applies to every YAML *value*, not just `environment:`** — including
   `command:`, `healthcheck.test`, `entrypoint:` and `labels`. This is what makes the
   six awkward stacks solvable by the same mechanism, and it is the key difference from
@@ -1166,7 +1275,7 @@ before systemd restarts it — from the deploy critical path.
   the line repeats on every deploy until you do. Sweep `/data/compose/<id>/v*/stack.env`,
   not just the current version — old version directories keep their own copy.
 
-### Three traps, each of which can bite silently
+### Four traps, three of which can bite silently
 
 - **`env_file:` is not fed by this mechanism.** `Options.Env` supplies compose's
   *interpolation* environment; it does **not** add entries to a service's `env_file:`
@@ -1175,8 +1284,9 @@ before systemd restarts it — from the deploy critical path.
   migration, start with that variable simply **missing**, and with no error, because
   nothing was interpolated and nothing failed. Before migrating a stack, check how each
   variable actually reaches the container, and convert `env_file:` consumers to explicit
-  `environment:` entries with `${VAR:?}`. The `:?` is what turns this silent failure into
-  a loud one.
+  `environment:` entries — `KEY: secret:vw:…` inline, or `${VAR:?}` if the value goes
+  through the `Env` field. This is the trap the inline form removes rather than solves:
+  writing the reference straight into `environment:` leaves no `env_file:` to forget.
 - **A reference is visible to pre-deploy validation.** `stackutils.BuildEnvMap` puts the
   raw `secret:vw:…` string into the map used by `ValidateStackFiles` and
   `ValidateComposeURLs` (when SSRF protection is on). No secret is exposed — a reference
@@ -1185,8 +1295,20 @@ before systemd restarts it — from the deploy critical path.
   `ValidateComposeURLs` may go and probe a meaningless registry host. Expect the
   discrepancy rather than debugging it twice. On the compose path `ValidateStackFiles`
   no longer sees a reference at all: it runs only for a user who is not an environment
-  administrator, and that user's deploy is now refused before it (§3.11). It still runs
+  administrator, and that user's deploy is now refused before it (§3.11) — for a
+  reference in the body as much as for one in `Env`, since otherwise moving the reference
+  from the `Env` field into the body would walk straight around the gate. It still runs
   on the swarm path, where the deploy is refused further down instead.
+- **A block scalar that merely *starts* with `secret:` makes the stack undeployable, and
+  this one is loud.** The scan classifies by prefix, so the content of an embedded config
+  file — `configs: → app: → content: |` whose first line happens to be `secret: something`
+  — is read as a reference, and the splice refuses it because a block scalar's token
+  cannot be bounded exactly. The escape does not help: `secret::` inside a block scalar
+  hits the same refusal. The deploy fails with a message naming line and column and saying
+  the scalar *begins with* the marker rather than *is* a reference, so the diagnosis is at
+  least not misleading — but the only way out is to restructure that config out of the
+  block scalar. Nothing in our estate does this today; it is listed because the failure is
+  total and the cause is non-obvious.
 - **A forced pull resolves twice.** `DeployComposeStack` calls `Pull` and then `Up` when
   `forcePullImage` is set (`api/stacks/deployments/deployer.go`), and each does its own
   full `Fetch`. Harmless in itself — but it doubles the vault syncs per deploy, and if a
@@ -1272,6 +1394,23 @@ attention.
    Accepted as the stricter reading — this is a synchronous request for values that are
    either in hand or not, so a `202` has no meaning here — but written down so the author
    of a second resolver implementation is not surprised by it.
+8. **A stack deployed from a rewritten body carries a `com.docker.compose.project.
+   config_files` label naming a temp directory that no longer exists.** Cosmetic:
+   `ServiceConfig.CustomLabels` is `json:"-"`, so the path takes no part in the service
+   hash and causes no container churn, and the only code that reads the label back is
+   `docker compose ls` — which prints it and does not open it. `down` works off the
+   project name.
+9. **`POST /stacks/{id}/start` bypasses the non-administrator gate.** `startStack` calls
+   the stack manager directly instead of going through
+   `ComposeStackDeploymentConfig.Deploy`, so §3.11's admin requirement is not enforced
+   there. Pre-existing — it is equally true of a reference in `Env` today — and untouched
+   by this change, which only widened what the gate covers where the gate runs.
+10. **Kubernetes gets no scan outside the edge path.** `ValidateEdgeStackComposeContent`
+    refuses a reference in an edge manifest whatever the deployment type, but a plain
+    (non-edge) Kubernetes stack is never scanned. Deliberate: the Kubernetes deploy path
+    does not go near the compose manager, so a reference there is a literal that a user
+    can already write today, and refusing it belongs with whatever gives Kubernetes a
+    resolver — not with this change.
 
 ### Explicitly out of scope
 

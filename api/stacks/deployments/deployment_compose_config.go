@@ -67,7 +67,7 @@ func (config *ComposeStackDeploymentConfig) Deploy(ctx context.Context) error {
 
 	isAdminOrEndpointAdmin := stackutils.UserIsAdminOrEndpointAdmin(config.user)
 	if !isAdminOrEndpointAdmin {
-		if err := refuseSecretReferencesForNonAdmin(config.stack); err != nil {
+		if err := refuseSecretReferencesForNonAdmin(config.stack, config.FileService); err != nil {
 			return err
 		}
 
@@ -118,11 +118,38 @@ func (config *ComposeStackDeploymentConfig) Deploy(ctx context.Context) error {
 // sanitised since round 10. A mebibyte of NUL and ESC in a variable name put 1048755 bytes
 // into Stack.DeploymentStatus[].Message here, control bytes intact, for exactly that user.
 // See secretresolver.TruncateName for the class and for why %q alone is not the fix.
-func refuseSecretReferencesForNonAdmin(stack *portainer.Stack) error {
+func refuseSecretReferencesForNonAdmin(stack *portainer.Stack, fileService portainer.FileService) error {
 	for _, pair := range stack.Env {
 		if secretresolver.IsReference(pair.Value) {
 			return fmt.Errorf("stack %q: variable %q uses a secret reference, and a stack carrying secret references can only be deployed by an administrator or an environment administrator",
 				secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(pair.Name))
+		}
+	}
+
+	// The same divergence, and a wider one, for a reference written inline in the body: the
+	// deploy rewrites that scalar into a placeholder and interpolates the value, so what
+	// ValidateStackFiles inspected is again not what starts the containers. The file is named
+	// instead of a variable, because a body reference has no variable name to be named by.
+	//
+	// Read through the file service and by relative path, as ValidateStackFiles and
+	// ValidateComposeURLs read the very same files a few lines below.
+	for _, file := range stackutils.GetStackFilePaths(stack, false) {
+		content, err := fileService.GetFileContent(stack.ProjectPath, file)
+		if err != nil {
+			// Fail closed: a body that cannot be read cannot be scanned.
+			return fmt.Errorf("stack %q: failed to read the compose file %q: %w",
+				secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(file), err)
+		}
+
+		refs, err := secretresolver.ComposeReferences(content)
+		if err != nil {
+			return fmt.Errorf("stack %q: compose file %q: %w",
+				secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(file), err)
+		}
+
+		if len(refs) > 0 {
+			return fmt.Errorf("stack %q: compose file %q uses a secret reference, and a stack carrying secret references can only be deployed by an administrator or an environment administrator",
+				secretresolver.TruncateName(stack.Name), secretresolver.TruncateName(file))
 		}
 	}
 
