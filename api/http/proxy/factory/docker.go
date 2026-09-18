@@ -128,6 +128,17 @@ func (proxy *dockerLocalProxy) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	w.WriteHeader(res.StatusCode)
 
+	// A streaming response (no Content-Length) can produce no body for minutes:
+	// /events on an idle daemon, or a container with no recent output. streamResponse
+	// only flushes after a write, so without this the status line and headers stay in
+	// net/http's buffer and the client sees nothing at all - not even the status code.
+	// Same heuristic httputil.ReverseProxy uses to decide a response is streaming.
+	if res.ContentLength == -1 {
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+
 	streamResponse(w, res.Body)
 }
 
