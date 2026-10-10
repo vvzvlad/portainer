@@ -183,7 +183,7 @@ backup, no transient file to clean up and no window where a crash leaves one beh
 
 ```yaml
 environment:
-  METRICS_TOKEN: secret:vw:stack/nebula.lc/tabscurator/METRICS_TOKEN
+  METRICS_TOKEN: secret:vw:stack/nebula.lc/tabscurator/curator/METRICS_TOKEN
 ```
 
 is not a `${VAR}`, so no amount of `Options.Env` reaches it — measured: with
@@ -898,7 +898,7 @@ a value or an error:
 // The marker is part of the reference on the wire: refs are sent exactly as the stack
 // stores them, and the resolver requires the "secret:" prefix. It is also the key the
 // values map comes back under.
-vals, err := resolver.Fetch(ctx, refs)   // ["secret:vw:stack/nebula/arcextension/ADMIN_TOKEN", ...]
+vals, err := resolver.Fetch(ctx, refs)   // ["secret:vw:stack/nebula.lc/tabscurator/curator/ADMIN_TOKEN", ...]
 if err != nil {
     // Hard fail, never a fallback. The implemented wording is
     // "failed to resolve secret references of stack %q: %w", with the name bounded.
@@ -935,7 +935,7 @@ forced pull runs `Pull` and then `Up`, each resolving on its own, so that deploy
 Settled concretely, so the two halves cannot drift:
 
 ```text
-POST /v1/resolve      {"version":1,"refs":["secret:vw:stack/<env>/<stack>/<VAR>", …]}
+POST /v1/resolve      {"version":1,"refs":["secret:vw:stack/<endpoint>/<stack>/<service>/<VAR>", …]}
   200                 {"values":{"<ref>":"<value>", …}}      every requested ref present
   non-2xx             {"error":"<reason>"}
 GET  /healthz         200 when the vault is unlocked, 503 otherwise; never touches
@@ -1227,7 +1227,7 @@ A reference can be written in two places, and the inline one is the default:
 
   ```yaml
   environment:
-    METRICS_TOKEN: secret:vw:stack/nebula.lc/tabscurator/METRICS_TOKEN
+    METRICS_TOKEN: secret:vw:stack/nebula.lc/tabscurator/curator/METRICS_TOKEN
   ```
 
   The deploy rewrites that scalar and injects the value for it (§3.4.1). The stack's
@@ -1352,10 +1352,24 @@ resolver for values directly, past every gate Portainer applies.
 
 ### Naming in the vault
 
-`stack/<endpoint>/<stack>/<VARIABLE>`. The endpoint segment is mandatory: stack names
-repeat across environments (`docker-etc` four times, `monitoring` three, `timeseries`
-and `rdesktops` twice each). A reused value gets **one** entry referenced from several
-stacks, never copies, or rotation will split services apart.
+`stack/<endpoint>/<stack>/<service>/<VARIABLE>`. Both middle segments are mandatory, and
+each answers a collision that actually occurs in this estate.
+
+The endpoint segment: stack names repeat across environments — `docker-etc` four times,
+`monitoring` three, `timeseries` and `rdesktops` twice each.
+
+The service segment: a variable name repeats across the services of one stack, and the two
+occurrences are usually *different* secrets — `telegram_bots` holds a `GROQ_API_KEY` per bot,
+`ukuetis_logger` a `DATABASE_URL` per service. Named without the service, they collapse onto
+one entry: the first value stored, the second silently dropped, and both slots in the body
+pointed at the survivor — a stack that deploys clean and runs one service on another's
+credential. A slot that sits outside every service (a top-level block) has no service to
+name and keeps the shorter four-segment form.
+
+A reused value gets **one** entry referenced from several stacks, never copies, or rotation
+will split services apart. Such an entry keeps the name it was first stored under, so its
+service segment names a service of *that* stack — a reference from elsewhere pointing at a
+foreign-looking name is the shared case, not a mistake.
 
 ### Follow-ups this change deliberately does not make
 
