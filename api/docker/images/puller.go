@@ -197,10 +197,10 @@ func (guard *stallGuard) outcome(ctx context.Context, err error) error {
 	// reads the log: "the recreate ran out of time" and "the pull went silent" call
 	// for different things to look at.
 	//
-	// The wording says nothing about whose bound it was, deliberately. On the
-	// manual recreate path the caller passes context.TODO() and has no deadline at
-	// all; on the auto-update path there is one, but pullBudget shortens it, so what
-	// fires is a bound Portainer computed rather than the caller's. The wrapped
+	// The wording says nothing about whose bound it was, deliberately. Both the
+	// manual recreate path (DefaultRecreateTimeout) and the auto-update path bring a
+	// deadline, but pullBudget shortens it, so what fires is a bound Portainer
+	// computed rather than the caller's. The wrapped
 	// error still distinguishes a cancellation from an expiry for anyone checking
 	// with errors.Is.
 	if ctxErr := ctx.Err(); ctxErr != nil {

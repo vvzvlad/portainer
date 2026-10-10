@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/docker"
 	"github.com/portainer/portainer/api/docker/consts"
 	"github.com/portainer/portainer/api/docker/images"
 	"github.com/portainer/portainer/api/http/middlewares"
@@ -47,7 +48,10 @@ func (handler *Handler) recreate(w http.ResponseWriter, r *http.Request) *httper
 
 	agentTargetHeader := r.Header.Get(portainer.PortainerAgentTargetHeader)
 
-	newContainer, err := handler.containerService.Recreate(context.TODO(), endpoint, containerID, payload.PullImage, "", agentTargetHeader)
+	ctx, cancel := context.WithTimeout(context.Background(), docker.DefaultRecreateTimeout)
+	defer cancel()
+
+	newContainer, err := handler.containerService.Recreate(ctx, endpoint, containerID, payload.PullImage, "", agentTargetHeader)
 	if err != nil {
 		return httperror.InternalServerError("Error recreating container", err)
 	}
