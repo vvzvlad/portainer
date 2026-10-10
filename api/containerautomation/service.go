@@ -194,9 +194,15 @@ func NewService(
 func (s *Service) TriggerUpdate() {
 	select {
 	case s.kickCh <- struct{}{}:
+		log.Info().Msg("auto-update: webhook kick queued")
 	default:
 		// A kick is already pending (or the channel is nil on a zero-value service):
 		// the coming pass will cover this trigger too, so drop the duplicate.
+		if s.kickCh == nil {
+			log.Warn().Msg("auto-update: webhook kick dropped, no trigger worker")
+			return
+		}
+		log.Info().Msg("auto-update: webhook kick coalesced, one is already pending")
 	}
 }
 
@@ -227,14 +233,29 @@ func (s *Service) triggerWorker() {
 		// survives. This webhook worker is a bare goroutine, so without its own
 		// recover an unrelated panic in the update pass (reachable by a token holder)
 		// would crash the whole process. Match the poll path's guarantee.
+		//
+		// runUpdatePass reports whether it acquired the lock only on return, so "ran" is
+		// logged after the acquiring attempt, with its duration to recover the start.
+		// The first deferral is Info; the retries every retryBackoff go to Debug so a long
+		// scheduled pass does not flood the log with the same line.
+		const deferredMsg = "auto-update: webhook-triggered pass deferred, a scheduled pass is running; will retry"
+		started := time.Now()
+		deferred := false
 		for !s.runPassRecovered() {
-			log.Debug().Msg("auto-update: webhook-triggered pass deferred, a scheduled pass is running; will retry")
+			if deferred {
+				log.Debug().Msg(deferredMsg)
+			} else {
+				log.Info().Msg(deferredMsg)
+				deferred = true
+			}
 			select {
 			case <-s.baseCtx.Done():
 				return
 			case <-time.After(s.retryBackoff):
 			}
+			started = time.Now()
 		}
+		log.Info().Dur("took", time.Since(started)).Msg("auto-update: webhook-triggered pass ran")
 	}
 }
 

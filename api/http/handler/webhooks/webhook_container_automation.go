@@ -7,6 +7,8 @@ import (
 
 	httperror "github.com/portainer/portainer/pkg/libhttp/error"
 	"github.com/portainer/portainer/pkg/libhttp/request"
+
+	"github.com/rs/zerolog/log"
 )
 
 // @summary Trigger a container auto-update pass
@@ -43,12 +45,15 @@ func (handler *Handler) webhookContainerAutomation(w http.ResponseWriter, r *htt
 	// endpoint does not reveal whether a token is configured.
 	expected := autoUpdate.WebhookToken
 	if expected == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+		// Never log the token (request or configured) or the URL that carries it.
+		log.Warn().Str("remote_addr", r.RemoteAddr).Msg("auto-update: webhook kick rejected (404), invalid token")
 		return httperror.NotFound("Invalid webhook token", errors.New("invalid container-automation webhook token"))
 	}
 
 	// The token is valid but auto-update is turned off: report a conflict rather than
 	// silently accepting a kick that would never do anything.
 	if !autoUpdate.Enabled {
+		log.Info().Str("remote_addr", r.RemoteAddr).Msg("auto-update: webhook kick rejected (409), auto-update is disabled")
 		return httperror.Conflict("Container auto-update is disabled", errors.New("container auto-update is disabled"))
 	}
 
@@ -59,6 +64,7 @@ func (handler *Handler) webhookContainerAutomation(w http.ResponseWriter, r *htt
 	// Fire-and-forget: the service coalesces/debounces bursts and runs the pass
 	// asynchronously, so respond 202 Accepted immediately with no body.
 	handler.ContainerAutomationService.TriggerUpdate()
+	log.Info().Str("remote_addr", r.RemoteAddr).Msg("auto-update: webhook kick accepted (202)")
 
 	w.WriteHeader(http.StatusAccepted)
 	return nil
