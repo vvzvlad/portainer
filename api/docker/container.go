@@ -111,6 +111,9 @@ const (
 // engine that answers at all.
 const pullReserveShare = 6
 
+// DefaultRecreateTimeout (72m): pullBudget holds back a sixth of it, so the pull keeps its hour (less 5/6 of the time the steps before it took) and the steps after it get the 12m reserve.
+const DefaultRecreateTimeout = defaultPullTimeout * pullReserveShare / (pullReserveShare - 1)
+
 // ClientFactory creates Docker clients for a given environment.
 //
 // ContainerService holds the interface rather than the concrete
@@ -209,8 +212,9 @@ func clearMacAddrs(n network.NetworkingConfig) network.NetworkingConfig {
 // left of that deadline less pullReserveShare of it, so the pull cannot spend the
 // whole window and leave the destructive steps after it running on a context with
 // nothing in it. The cap only ever shortens the budget — the smaller of the two
-// wins, and a caller with no deadline at all (the recreate HTTP handler passes
-// context.TODO()) is capped by nothing. A caller whose deadline has ALREADY
+// wins, and a caller with no deadline at all is capped by nothing (the recreate
+// HTTP handler brings DefaultRecreateTimeout, sized so that this cap still leaves
+// the pull its hour). A caller whose deadline has ALREADY
 // passed keeps its non-positive remainder rather than being handed the default:
 // the pull it gets is one that has already expired, never an unbounded one — and
 // pullImage refuses such a budget outright rather than building a client on it.
@@ -237,8 +241,8 @@ func (c *ContainerService) pullBudget(ctx context.Context) time.Duration {
 // control-plane calls — the inspects, the stop, the renames, the create, the
 // start, the removals and every call of the restore — which want a SHORT
 // http.Client.Timeout so an unresponsive engine cannot pin the caller for long;
-// one caller (the recreate HTTP handler) hands Recreate a context with no
-// deadline at all, so for it that timeout is the only bound there is. A pull wants
+// the recreate HTTP handler's own deadline (DefaultRecreateTimeout) spans the
+// whole operation, so that timeout is what bounds each single call. A pull wants
 // the opposite, and one client cannot be both.
 //
 // nodeName is the same one the recreate's own client carries. On an agent cluster
