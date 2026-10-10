@@ -1,23 +1,27 @@
 package containerautomation
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/portainer/portainer/api/datastore"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
 // newTriggerTestService builds a Service wired only for the webhook trigger worker,
 // with a stubbed updatePass seam and short timings, and starts the worker on a
-// cancellable context that is torn down at the end of the test.
+// cancellable context that is torn down at the end of the test. Teardown waits for
+// the worker to exit: it logs after a pass returns, and a worker outliving its test
+// would race the next test that swaps the global zerolog logger.
 func newTriggerTestService(t *testing.T, pass func() bool) *Service {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 
 	s := &Service{
 		baseCtx:        ctx,
@@ -26,9 +30,42 @@ func newTriggerTestService(t *testing.T, pass func() bool) *Service {
 		retryBackoff:   10 * time.Millisecond,
 		updatePass:     pass,
 	}
-	go s.triggerWorker()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.triggerWorker()
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 
 	return s
+}
+
+// TestTriggerUpdateLogsSendOutcome pins the log line for each outcome of the
+// non-blocking send, so a queued kick is distinguishable from a coalesced one. No
+// worker runs here, so the channel stays full and the capture is synchronous; the
+// global zerolog logger is swapped as in notify_test.go. That is safe because no test
+// here is parallel and newTriggerTestService waits for its worker to exit.
+func TestTriggerUpdateLogsSendOutcome(t *testing.T) {
+	var buf bytes.Buffer
+	previous := log.Logger
+	log.Logger = zerolog.New(&buf)
+	t.Cleanup(func() { log.Logger = previous })
+
+	s := &Service{kickCh: make(chan struct{}, 1)}
+
+	s.TriggerUpdate()
+	require.Contains(t, buf.String(), "auto-update: webhook kick queued")
+
+	buf.Reset()
+	s.TriggerUpdate()
+	require.Contains(t, buf.String(), "auto-update: webhook kick coalesced, one is already pending")
+
+	buf.Reset()
+	(&Service{}).TriggerUpdate()
+	require.Contains(t, buf.String(), "auto-update: webhook kick dropped, no trigger worker")
 }
 
 // TestTriggerUpdateCoalescesBurst verifies that a burst of TriggerUpdate calls
