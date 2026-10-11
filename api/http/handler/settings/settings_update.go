@@ -8,6 +8,7 @@ import (
 	"time"
 
 	portainer "github.com/portainer/portainer/api"
+	"github.com/portainer/portainer/api/containerautomation"
 	"github.com/portainer/portainer/api/dataservices"
 	"github.com/portainer/portainer/api/filesystem"
 	"github.com/portainer/portainer/api/internal/edge"
@@ -220,7 +221,8 @@ func validateNotificationWebhookURL(webhookURL *string, mechanism string) error 
 		return nil
 	}
 
-	u, err := url.Parse(*webhookURL)
+	// Checked as it will be called, with "${TELEGRAM_BOT_API_SERVER}" expanded.
+	u, err := url.Parse(containerautomation.ExpandWebhookURL(*webhookURL))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return errors.New("Invalid " + mechanism + " notification webhook URL. Must be a valid http(s) URL")
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -20,6 +21,13 @@ const (
 	// GET on the substituted URL ("message in the address"); when absent, it POSTs
 	// the plain-text message as the request body.
 	webhookMessagePlaceholder = "{{message}}"
+
+	// botAPIServerPlaceholder is replaced in the configured webhook URL with the
+	// TELEGRAM_BOT_API_SERVER variable of Portainer's own environment, so a
+	// Telegram webhook takes the self-hosted Bot API server from the same
+	// variable every bot does. Unset or blank means defaultBotAPIServer.
+	botAPIServerPlaceholder = "${TELEGRAM_BOT_API_SERVER}"
+	defaultBotAPIServer     = "https://api.telegram.org"
 
 	// webhookTimeout bounds each webhook HTTP call so a slow or unresponsive
 	// endpoint cannot pile up goroutines. The call already runs off the hot path.
@@ -47,6 +55,22 @@ func newWebhookNotifier(dataStore dataservices.DataStore) webhookNotifier {
 		dataStore: dataStore,
 		client:    &http.Client{Timeout: webhookTimeout},
 	}
+}
+
+// ExpandWebhookURL replaces the "${TELEGRAM_BOT_API_SERVER}" placeholder of a
+// configured webhook URL with that variable from Portainer's environment. The
+// notifier calls the expanded URL, and the settings validator checks it.
+func ExpandWebhookURL(webhookURL string) string {
+	if !strings.Contains(webhookURL, botAPIServerPlaceholder) {
+		return webhookURL
+	}
+
+	server := strings.TrimRight(strings.TrimSpace(os.Getenv("TELEGRAM_BOT_API_SERVER")), "/")
+	if server == "" {
+		server = defaultBotAPIServer
+	}
+
+	return strings.ReplaceAll(webhookURL, botAPIServerPlaceholder, server)
 }
 
 // webhookURLForKind selects the configured webhook URL for an event kind: the
@@ -81,7 +105,7 @@ func (n webhookNotifier) Notify(event Event) {
 		return
 	}
 
-	webhookURL := strings.TrimSpace(webhookURLForKind(settings.ContainerAutomation.Notification, event.Kind))
+	webhookURL := ExpandWebhookURL(strings.TrimSpace(webhookURLForKind(settings.ContainerAutomation.Notification, event.Kind)))
 	if webhookURL == "" {
 		return
 	}
