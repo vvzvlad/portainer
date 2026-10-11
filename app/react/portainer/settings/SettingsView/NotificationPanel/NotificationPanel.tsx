@@ -45,7 +45,10 @@ export function NotificationPanel() {
             For each URL, include the <code>{'{{message}}'}</code> placeholder to
             have the URL-encoded event message substituted into the address (the
             URL is then fetched with GET); when the placeholder is absent, the
-            plain-text message is POSTed as the request body instead. The message
+            plain-text message is POSTed as the request body instead.{' '}
+            <code>${'{TELEGRAM_BOT_API_SERVER}'}</code> in a URL is replaced with
+            that variable of Portainer&apos;s environment, or{' '}
+            <code>https://api.telegram.org</code> when it is unset. The message
             looks like{' '}
             <code>Environment | prod / Container [nginx] / Auto-heal: ...</code>.
             Leave a URL empty to disable that mechanism. Delivery is best-effort
