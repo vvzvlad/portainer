@@ -30,13 +30,10 @@ func (f fakeClientFactory) CreateClient(*portainer.Endpoint, string, *time.Durat
 	return f.cli, nil
 }
 
-// TestStatusCacheTTLIsShort is a regression guard for the stale-detection bug: the
-// statusCache is keyed by the LOCAL imageID, which does not change when upstream
-// pushes a new image under the same tag. A long TTL (the previous 24h) would serve
-// a stale "updated" status and hide a freshly-pushed image from both the badge and
-// the auto-update daemon for up to a day. The TTL must stay tied to the poll window
-// (a few minutes), and entries set with the default expiration (0) must actually
-// expire rather than live forever.
+// TestStatusCacheTTLIsShort checks that the status cache TTL stays within the
+// poll window, since the cache is keyed by the LOCAL imageID, which does not
+// change when upstream pushes under the same tag, and that entries set with the
+// default expiration (0) actually expire.
 func TestStatusCacheTTLIsShort(t *testing.T) {
 	require.LessOrEqual(t, statusCacheTTL, 10*time.Minute, "status cache TTL must be short, not 24h")
 

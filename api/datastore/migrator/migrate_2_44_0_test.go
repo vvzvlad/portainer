@@ -184,12 +184,10 @@ func TestMigrateStackFileVersions_2_44_0_MissingAdditionalFile(t *testing.T) {
 	require.Empty(t, again.Versions)
 }
 
-// TestMigrateStackFileVersions_2_44_0_HealFlatV1 covers the #30 bug: a stack that already
-// carries StackFileVersion=1 in the DB but whose files still live ONLY at the flat base path
-// compose/{id}/<files> (no v1/ directory) — as happens after EE↔CE edition switches, DB
-// restores/imports or older builds. Such a stack was previously skipped by the blanket
-// StackFileVersion>0 guard and left broken (file?version=1 → 500). The migration must now heal
-// it: materialize v1 from the base files and repoint ProjectPath to the v1 folder.
+// TestMigrateStackFileVersions_2_44_0_HealFlatV1 covers a stack that carries StackFileVersion=1
+// in the DB but whose files live only at the flat base path compose/{id}/<files> (no v1/
+// directory), as after EE↔CE edition switches or DB restores. The migration must materialize v1
+// from the base files and repoint ProjectPath to the v1 folder.
 func TestMigrateStackFileVersions_2_44_0_HealFlatV1(t *testing.T) {
 	t.Parallel()
 
@@ -201,7 +199,7 @@ func TestMigrateStackFileVersions_2_44_0_HealFlatV1(t *testing.T) {
 	require.NoError(t, err)
 
 	// The DB already claims version 1 (e.g. carried over from an EE build) while ProjectPath is
-	// still the flat base folder — exactly the broken state from issue #30.
+	// still the flat base folder.
 	fileStack := &portainer.Stack{
 		ID:               1,
 		Name:             "flat-versioned-stack",

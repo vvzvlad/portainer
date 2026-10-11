@@ -29,53 +29,17 @@ import (
 const defaultRestoreTimeout = 30 * time.Second
 
 // defaultPullTimeout bounds the image pull a forced recreate begins with, which
-// runs on a Docker client and a context of its own (see pullImage). The bound the
-// client factory knows how to set is http.Client.Timeout, and that covers the
-// WHOLE exchange, the reading of the response body included — while a pull holds
-// its progress stream open for the entire download. Under the factory's 60s
-// default that makes every image taking longer than a minute to come down fail
-// mid-download, however generous the caller's own deadline is: auto-update hands
-// the recreate ten minutes and still could not pull a large image over a slow
-// link.
+// runs on a Docker client and a context of its own (see pullImage). The client's
+// http.Client.Timeout covers reading the whole progress stream, so the factory's
+// 60s default would cut any pull longer than a minute.
 //
-// The hour is chosen from what the images this bound has to carry actually weigh,
-// not from taste. Take an image of 6-7 GB, the order the largest auto-updated
-// images run to: pulling it inside the old 60s meant about 112 MB/s sustained end
-// to end, which is LAN speed and not what these endpoints sit behind — so for a
-// whole class of images the old ceiling did not make failure likely, it made it
-// certain before the request was even sent. An hour errs the other way by the
-// same arithmetic: to exceed it, an image of that size would have to average under
-// about 1.9 MB/s for the entire download, which is not a slow link but a broken
-// one.
+// An hour lets a 6-7 GB image through at about 1.9 MB/s. It is only the absolute
+// backstop: a pull that goes silent is caught by defaultPullStallTimeout in
+// api/docker/images, which bounds the absence of progress instead.
 //
-// What this bound is NOT is the thing that notices a wedged pull. A pull that has
-// gone silent — a half-open connection, a registry that stopped answering — is
-// caught a minute after its last byte by defaultPullStallTimeout in
-// api/docker/images, which bounds the ABSENCE OF PROGRESS instead of the elapsed
-// time and so asks nothing about how big the image is or how fast the link is.
-// The hour is the absolute backstop behind it: what still ends a pull that never
-// stops dribbling bytes, which is the one failure a stall detector cannot see. The
-// two answer different questions and neither replaces the other.
-//
-// The same magnitude is written down elsewhere in the tree — the stack deployer
-// builds its unpacker client with 3600s (see stackDeployer.createDockerClient) —
-// but that is a recorded intent rather than a running example to point at: in CE
-// the unpacker path is unreachable, since the only callers of the remote-stack
-// deployments sit behind stackutils.IsRelativePathStack, which returns a
-// hardcoded false.
-//
-// One kind of endpoint does not get the hour, and cannot be given it from here.
-// An Edge tunnel is closed once it has been idle longer than chisel's
-// activeTimeout (4m30s, see checkTunnels), and nothing refreshes the tunnel's
-// LastActivity while a pull streams — the Docker SDK client this service builds
-// talks past the proxy transport that would have. The pull does at least begin
-// with a fresh window: building its client goes through TunnelAddr, which calls
-// UpdateLastActivity before it hands the address back, so the idle counter is
-// reset immediately before the download starts. What an Edge pull gets is
-// therefore a worst case rather than a ceiling — as little as ~4m30s, and more
-// only because checkTunnels samples on an interval instead of at the instant the
-// timeout passes. Lifting it would mean changing the tunnel service; stating it
-// honestly here is the alternative.
+// Edge endpoints do not get the hour: the tunnel closes after chisel's
+// activeTimeout (4m30s, see checkTunnels) because nothing refreshes LastActivity
+// while a pull streams; TunnelAddr only resets it once, before the pull starts.
 const defaultPullTimeout = time.Hour
 
 // Fractions of the restore budget reserved for the two steps that run BEFORE the
@@ -95,20 +59,10 @@ const (
 )
 
 // pullReserveShare is the fraction of the caller's REMAINING time held back from
-// the image pull for everything the recreate does after it. The discipline is the
-// one the restore shares above already follow, applied to the step that escaped
-// it: the pull runs first and is by far the longest, and until it returns nothing
-// has been touched — but the moment it returns, the recreate starts taking the
-// workload down. A pull that spent the caller's whole window and then SUCCEEDED
-// would hand the stop, the rename, the create and the start a context with
-// nothing left in it, and a stop whose ANSWER is lost is the worst outcome of the
-// lot: the engine may carry it out regardless, which puts the recreate in the
-// restore path — a brief real outage of the workload — where a pull that simply
-// ran out of time gives the clean "the update did not happen, nothing was
-// touched". Auto-update bounds a whole recreate with ten minutes, so a sixth held
-// back leaves the pull 8m20s and the handful of short control-plane calls that
-// follow 1m40s, which is ample for calls that answer in milliseconds against an
-// engine that answers at all.
+// the image pull for the destructive steps after it (stop, rename, create,
+// start), so a pull that uses the whole window cannot leave them an expired
+// context. Against a ten-minute recreate, a sixth leaves the pull 8m20s and the
+// control-plane calls 1m40s.
 const pullReserveShare = 6
 
 // DefaultRecreateTimeout (72m): pullBudget holds back a sixth of it, so the pull keeps its hour (less 5/6 of the time the steps before it took) and the steps after it get the 12m reserve.
@@ -117,17 +71,9 @@ const DefaultRecreateTimeout = defaultPullTimeout * pullReserveShare / (pullRese
 // ClientFactory creates Docker clients for a given environment.
 //
 // ContainerService holds the interface rather than the concrete
-// *client.ClientFactory so a test can see the timeout each client is ASKED for.
-// For the pull that argument is the whole of the fix in this file — it is what
-// keeps the factory's 60s default off the pull client on tcp and agent endpoints,
-// which is most of them — and it cannot be observed any other way: the pull's own
-// context deadline is armed before the request goes out, so it always expires
-// first and the client's timeout never gets to fire. Pinning it by timing would
-// take a test that sits through the whole minute.
-//
-// It is declared here rather than imported from api/docker/images, which declares
-// its own identical one for the same reason: the interface belongs to the package
-// that consumes it, not to the package that implements it.
+// *client.ClientFactory so a test can see the timeout each client is asked for;
+// the pull's context always expires first, so that timeout cannot be observed by
+// timing. api/docker/images declares its own identical interface.
 type ClientFactory interface {
 	CreateClient(endpoint *portainer.Endpoint, nodeName string, timeout *time.Duration) (*sdkclient.Client, error)
 }
@@ -198,26 +144,15 @@ func clearMacAddrs(n network.NetworkingConfig) network.NetworkingConfig {
 	return netConfig
 }
 
-// pullBudget is the whole time budget of one image pull, and the only reading of
-// pullTimeout there is: both bounds derived from it — the http.Client.Timeout of
-// the client the pull gets and the deadline of the context it runs on — go
-// through here.
+// pullBudget is the whole time budget of one image pull; both the pull client's
+// http.Client.Timeout and its context deadline derive from it.
 //
-// A ContainerService built without NewContainerService carries a zero budget, and
-// a zero timeout is an already-expired context: every forced pull would fail
-// before it left the process, so no recreate that pulls could ever succeed.
-// Falling back to the default keeps that from ever being a silent switch-off.
+// A zero pullTimeout (a ContainerService built without NewContainerService) falls
+// back to the default, since a zero timeout is an already-expired context.
 //
-// A caller that brought a deadline of its own has the budget capped to what is
-// left of that deadline less pullReserveShare of it, so the pull cannot spend the
-// whole window and leave the destructive steps after it running on a context with
-// nothing in it. The cap only ever shortens the budget — the smaller of the two
-// wins, and a caller with no deadline at all is capped by nothing (the recreate
-// HTTP handler brings DefaultRecreateTimeout, sized so that this cap still leaves
-// the pull its hour). A caller whose deadline has ALREADY
-// passed keeps its non-positive remainder rather than being handed the default:
-// the pull it gets is one that has already expired, never an unbounded one — and
-// pullImage refuses such a budget outright rather than building a client on it.
+// A caller deadline caps the budget to its remainder less pullReserveShare of it;
+// the cap only shortens. A deadline that has already passed yields a non-positive
+// budget, which pullImage refuses.
 func (c *ContainerService) pullBudget(ctx context.Context) time.Duration {
 	budget := c.pullTimeout
 	if budget <= 0 {
@@ -237,48 +172,25 @@ func (c *ContainerService) pullBudget(ctx context.Context) time.Duration {
 // pullImage pulls the image a recreate is about to build its new container from,
 // on a Docker client and a deadline of its own.
 //
-// It cannot share the client the rest of Recreate uses. That one serves the short
-// control-plane calls — the inspects, the stop, the renames, the create, the
-// start, the removals and every call of the restore — which want a SHORT
-// http.Client.Timeout so an unresponsive engine cannot pin the caller for long;
-// the recreate HTTP handler's own deadline (DefaultRecreateTimeout) spans the
-// whole operation, so that timeout is what bounds each single call. A pull wants
-// the opposite, and one client cannot be both.
+// The rest of Recreate uses a client with a short http.Client.Timeout so an
+// unresponsive engine cannot pin the caller; a pull needs a long one, so it gets
+// its own client.
 //
-// nodeName is the same one the recreate's own client carries. On an agent cluster
-// it is what routes the request to a particular node, and dropping it would pull
-// the image on whichever node the agent happened to pick — leaving the node the
-// container is actually recreated on to create it from the image it already has,
-// silently running the old one.
+// nodeName routes the pull to the node the container is recreated on in an agent
+// cluster; without it the image could be pulled on another node.
 //
-// Of the two bounds cut from the one budget, the CONTEXT is the one that
-// actually fires. It is armed before the request goes out, so on every kind of
-// endpoint it expires before the client's own http.Client.Timeout could — and on
-// an endpoint reached over a unix socket or a named pipe it is the only bound
-// there is at all, since createLocalClient ignores the timeout argument entirely
-// and such a client carries no http.Client.Timeout. What the client's timeout is
-// for is that the factory's 60s default cannot come back silently: asking for the
-// client without one is exactly the bug this function exists to undo, and the
-// timeout is the bound that would remain if the context here were ever taken
-// away. A caller with a tighter deadline of its own still wins, since
-// context.WithTimeout keeps the earlier of the two — and pullBudget holds a share
-// of that deadline back for the steps after the pull.
+// The context deadline is the bound that fires, and the only one on unix-socket
+// and named-pipe endpoints (createLocalClient ignores the timeout). The client
+// timeout keeps the factory's 60s default off the pull client.
 func (c *ContainerService) pullImage(ctx context.Context, endpoint *portainer.Endpoint, nodeName string, img images.Image) error {
 	budget := c.pullBudget(ctx)
 
-	// A budget that is not positive is a caller whose deadline has already passed,
-	// and there is no pull to be had out of no time. Building a client for it would
-	// not merely be wasted work: net/http reads a non-positive http.Client.Timeout as
-	// NO timeout at all, so the factory would hand back precisely the unbounded
-	// client the argument below exists to prevent, while the context derived from
-	// this same budget is already dead — the one case where NEITHER bound would
-	// exist. Returning here is what keeps the timeout handed to the factory positive
-	// by construction, and the claim above — that the client's timeout is the bound
-	// that would remain if the context were taken away — true on every path.
+	// A non-positive budget means the caller's deadline has passed. It must not
+	// reach the factory: net/http reads a non-positive http.Client.Timeout as no
+	// timeout at all.
 	//
-	// The error is not ctx.Err() on its own because ctx.Err() can still be nil for
-	// the instant after a deadline passes, and errors.Wrap of a nil error is nil,
-	// which the caller would read as a pull that succeeded.
+	// ctx.Err() can still be nil just after a deadline passes, and errors.Wrap of
+	// nil is nil, which the caller would read as a successful pull.
 	if budget <= 0 {
 		err := ctx.Err()
 		if err == nil {
@@ -303,11 +215,9 @@ func (c *ContainerService) pullImage(ctx context.Context, endpoint *portainer.En
 // restoreBudget is the whole time budget of one restore, and the only reading of
 // restoreTimeout there is: every budget derived from it — the restore context
 // itself and the shares the teardown and the planning inspect run on — goes
-// through here. A ContainerService built without NewContainerService carries a
-// zero budget, and a zero timeout is an already-expired context: every restore
-// call would fail before it left the process, leaving the original renamed,
-// disconnected and stopped. Falling back to the default keeps that from ever
-// being a silent switch-off, in the derived budgets as much as in the whole.
+// through here. A zero restoreTimeout (a ContainerService built without
+// NewContainerService) falls back to the default, since a zero timeout is an
+// already-expired context.
 func (c *ContainerService) restoreBudget() time.Duration {
 	if c.restoreTimeout <= 0 {
 		return defaultRestoreTimeout
@@ -324,9 +234,8 @@ func (c *ContainerService) restoreBudget() time.Duration {
 // stopped. The derived context keeps the caller's values but gets its own
 // restoreTimeout deadline.
 //
-// context.WithoutCancel only detaches the restore from the caller; it promises
-// nothing about process shutdown. If the daemon exits mid-restore the sequence
-// is cut at whatever step it had reached, exactly as before.
+// If the process exits mid-restore, the sequence is cut at whatever step it had
+// reached.
 func (c *ContainerService) restoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), c.restoreBudget())
 }
@@ -370,16 +279,12 @@ func missingNetworks(observed *dockercontainer.InspectResponse, attempted []*net
 // engine went on to execute) did happen and has to be undone, and a call that
 // never landed must not be undone twice.
 //
-// observed is nil when the state could not be read at all. The plan then falls
-// back to every step that was ATTEMPTED, which errs towards doing too much — and
-// harmlessly so: a superfluous step is refused by the engine ("already in that
-// state") and cannot spoil the verdict, which is read off the container at the
-// end of the restore rather than off which calls came back clean.
+// observed is nil when the state could not be read; the plan then falls back to
+// every attempted step, which is harmless because the engine refuses a
+// superfluous step and the verdict is read off the container afterwards.
 //
-// The observed state says what is to be undone, but only among the steps this
-// recreate attempted: a name that does not match while no rename was even issued
-// is somebody ELSE's rename, and putting the container back under the name this
-// recreate happens to remember is not a mandate the restore has.
+// Only steps this recreate attempted are undone: a mismatched name with no rename
+// issued is someone else's rename.
 func planRestore(observed *dockercontainer.InspectResponse, name string, renameAttempted bool, disconnectAttempted []*network.EndpointSettings) restorePlan {
 	if observed == nil || observed.ContainerJSONBase == nil {
 		return restorePlan{rename: renameAttempted, networks: disconnectAttempted}
@@ -401,13 +306,10 @@ func planRestore(observed *dockercontainer.InspectResponse, name string, renameA
 // merely FAILS is not such a point, since the engine may have carried it out
 // anyway.
 //
-// The rollback is not taken on trust, and it is not judged by which of its calls
-// came back clean either: the original is inspected at the end, and the verdict is
-// what that inspect says — running, carrying its own name, attached to the
-// networks it was detached from. A restore that did not fully land is reported to
-// the caller as a *RestoreError — never silently logged away — which says whether
-// the original is running again (a degraded but serving workload: a name or a
-// network that did not come back) or is left down (an outage).
+// The rollback's verdict comes from inspecting the original at the end: running,
+// carrying its own name, attached to its networks. A restore that did not fully
+// land is returned as a *RestoreError saying whether the original is running
+// again (degraded) or left down (an outage).
 func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.Endpoint, containerId string, forcePullImage bool, imageTag, nodeName string) (newContainer *types.ContainerJSON, err error) {
 	cli, err := c.factory.CreateClient(endpoint, nodeName, nil)
 	if err != nil {
@@ -448,30 +350,20 @@ func (c *ContainerService) Recreate(ctx context.Context, endpoint *portainer.End
 	}
 
 	// The original container stops serving the moment the engine is ASKED to stop
-	// it, so every exit path from here on has to put it back. That includes a stop
-	// that comes back with an ERROR: the engine may have carried it out anyway (the
-	// answer was lost on a cancelled request, the failure came after the SIGKILL
-	// landed), and a container left in Exited (137) with nothing restoring it is
-	// exactly the reported symptom. Restoring a container that never actually
-	// stopped costs one call and no harm: the engine answers a start on a running
-	// container with 304, which the SDK reports as success. restore is cleared only
-	// once the new container has taken over for good.
+	// it, so every exit path from here on has to put it back, including a stop that
+	// returns an error (the engine may have carried it out anyway). Starting a
+	// container that never stopped is harmless: the engine answers 304, which the
+	// SDK reports as success. restore is cleared only once the new container has
+	// taken over.
 	restore := true
 
-	// What the restore may have to undo. Each flag is raised BEFORE its call rather
-	// than after it succeeds: the most common failure is a lost ANSWER to a call
-	// the engine did execute (the caller's deadline firing mid-flight), which would
-	// otherwise be recorded as never having happened, leaving the original named
-	// "-old" or off its networks for good. Doing too much is safe because the
-	// restore is idempotent — it is planned from the original's observed state, and
-	// a step taken needlessly is refused by the engine without changing anything.
+	// What the restore may have to undo. Each flag is raised BEFORE its call,
+	// because a call whose answer was lost may still have been executed; the
+	// restore is planned from observed state, so doing too much is safe.
 	//
-	// stopSaidGone is the exception that is read off the ANSWER rather than raised
-	// before the call: a stop refused with "no such container" is the one answer
-	// that proves this recreate did not take the container down, because there was
-	// nothing there to take down. It is what tells a --rm container the engine
-	// reaped on OUR stop from one that had already exited and been reaped before we
-	// asked (the ordinary way a --rm container dies, and none of our doing).
+	// stopSaidGone is read off the answer instead: a stop refused with "no such
+	// container" proves this recreate did not take the container down, which tells
+	// a --rm container reaped on our stop from one reaped before we asked.
 	var (
 		renameAttempted     bool
 		stopSaidGone        bool

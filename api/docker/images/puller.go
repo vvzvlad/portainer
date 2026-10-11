@@ -18,69 +18,17 @@ import (
 )
 
 // defaultPullStallTimeout is how long the pull may go without a single byte of
-// progress before it is abandoned.
+// progress before it is abandoned. It fires on a stuck pull, never on a big one.
 //
-// It is the bound that does not have to be guessed. Every other bound on a pull
-// is a duration, and a duration is an answer to "how big are our images and how
-// fast is the link today" — an hour is generous for a 200 MB image on home fibre
-// and nowhere near enough for a 10 GB one over a 1 MB/s uplink, and neither
-// install gets to pick. Absence of progress asks nothing about size or speed: a
-// pull that is working streams JSON progress lines continuously, whatever it is
-// pulling and however slowly, and a pull whose connection has gone half-open
-// stops producing them at once. So this bound fires on the pull being STUCK,
-// which is the thing worth failing on, and never on the pull merely being big.
+// The classic image store emits progress per 512 KiB moved per layer (the 100ms
+// limiter in pkg/progress/progressreader.go is a ceiling, not a heartbeat), so a
+// minute of silence means a layer moved under ~8.5 KiB/s. The minute also clears
+// the silent waits on the registry: a pull-through cache fetching a cold blob,
+// and token auth plus manifest resolution before "Pulling from <repo>", which
+// happen inside ImagePull (see Pull).
 //
-// A minute has to sit above the WORST cadence a healthy pull keeps, not the
-// best, and the two image stores do not keep the same one:
-//
-//   - The containerd store does write on a clock. A 100ms ticker keeps emitting
-//     Extracting with an elapsed-seconds counter for as long as a layer is
-//     unpacking, unconditionally and explicitly so the unpack does not look
-//     silent (daemon/containerd/progress.go).
-//   - The classic store does not. Its progress is BYTE-driven: the progress
-//     reader calls updateProgress only once it has passed 512 KiB since the last
-//     update — or 1% of the layer, when 1% is smaller — and only then consults a
-//     limiter of one update per 100ms, which may drop the update anyway
-//     (pkg/progress/progressreader.go). The 100ms there is a CEILING on how often
-//     a line may be written, never a heartbeat: the gap between two Downloading
-//     lines is however long that layer takes to move its next 512 KiB.
-//
-// The classic store is therefore what sets the floor, and reasoning from the
-// 100ms figure alone would set it far too low: "the cadence is 100ms, so ten
-// seconds has room to spare" comes out at about 50 KiB/s per layer and would
-// abort real pulls. Read off the byte-driven cadence instead, a minute of silence
-// on a layer means that layer moved less than 512 KiB in that minute, roughly
-// 8.5 KiB/s — a link that is broken rather than merely slow. Even a failed layer
-// being retried is not quiet: the backoff counts itself down with a "Retrying in
-// N seconds" line once a second (distribution/xfer/download.go).
-//
-// What the value also has to clear is the windows where the daemon is WAITING on
-// the registry rather than working, because nothing is written then:
-//
-//   - Between "Pulling fs layer" and the first byte of that blob. A pull-through
-//     cache (Harbor, Nexus, an ECR pull-through rule) that has to fetch a cold
-//     blob from upstream holds that window open for as long as the upstream
-//     takes.
-//   - Before the first progress line at all: "Pulling from <repo>" is written
-//     only once the manifest has been fetched, so registry token auth and
-//     manifest resolution happen in silence. That window sits INSIDE ImagePull
-//     rather than after it, which is why Pull arms this bound before making that
-//     call rather than once the progress stream is in hand — see the comment
-//     there.
-//
-// A much shorter value would be wrong because of those windows as well as the
-// cadence: at ten seconds a registry cold-starting a large blob is
-// indistinguishable from a dead connection, and the pull would be cut in the one
-// case where it was about to succeed. The costs are not symmetric either. A
-// false abort fails a legitimate update, and it does so on exactly the images
-// most likely to be slow to start; a stall noticed a minute later than it could
-// have been costs one minute of an auto-update tick that the caller already
-// bounds absolutely.
-//
-// This is a floor, not a ceiling: the caller keeps its own absolute bound (see
-// defaultPullTimeout in api/docker, where a recreate gives its pull an hour), so
-// a pull that dribbles bytes forever is still cut off eventually. The two answer
-// different questions and neither replaces the other.
+// The caller keeps its own absolute bound (defaultPullTimeout in api/docker) for
+// a pull that dribbles bytes forever.
 const defaultPullStallTimeout = 60 * time.Second
 
 // progressBufferSize is the read size of the fallback drain, the one that runs
@@ -121,11 +69,8 @@ func NewPuller(client *client.Client, registryClient *RegistryClient, dataStore 
 // stallBudget is how long the pull may go without progress, and the only reading
 // of stallTimeout there is.
 //
-// A Puller built without NewPuller carries a zero timeout, and a zero idle
-// deadline is one that has already expired: the abort would fire before the
-// first chunk of the progress stream could arrive, so no pull could ever
-// succeed. Falling back to the default keeps that from ever being a silent
-// switch-off.
+// A zero stallTimeout (a Puller built without NewPuller) falls back to the
+// default, since a zero idle deadline would abort every pull at once.
 func (puller *Puller) stallBudget() time.Duration {
 	if puller.stallTimeout <= 0 {
 		return defaultPullStallTimeout
@@ -139,10 +84,8 @@ func (puller *Puller) stallBudget() time.Duration {
 // doing, so the outcome can be told apart from everything else that ends a pull
 // the same way.
 //
-// It is a type rather than a few locals because the clock has to span two phases
-// that live in different functions — the request Pull issues and the drain that
-// follows it — and because the three things it carries (the timer, the duration
-// it is rearmed with, and whether it has fired) are only ever correct together.
+// The clock spans two phases in different functions: the request Pull issues and
+// the drain that follows it.
 type stallGuard struct {
 	stall time.Duration
 	timer *time.Timer
@@ -170,12 +113,9 @@ func newStallGuard(stall time.Duration, abort context.CancelFunc) *stallGuard {
 // progressed restarts the idle clock, and is called for every read that produced
 // bytes.
 //
-// The guard skips the rearm once the abort has already fired: that pull is dead
-// and cannot be revived, and Reset on an AfterFunc timer that has already run
-// schedules a fresh run of the function rather than rescheduling the old one. The
-// check is advisory — the timer may fire between the load and the reset — so it
-// only saves work rather than being load-bearing: abort is idempotent and stop
-// takes any rearmed timer down.
+// It skips the rearm once the abort has fired, since Reset on an AfterFunc timer
+// that has already run schedules a fresh run. The check is advisory: abort is
+// idempotent and stop takes any rearmed timer down.
 func (guard *stallGuard) progressed() {
 	if !guard.fired.Load() {
 		guard.timer.Reset(guard.stall)
@@ -192,17 +132,10 @@ func (guard *stallGuard) stop() {
 // abort has run, the pull's own context reports cancellation whether the decision
 // was ours or the caller's, so only the parent still knows whose it was.
 func (guard *stallGuard) outcome(ctx context.Context, err error) error {
-	// The caller's own deadline or cancellation. Checked before the stall because
-	// both end the read the same way, and because the difference matters to whoever
-	// reads the log: "the recreate ran out of time" and "the pull went silent" call
-	// for different things to look at.
-	//
-	// The wording says nothing about whose bound it was, deliberately. Both the
-	// manual recreate path (DefaultRecreateTimeout) and the auto-update path bring a
-	// deadline, but pullBudget shortens it, so what fires is a bound Portainer
-	// computed rather than the caller's. The wrapped
-	// error still distinguishes a cancellation from an expiry for anyone checking
-	// with errors.Is.
+	// The caller's own deadline or cancellation, checked before the stall so the log
+	// tells "ran out of time" from "went silent". The wording does not name whose
+	// bound fired, since pullBudget may have shortened the caller's; errors.Is
+	// still tells cancellation from expiry.
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return errors.Wrap(ctxErr, "image pull ran out of time")
 	}
@@ -227,31 +160,17 @@ func (puller *Puller) Pull(ctx context.Context, img Image) error {
 			Msg("failed to get an encoded registry auth via image, try to pull image without registry auth")
 	}
 
-	// The pull gets a cancellable context of its OWN, derived from the caller's,
-	// and it is the context the request is issued on. That is what makes the
-	// stall abort work at all: a blocked read of the response body unblocks when
-	// the request's context is cancelled and in no other way, so cancelling
-	// anything else — or merely returning early from the drain — would leave the
-	// read parked on a dead connection until the caller's own deadline. Deriving
-	// it from ctx keeps the caller's deadline and cancellation in force as well:
-	// whichever of the two fires first ends the pull.
+	// The request is issued on a cancellable context of its own, derived from the
+	// caller's: a blocked body read unblocks only when the request's context is
+	// cancelled, which is how the stall abort works.
 	pullCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// The idle clock is armed BEFORE the request goes out rather than once the
-	// progress stream is in hand, because the longest guaranteed-silent phase of a
-	// pull happens inside this call. ImagePull returns when the response HEADERS
-	// arrive, and the daemon sends no header until its first write to the body — the
-	// image route wraps the writer in a WriteFlusher it does not flush, precisely so
-	// that a failure before the manifest can still be reported as an HTTP error —
-	// while the first line it writes, "Pulling from <repo>", comes only once the
-	// manifest has been fetched. Registry token auth and manifest resolution
-	// therefore happen entirely in here, and a clock started after this call would
-	// leave a pull wedged on the registry handshake hanging for the caller's whole
-	// budget, an hour on the manual recreate path.
-	//
-	// The drain below takes the clock over and does the resetting from then on; it
-	// is one clock across both phases, not two.
+	// The idle clock is armed before the request: ImagePull returns only when the
+	// headers arrive, and the daemon sends none until its first body write
+	// ("Pulling from <repo>", after the manifest is fetched), so registry auth and
+	// manifest resolution happen silently inside this call. The drain below takes
+	// over the same clock.
 	guard := newStallGuard(puller.stallBudget(), cancel)
 	defer guard.stop()
 
@@ -273,18 +192,12 @@ func (puller *Puller) Pull(ctx context.Context, img Image) error {
 // progressStream is the raw byte layer of the drain. It hands the bytes on
 // unchanged and restarts the idle clock on every read that produced any.
 //
-// The JSON decoder sits ON TOP of this rather than the other way round, and that
-// order is load-bearing. Stall detection has to count BYTES, not messages: a
-// connection that dies halfway through writing one progress line is as stalled as
-// one that dies between two of them, and a clock reset on decoded messages would
-// not notice until that line completed — which, for the line that never
-// completes, is never.
+// The JSON decoder sits on top of this so that stall detection counts bytes, not
+// messages: a connection that dies halfway through a line is stalled too.
 //
-// err is the reader's own account of how the stream ended, and it is what lets the
-// drain tell a stream that FAILED from bytes the decoder could not make sense of,
-// which are two things that reach the same branch and call for opposite responses.
-// Only the draining goroutine ever touches it; the clock's own goroutine touches
-// nothing here.
+// err is the reader's own account of how the stream ended, which tells a failed
+// stream from bytes the decoder could not parse. Only the draining goroutine
+// touches it.
 type progressStream struct {
 	inner io.Reader
 	guard *stallGuard
@@ -299,33 +212,16 @@ func (stream *progressStream) Read(p []byte) (int, error) {
 		stream.guard.progressed()
 	}
 
-	// The reader's last word on how the stream ended — with one exception: a clean
-	// io.EOF never erases a failure the reader has already reported. A reader is
-	// allowed to hand out bytes and an error in the SAME call, and the decoder drops
-	// the error whenever the read produced bytes, so such a failure reaches the drain
-	// only through this field. Real bodies repeat it — net/http and gzip both keep
-	// answering with the same error — but a reader that reports its failure once and
-	// then ends politely would otherwise have that failure overwritten by the io.EOF
-	// that followed, and the drain would call a broken download a finished pull. This
-	// field is the reader's word on whether the end was CLEAN, and an end cannot
-	// become clean after the fact.
+	// The reader's last word on how the stream ended, except that a clean io.EOF
+	// never erases an earlier failure: the decoder drops the error of a read that
+	// also produced bytes, so such a failure reaches the drain only through here.
 	if err != nil && (stream.err == nil || !errors.Is(err, io.EOF)) {
 		stream.err = err
 	}
 
-	// A read of no bytes and no error is legal and means, in io.Reader's own words,
-	// that nothing happened. Going straight back for more would spin a core for as
-	// long as such a reader keeps answering — up to a whole stall timeout, since the
-	// idle clock is the only thing bounding the drain and it measures wall time, not
-	// attempts — so an empty read is paid for with a brief wait rather than with a hot
-	// retry. No net/http body behaves this way, but the drain does not get to choose
-	// its reader.
-	//
-	// The pause lives HERE, in the one place every read passes through, rather than in
-	// either loop above it. The fallback drain calls Read itself, but the ordinary path
-	// does not: the decoder fills its buffer with io.ReadFull, which spins on a reader
-	// like this exactly as eagerly and would never hand control back to a loop that
-	// could pause on its behalf.
+	// A read of no bytes and no error is legal; pause briefly instead of spinning a
+	// core until the stall timeout. The pause lives here because the decoder reads
+	// through io.ReadFull, which never hands control back to a loop that could pause.
 	if n == 0 && err == nil {
 		time.Sleep(emptyReadBackoff)
 	}
@@ -337,34 +233,18 @@ func (stream *progressStream) Read(p []byte) (int, error) {
 // soon as it has produced nothing for the guard's stall timeout, and failing it
 // if the daemon reports a failure in band.
 //
-// It replaces an io.ReadAll, which discarded the same bytes but only after
-// buffering every one of them and only after the stream had already ended — which
-// is to say it threw away both signals a pull's progress stream carries: whether
-// it is still alive, and whether it worked.
-//
 // ctx is the CALLER's context, not the pull's; see stallGuard.outcome for why
 // that distinction is the only way the outcomes can be told apart.
 func drainProgress(ctx context.Context, progress io.Reader, guard *stallGuard) error {
 	stream := &progressStream{inner: progress, guard: guard}
 
-	// The decoder keeps ONE buffer and compacts what it has consumed before reading
-	// more, so memory here is bounded rather than growing with the length of the
-	// stream, which is the property io.ReadAll lacked and the reason it was dropped.
-	// The bound is roughly the larger of 32 KiB and twice the longest single message:
-	// the buffer starts at minBufferSize (32 KiB) and doubles whenever the free space
-	// left in it drops below minReadSize (4 KiB).
+	// The decoder keeps one compacting buffer, so memory stays bounded at roughly
+	// the larger of 32 KiB and twice the longest message.
 	//
-	// Bounded is not the same as line at a time, and the difference is worth writing
-	// down because the code reads as though Decode returned on the first newline. It
-	// does not: the decoder fills its buffer with io.ReadFull, which keeps reading
-	// until it has those 32 KiB or the reader errors, so one Decode call absorbs
-	// however many messages the daemon has already written. Nothing here depends on
-	// that — moby closes the stream straight after writing an errorDetail message, so
-	// there is never a queue of lines hiding behind a reported failure — but it does
-	// mean this loop acts on a failure once the free space in that buffer has been
-	// filled or the reader has failed or ended, rather than at the instant the line
-	// lands on the wire. A pause in the stream is not one of those moments: io.ReadFull
-	// simply keeps waiting through it.
+	// Decode does not return on the first newline: it fills its buffer with
+	// io.ReadFull, so a failure line is acted on once the buffer fills or the reader
+	// ends. moby closes the stream right after an errorDetail message, so that is
+	// prompt.
 	decoder := json.NewDecoder(stream)
 
 	// Whether a message that parsed but did not fit the struct has already been
@@ -385,26 +265,12 @@ func drainProgress(ctx context.Context, progress io.Reader, guard *stallGuard) e
 			continue
 		}
 
-		// The stream ran to its end, which is how a finished pull ends — but the READER
-		// has the last word on whether that end was clean, and an io.EOF out of the
-		// decoder is not by itself proof that it was.
-		//
-		// The decoder fills its buffer with io.ReadFull, and a read that returns no
-		// bytes and io.ErrUnexpectedEOF — precisely what net/http's chunked reader
-		// gives for a response body cut short — is rewritten to a plain io.EOF on its
-		// way out of readValue. The daemon flushes each progress line as its own chunk,
-		// so a connection dropped mid-download most often breaks on a message boundary,
-		// and a boundary cut arrives here indistinguishable from a pull that finished:
-		// nothing half-parsed is left in the decoder to give it away. Taking that at
-		// face value would report a truncated download as an updated image, which is the
-		// failure this drain exists to stop, on the pulls most exposed to it — the long
-		// ones, where a proxy, an agent tunnel or a restarted daemon has the most time
-		// to close the connection.
-		//
-		// So the success needs the reader to agree: no error at all, or an io.EOF of its
-		// own. Checking the reader's error rather than the caller's context also keeps
-		// the property that a cancellation landing in the same instant as the last byte
-		// still yields the pull that was asked for.
+		// The decoder's io.EOF is not proof of a clean end: readValue rewrites a
+		// zero-byte io.ErrUnexpectedEOF (net/http's chunked reader on a truncated body)
+		// to io.EOF, and the daemon flushes each line as its own chunk, so a dropped
+		// connection usually breaks on a message boundary. Success needs the reader to
+		// agree: no error, or an io.EOF of its own. Checking the reader rather than the
+		// caller's context lets a cancellation racing the last byte still succeed.
 		if errors.Is(err, io.EOF) {
 			if stream.err != nil && !errors.Is(stream.err, io.EOF) {
 				return guard.outcome(ctx, stream.err)
@@ -422,40 +288,17 @@ func drainProgress(ctx context.Context, progress io.Reader, guard *stallGuard) e
 			return guard.outcome(ctx, err)
 		}
 
-		// The decoder's OWN verdict that the stream stopped in the middle of a value.
-		// That is the other shape a download cut short takes, and the one no reader error
-		// gives away: readValue returns io.ErrUnexpectedEOF when its buffer still holds an
-		// unterminated but so-far-valid JSON prefix and the reader has nothing left to add
-		// — INCLUDING when the reader ended perfectly cleanly, which is what a proxy, an
-		// agent tunnel or a restarted daemon closing the connection half a line in looks
-		// like from here. Neither check above catches that combination: the decoder's error
-		// is not an io.EOF, and the reader's last word was one, so comparing the two says
-		// nothing. Without this the pull would degrade to the byte drain, meet the reader's
-		// clean io.EOF a moment later and be reported as an updated image.
-		//
-		// Acting on it cannot invent a failure the pull never had. Bytes that are not JSON
-		// at all — a stream framed some way this code does not know — fail as a
-		// *json.SyntaxError and still take the forgiving path below; io.ErrUnexpectedEOF is
-		// returned only for input that was still VALID when it ran out, which is truncation
-		// by definition, and a truncated progress stream is a pull whose image never
-		// finished arriving however politely the connection was closed.
+		// The decoder's own verdict that the stream stopped mid-value: an unterminated
+		// but valid JSON prefix, even when the reader ended cleanly (a connection
+		// closed half a line in). That is truncation by definition; non-JSON bytes fail
+		// as *json.SyntaxError and take the forgiving path below instead.
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			return guard.outcome(ctx, err)
 		}
 
-		// A message that PARSED but did not fit — a field carrying a type this struct
-		// does not declare — costs nothing and is skipped. The value was consumed whole
-		// before the mismatch was reported, so the decoder is still sitting on a message
-		// boundary and every line after it reads normally; giving up on the rest of the
-		// stream over one odd message would let a failure reported ten lines later go
-		// unnoticed for no gain. The half-filled struct is dropped rather than checked,
-		// because a message the decoder could not finish is not evidence that anything
-		// failed.
-		//
-		// A syntax error is the opposite case and is not recoverable in the same way:
-		// the value did not parse, so the decoder cannot tell where the next one starts,
-		// and there is nothing left to do but stop reading messages. That is what the
-		// fallback below is for.
+		// A message that parsed but did not fit the struct is skipped: the value was
+		// consumed whole, so the decoder is still on a message boundary. A syntax error
+		// leaves no boundary to resume from, so it goes to the fallback below.
 		var typeMismatch *json.UnmarshalTypeError
 		if errors.As(err, &typeMismatch) {
 			if !reportedTypeMismatch {
@@ -469,17 +312,9 @@ func drainProgress(ctx context.Context, progress io.Reader, guard *stallGuard) e
 			continue
 		}
 
-		// Everything else is the decoder failing to make sense of bytes that did
-		// arrive — a malformed line, a shape nobody expected, a stream framed some way
-		// this code does not know about — and it degrades to exactly what this function
-		// did before it could parse anything: drain the rest and call EOF a success.
-		//
-		// That degradation is the whole safety property of parsing here. Reading the
-		// stream may only ever turn a failure that was SILENT into a loud one; it must
-		// never invent a failure that did not exist. A pull the daemon completed
-		// successfully must not start failing because Portainer could not read a line
-		// of its commentary, so a parse problem is a warning in the log and nothing
-		// more.
+		// Anything else is unparseable input: drain the rest and treat EOF as success.
+		// Parsing may turn a silent failure into a loud one but must never invent one,
+		// so a parse problem is only a warning.
 		log.Warn().
 			Err(err).
 			Msg("cannot read the image pull progress stream, falling back to draining it without checking for reported failures")
@@ -493,17 +328,10 @@ func drainProgress(ctx context.Context, progress io.Reader, guard *stallGuard) e
 // POST /images/create has already sent its 200 by the time most of a pull
 // happens, so everything that goes wrong after the first flushed byte can only be
 // said in the body: a {"errorDetail":...} message followed by a clean end of
-// stream. Download attempts exhausted, a layer digest mismatch, no space left on
-// device during extraction, a registry 5xx, an unexpected EOF mid-blob — all of
-// them arrive this way, and all of them used to be discarded.
+// stream (exhausted retries, digest mismatch, no space left, registry 5xx).
 //
-// Discarding them was worse than losing an error message. Recreate goes on to
-// build the new container from the image NAME, and on an auto-update that tag
-// always resolves locally to the digest that is already there, so the workload
-// would be stopped, renamed, recreated FROM THE STALE IMAGE and started again,
-// with the recreate reporting success and nothing updated — and the next status
-// check would find it outdated and do it all over again, a restart loop that
-// never converges and never logs a reason.
+// Ignoring it would let Recreate rebuild the container from the stale local image
+// under the same tag and report success, and auto-update would loop on it.
 func inBandError(msg jsonmessage.JSONMessage) error {
 	if msg.Error == nil && msg.ErrorMessage == "" {
 		return nil
@@ -526,28 +354,18 @@ func inBandError(msg jsonmessage.JSONMessage) error {
 	return errors.Errorf("the daemon reported the image pull as failed: %s", detail)
 }
 
-// drainBytes reads what is left of the stream and throws it away, which is what
-// the drain did in full before it learned to read the messages. It keeps the idle
-// clock running — the reader it is given is the one that resets it — so a stream
-// that stops making sense and then goes silent is still abandoned as a stall
-// rather than waited on.
+// drainBytes reads what is left of the stream and throws it away. The reader it
+// is given resets the idle clock, so a stream that then goes silent is still
+// abandoned as a stall.
 //
-// Unlike the decoding loop above, this one may take io.EOF at face value: it reads
-// the stream directly, so the reader's error arrives here as the reader gave it,
-// and a body cut short still says io.ErrUnexpectedEOF rather than having it
-// rewritten to an io.EOF by a decoder in between.
+// Unlike the decoding loop, it may take io.EOF at face value: no decoder sits in
+// between to rewrite io.ErrUnexpectedEOF.
 func drainBytes(ctx context.Context, progress io.Reader, guard *stallGuard) error {
 	buf := make([]byte, progressBufferSize)
 
 	for {
-		// The idle clock and the caller are asked directly, before every read, because
-		// neither of them can end this loop through the reader alone. Both of them only
-		// cancel a context: the clock cancels the pull's, the caller cancels its own, and
-		// a cancelled context unblocks a net/http body but means nothing at all to a
-		// reader that never consults one — the same reader the pause on empty reads exists
-		// for. Asking here is what makes "a stream that goes quiet is abandoned as a
-		// stall" a property of this drain rather than one borrowed from whatever reader
-		// happened to turn up.
+		// Check the idle clock and the caller before every read: both only cancel a
+		// context, which a reader that never consults one ignores.
 		if ctx.Err() != nil || guard.fired.Load() {
 			return guard.outcome(ctx, nil)
 		}

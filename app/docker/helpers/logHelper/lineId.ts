@@ -2,8 +2,8 @@
 // log line a stable id. Because it never resets during a session, lines parsed
 // from later stream chunks always get ids greater than earlier ones, so the
 // AngularJS `track by log.id` repeat treats already-rendered rows as unchanged
-// and never rewrites their DOM text nodes (which is what was collapsing text
-// selections on every poll). See logHelper/types.ts (FormattedLine).
+// and never rewrites their DOM text nodes, so text selections survive. See
+// logHelper/types.ts (FormattedLine).
 let sequence = 0;
 
 export function nextLineId() {

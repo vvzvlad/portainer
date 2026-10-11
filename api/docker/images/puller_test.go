@@ -18,9 +18,8 @@ import (
 
 // A progress line of the shape the daemon actually writes, the failure it reports
 // IN BAND — inside a response that has already been given a 200, followed by a
-// clean end of stream — and bytes that are not the stream anyone expected. The
-// second one is the message this package used to throw away; the third is what
-// sends the drain down its fallback path.
+// clean end of stream — and bytes that are not the stream anyone expected, which
+// send the drain down its fallback path.
 const (
 	progressLine = `{"status":"Downloading","progressDetail":{"current":1024,"total":8192},"progress":"[===>  ] 1kB/8kB","id":"a1b2c3d4"}` + "\n"
 	failureLine  = `{"errorDetail":{"message":"failed to register layer: no space left on device"},"error":"failed to register layer: no space left on device"}` + "\n"
@@ -104,10 +103,7 @@ func (r *emptyReader) Read([]byte) (int, error) {
 // next.
 //
 //   - then set, atOnce false: the payload arrives, and every read after it fails
-//     with then. The failure is STICKY because a real stream's is — a reader that
-//     produced its error once and then something else would not be a stream at
-//     all — and because the decoder above may well read again after the bytes it
-//     already holds.
+//     with then (sticky, like a real stream's failure).
 //   - then set, atOnce true: the payload and then arrive TOGETHER, in one read.
 //     That is the shape the end of a short response takes, the last bytes and the
 //     io.EOF in the same call.
@@ -148,10 +144,8 @@ func (r *scriptedReader) Read(p []byte) (int, error) {
 // error of any read that produced bytes — and then ends cleanly, as though nothing
 // had gone wrong.
 //
-// Real bodies do not behave like this; net/http and gzip both keep answering with
-// the same error once they have one. That is precisely why it is worth a stub: the
-// drain must not depend on a reader repeating itself to notice that the stream
-// failed, because a failure noticed nowhere is a pull reported as a success.
+// Real bodies repeat their error; this stub checks that the drain does not depend
+// on that.
 type oneShotErrorReader struct {
 	payload string
 	failure error
@@ -221,18 +215,13 @@ func newTestPuller(t *testing.T, srv *httptest.Server, stall time.Duration) *Pul
 	}
 }
 
-// pullWithin runs a Pull on a caller context with NO deadline, which is the
-// property every Pull test here depends on: the recreate HTTP handler passes
-// context.TODO(), so the stall bound is the only thing that can end a wedged pull,
-// and giving the caller a deadline would let that deadline do the work instead and
-// prove nothing.
+// pullWithin runs a Pull on a caller context with no deadline, so only the stall
+// bound can end a wedged pull, as with the recreate HTTP handler's context.TODO().
 //
-// Which is why the pull runs in a goroutine raced against a timer. A Pull that
-// failed to abort would block forever, and blocking in the test goroutine would
-// surface as go test's ten-minute panic — taking down every other test in the
-// package rather than failing this one. There is no require inside the goroutine
-// on purpose: testifylint's go-require rule forbids it, because t.FailNow from a
-// non-test goroutine does not actually stop the test.
+// The pull runs in a goroutine raced against a timer so a Pull that never aborts
+// fails this test instead of hitting go test's ten-minute panic. There is no
+// require inside the goroutine: t.FailNow from a non-test goroutine does not stop
+// the test (testifylint go-require).
 func pullWithin(t *testing.T, limit time.Duration, puller *Puller, img Image) error {
 	t.Helper()
 
@@ -252,16 +241,9 @@ func pullWithin(t *testing.T, limit time.Duration, puller *Puller, img Image) er
 	}
 }
 
-// TestDrainProgressLetsALongButTalkativeStreamFinish is the property the whole
-// change exists for: total elapsed time is not the question, silence is. A stream
-// that keeps producing must be allowed to run far past the stall timeout, because
-// the stall timeout is not a budget for the download — it is the length of the
-// quiet the pull is allowed to have.
-//
-// This test is what fails if anyone reintroduces a total-duration cut: the stream
-// here runs for well over twice the stall timeout while never being quiet for
-// more than a fraction of it, so any bound measured from the START of the drain
-// rather than from the LAST byte kills it.
+// TestDrainProgressLetsALongButTalkativeStreamFinish checks that the stall
+// timeout measures silence, not total time: the stream runs for over twice the
+// stall timeout while never being quiet for more than a fraction of it.
 func TestDrainProgressLetsALongButTalkativeStreamFinish(t *testing.T) {
 	t.Parallel()
 
@@ -290,10 +272,8 @@ func TestDrainProgressLetsALongButTalkativeStreamFinish(t *testing.T) {
 }
 
 // TestDrainProgressAbortsASilentStream is the other half of the same property: a
-// pull that has stopped producing is abandoned after the stall timeout and not a
-// download later. The bound that used to decide this was the caller's absolute
-// one — an hour in a recreate — which is the whole reason a wedged pull was worth
-// detecting separately.
+// pull that has stopped producing is abandoned after the stall timeout, not at
+// the caller's absolute bound.
 func TestDrainProgressAbortsASilentStream(t *testing.T) {
 	t.Parallel()
 
@@ -430,21 +410,10 @@ func TestDrainProgressReportsATransportFailureAsItself(t *testing.T) {
 // reports as an unexpected EOF and which must never be read as a pull that
 // finished.
 //
-// Two things can carry the evidence of the cut, and the cases below are sorted by
-// which one does. The reader may say so itself, by answering io.ErrUnexpectedEOF —
-// what a body cut off mid-chunk keeps returning — and then the drain has only to
-// take its word for it. Or the reader may end perfectly cleanly, with a plain
-// io.EOF, and then the ONLY trace left is the unterminated message sitting in the
-// decoder's buffer. Both are ordinary: the boundary cut is what a dropped
-// connection usually looks like, because the daemon flushes each progress line as
-// its own chunk, and a clean end after half a line is what an intermediary that
-// closed the connection deliberately looks like.
-//
-// A pull reported as successful in any of them would have Recreate rebuild the
-// container from the stale local image, which is the failure the whole drain exists
-// to stop. And an intermediary makes these likely rather than exotic: the longer a
-// download runs, the more chance a proxy, an agent tunnel or a restarted daemon has
-// to close the connection under it.
+// The cases are sorted by where the evidence is: the reader answers
+// io.ErrUnexpectedEOF itself, or it ends with a plain io.EOF and the only trace is
+// the unterminated message in the decoder's buffer (an intermediary closing the
+// connection half a line in).
 func TestDrainProgressFailsAStreamCutShortOfItsEnd(t *testing.T) {
 	t.Parallel()
 
@@ -525,16 +494,9 @@ func TestDrainProgressFailsAStreamCutShortOfItsEnd(t *testing.T) {
 	}
 }
 
-// TestDrainProgressKeepsAFailureAReaderReportedOnlyOnce covers the failure that is
-// said once and never again. A reader may return bytes and an error in the same
-// call, and the decoder drops the error of any read that produced bytes — so that
-// failure is recorded in one place only, and if a later clean io.EOF is allowed to
-// overwrite it, the drain asks how the stream ended, hears "cleanly", and reports a
-// pull that broken as an updated image.
-//
-// Production readers are sticky and would report it again, which is what makes this
-// worth pinning rather than leaving to luck: the property being kept is that the
-// drain does not DEPEND on them doing so.
+// TestDrainProgressKeepsAFailureAReaderReportedOnlyOnce checks that an error
+// returned together with bytes (which the decoder drops) is not overwritten by a
+// later clean io.EOF.
 func TestDrainProgressKeepsAFailureAReaderReportedOnlyOnce(t *testing.T) {
 	t.Parallel()
 
@@ -621,17 +583,8 @@ func TestDrainProgressAcceptsAnOrdinaryProgressStream(t *testing.T) {
 		"a pull the daemon completed must stay a success once its commentary is read rather than discarded")
 }
 
-// TestDrainProgressFailsOnAnInBandError is the failure this package used to
-// report as a SUCCESS. POST /images/create sends its 200 before most of the pull
-// happens, so everything that goes wrong afterwards is said in the body and then
-// the stream simply ends — which io.ReadAll and a byte drain both read as a pull
-// that finished.
-//
-// Reporting it as success is worse than losing the message: Recreate then builds
-// the new container from the image NAME, which on an auto-update still resolves to
-// the digest already on disk, so the workload is stopped, recreated from the STALE
-// image and restarted, the recreate claims success, and the next status check finds
-// it outdated and does it again — a restart loop with no error anywhere in it.
+// TestDrainProgressFailsOnAnInBandError checks that an errorDetail message in the
+// body of a 200 response, followed by a clean end of stream, fails the pull.
 func TestDrainProgressFailsOnAnInBandError(t *testing.T) {
 	t.Parallel()
 
@@ -741,14 +694,9 @@ func TestDrainProgressDegradesOnAMalformedStream(t *testing.T) {
 
 		const stall = 100 * time.Millisecond
 
-		// The payload has to FILL the decoder's buffer, not merely be unparseable: the
-		// decoder reads with io.ReadFull, which returns only once the free space is full
-		// or the reader fails, and this reader does neither on its own. 32 KiB of nonsense
-		// is what gets the decoder to give up and hand the rest to the byte drain, which
-		// is where the reader then answers (0, nil) as fast as it is asked, forever, and
-		// never looks at a cancelled context. Nothing bounds how often it is called except
-		// the pause after an empty read, and nothing ends the loop except the drain
-		// checking the idle clock itself.
+		// The payload has to fill the decoder's 32 KiB buffer (io.ReadFull returns only
+		// then or on a reader error) so the decoder gives up and hands over to the byte
+		// drain, where only the drain's own idle-clock check can end the loop.
 		progress := &busyReader{payload: strings.Repeat(garbageLine, 1024)}
 
 		_, cancel := context.WithCancel(t.Context())
@@ -855,14 +803,9 @@ func TestPullAbortsAStalledHTTPBodyRead(t *testing.T) {
 	require.Less(t, elapsed, 5*time.Second, "the blocked body read must actually be cut, not merely be given up on")
 }
 
-// TestPullAbortsAPullStuckBeforeTheResponseHeaders covers the phase an idle clock
-// armed inside the drain cannot see at all, which is also the longest guaranteed
-// silent one. ImagePull returns when the response HEADERS arrive, and the daemon
-// writes no header until its first write to the body, while its first line comes
-// only once the manifest has been fetched — so registry authentication and
-// manifest resolution happen entirely inside that call. A pull wedged there with
-// the clock started afterwards hangs for the caller's whole budget: an hour on the
-// manual recreate path, which has no deadline of its own at all.
+// TestPullAbortsAPullStuckBeforeTheResponseHeaders checks that the idle clock
+// already runs inside ImagePull, before the response headers arrive, where
+// registry auth and manifest resolution happen silently.
 func TestPullAbortsAPullStuckBeforeTheResponseHeaders(t *testing.T) {
 	t.Parallel()
 

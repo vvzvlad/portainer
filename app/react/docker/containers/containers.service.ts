@@ -231,9 +231,8 @@ function resolvePinnedLogPath(path: string): Promise<string> {
  * byte chunks to the caller as they arrive (`follow=1`). Bytes are handed over
  * undecoded so the caller can demux Docker's binary multiplexed frames at the
  * byte level (UTF-8-decoding the whole stream would corrupt frame headers). The
- * backend already
- * streams `follow=1` transparently through the Docker proxy — including for
- * Agent/Edge environments — so no backend change is needed.
+ * backend streams `follow=1` through the Docker proxy, including for Agent/Edge
+ * environments.
  *
  * Auth: the API uses an httpOnly JWT cookie (SameSite=Strict), so a same-origin
  * `fetch` with `credentials: 'include'` carries it automatically — no

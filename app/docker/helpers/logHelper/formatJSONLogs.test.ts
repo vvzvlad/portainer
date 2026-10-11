@@ -7,7 +7,7 @@ describe('formatJSONLine 0=d 1=e guard', () => {
     expect(lines).toHaveLength(1);
     // faithfully passes the raw line through instead of iterating its chars
     expect(lines[0].line).toBe(raw);
-    // would previously have produced "0=h 1=e 2=l ..." via Object.keys on a string
+    // Object.keys on a string would produce "0=h 1=e 2=l ..."
     expect(lines[0].line).not.toContain('0=h');
   });
 

@@ -96,12 +96,8 @@ type Service struct {
 	// same failed image and roll back again on the next tick (the update->rollback
 	// loop guard, mirroring the auto-heal retries map).
 	//
-	// This state is in-memory only and is NOT persisted: after a Portainer restart
-	// the map is empty, so at most one extra update->rollback cycle per restart is
-	// possible before the guard re-records the failed target. Persisting it would
-	// require a datastore schema (key + digest + timestamp) and is intentionally out
-	// of scope here; the cooldown-bounded single extra cycle is an acceptable
-	// trade-off against that complexity.
+	// In-memory only: after a Portainer restart at most one extra update->rollback
+	// cycle can happen before the guard re-records the failed target.
 	rolledBack map[string]rolledBackTarget
 
 	// updateHoldMu guards updateHolds.
@@ -113,16 +109,9 @@ type Service struct {
 	// resets Docker health to "starting", which makes the gate wait instead of
 	// rolling back and can get a failed update accepted as a good one.
 	//
-	// The interlock is one-way and advisory: it narrows the window, it does not
-	// eliminate the race. Auto-heal reads the hold at one line and calls
-	// ContainerRestart at another, so a restart decided a moment before the hold was
-	// taken still lands on a container an update is already acting on; and a restart
-	// already in flight when Recreate issues its ContainerStop and rename fights the
-	// recreate over the same container from the other side. There is no hold in the
-	// opposite direction either — auto-heal never blocks an update from starting.
-	//
-	// The entries are leases, not records: every hold is released by a defer in
-	// updateStandalone, so unlike retries/rolledBack this map needs no pruning.
+	// The interlock is one-way and advisory: it narrows the race with auto-heal but
+	// does not eliminate it, and auto-heal never blocks an update. Every hold is
+	// released by a defer in updateStandalone, so this map needs no pruning.
 	updateHolds map[string]updateHold
 }
 
@@ -228,11 +217,9 @@ func (s *Service) triggerWorker() {
 		// backing off and retrying guarantees this kick eventually runs a fresh pass
 		// that observes the just-pushed image, rather than being silently dropped.
 		//
-		// runPassRecovered wraps each attempt in a recover(): the poll path runs under
-		// the scheduler's cron.Recover, so a panic there is logged and the daemon
-		// survives. This webhook worker is a bare goroutine, so without its own
-		// recover an unrelated panic in the update pass (reachable by a token holder)
-		// would crash the whole process. Match the poll path's guarantee.
+		// runPassRecovered wraps each attempt in a recover(): unlike the poll path,
+		// which runs under cron.Recover, this worker is a bare goroutine and a panic
+		// would crash the process.
 		//
 		// runUpdatePass reports whether it acquired the lock only on return, so "ran" is
 		// logged after the acquiring attempt, with its duration to recover the start.
@@ -318,12 +305,9 @@ func (s *Service) Start() {
 // fresh ones with the new intervals, or leaves them stopped if disabled. It is
 // safe to call after a settings update.
 //
-// Note: stopping a job unschedules future ticks but does not interrupt a tick
-// already in progress. An in-flight heal/update pass runs to completion on its
-// original (pre-reload) context and is only cancelled by a server shutdown (via
-// baseCtx); the new interval takes effect from the next scheduled tick. The
-// overlap guards (running/updateRunning) and the per-map mutexes keep this safe
-// against data races, so this is a deliberate behavioural nuance, not a bug.
+// Stopping a job does not interrupt a tick in progress: an in-flight pass runs to
+// completion (only a server shutdown cancels it via baseCtx) and the new interval
+// applies from the next tick.
 func (s *Service) Reload() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -511,18 +495,11 @@ func (s *Service) releaseUpdateHoldByName(endpointID portainer.EndpointID, name 
 
 // heldByUpdate reports whether an auto-update pass is currently acting on this
 // container, by id or by its (recreate-stable) name, and when the hold was taken.
-// It is a pure lookup: use claimFirstSkipLog to consume the once-per-hold Info,
-// so that asking about the state — as tests and any future caller do — cannot
-// silently burn the one line an operator gets.
+// It is a pure lookup; claimFirstSkipLog consumes the once-per-hold Info.
 //
-// The id key is checked first and the name key second, the same order
-// claimFirstSkipLog uses, so with both taken the two agree on which hold they
-// mean whenever the map does not change between the two calls. They take
-// updateHoldMu separately, though, so if the id hold is released while the name
-// hold is still live, the claim may resolve a different hold than the lookup
-// reported. That costs at most a wrong held_for in one line — and it is the Info
-// one when the name hold's token is still unspent, so do not read this as a
-// Debug-only inaccuracy.
+// Keys are checked id first, then name, in the same order as claimFirstSkipLog.
+// The two calls lock separately, so a hold released in between can make the
+// claim resolve a different hold, costing at most a wrong held_for in one line.
 func (s *Service) heldByUpdate(endpointID portainer.EndpointID, containerID, name string) (since time.Time, held bool) {
 	// Both keys are built before the lock: the formatting has no business inside the
 	// critical section. An empty id or name is never held (the acquires refuse it),
@@ -547,15 +524,9 @@ func (s *Service) heldByUpdate(endpointID portainer.EndpointID, containerID, nam
 // event is rare per update, not per tick. A fresh hold on the same key starts
 // unclaimed, so the next update over that container is announced again.
 //
-// The lock is not about heal passes racing each other — heal() admits one pass at
-// a time via s.running.CompareAndSwap. It is about the heal pass racing the update
-// pass: two different scheduler jobs on two different goroutines, one reading and
-// marking this map while the other adds and drops holds in it.
-//
-// Callers ask heldByUpdate first and claim only if held, so the hold can in
-// principle be released in between; the claim then finds nothing and returns
-// false, and the skip is logged at Debug. That is harmless — and cheaper than
-// holding the mutex across the log call.
+// The lock guards against the update pass, which adds and drops holds on another
+// goroutine. If the hold is released between heldByUpdate and this call, the claim
+// returns false and the skip is logged at Debug.
 func (s *Service) claimFirstSkipLog(endpointID portainer.EndpointID, containerID, name string) bool {
 	keys := [2]string{updateHoldIDKey(endpointID, containerID), updateHoldNameKey(endpointID, name)}
 

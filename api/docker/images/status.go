@@ -33,14 +33,9 @@ const (
 
 const (
 	// statusCacheTTL bounds how long a computed image status is served from the
-	// statusCache. It is intentionally short (tied to the auto-update poll window),
-	// NOT the previous 24h: the cache key is the LOCAL imageID, which does not
-	// change when upstream pushes a new image under the same tag. A long TTL would
-	// therefore keep serving a stale "updated" status for up to a day, and the
-	// auto-update daemon (which resolves status through this same path) could not
-	// see a freshly-pushed image within its poll interval. A few minutes still
-	// absorbs bursts of badge lookups for the same image while re-checking the
-	// remote digest soon after an upstream push.
+	// statusCache. It is short (tied to the auto-update poll window) because the
+	// cache key is the LOCAL imageID, which does not change when upstream pushes a
+	// new image under the same tag.
 	statusCacheTTL            = 5 * time.Minute
 	errorStatusCacheTTL       = 5 * time.Minute
 	maxConcurrentStatusChecks = 8
@@ -186,12 +181,8 @@ func (c *DigestClient) containerImageStatus(ctx context.Context, containerID str
 	// (handler, ContainersImageStatus, the auto-update job) can skip the expensive,
 	// rate-limited remote registry digest lookup below on a hit; the container/image
 	// inspects above are cheap local Docker calls, the registry HEAD is the part
-	// worth avoiding. The entry TTL is deliberately short (statusCacheTTL): because
-	// the key is the local imageID, a new upstream image pushed under the same tag
-	// leaves the key unchanged, so a long TTL would keep serving a stale "updated"
-	// status (the full computation would now return "outdated") until it expired. A
-	// short TTL re-checks the remote digest within the poll window. Both Outdated
-	// and Skipped are cached too (only the error paths return early without caching).
+	// worth avoiding. The TTL is short (see statusCacheTTL). Outdated and Skipped
+	// are cached too; only the error paths return without caching.
 	//
 	// A forced re-check (force=true) skips this cached read and recomputes against
 	// the registry (see forcedImageStatus), then writes the fresh result back into

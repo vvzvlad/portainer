@@ -211,13 +211,8 @@ func newStand() *dockerStand {
 }
 
 // standDataStore is what every wiring hands the ContainerService. It is the
-// in-memory stub rather than a real store: the only thing reaching it here is the
-// image puller, which looks a registry up to authenticate the pull with, and the
-// stub's ViewTx never runs the callback it is given — so the registry slice stays
-// nil, findBestMatchRegistry finds no match in it, and the puller falls back to
-// pulling unauthenticated. That is what an anonymous pull from Docker Hub looks
-// like, and no test pays for a store on disk. A nil store would panic there
-// instead.
+// in-memory stub: its ViewTx never runs the callback, so the image puller finds
+// no registry and pulls unauthenticated. A nil store would panic there.
 func standDataStore() dataservices.DataStore {
 	return testhelpers.NewDatastore()
 }
@@ -401,13 +396,8 @@ func (s *dockerStand) blockNthCall(verb string, n int) {
 }
 
 // slowPull makes a pull stall for d PART WAY THROUGH its progress stream, after
-// the response headers and a first chunk have already gone out. The ordering is
-// the whole point of the helper: an image pull answers at once and then streams
-// progress for as long as the download takes, so what a fat image runs out of is
-// not the time to get an answer but the time to READ the body — and reading the
-// body is the part of the exchange the pull's own budget has to cover. blockCall
-// cannot stand in for this: it hangs before answering at all, which is a
-// different failure at a different point of the exchange.
+// the response headers and a first chunk have already gone out, as a slow
+// download does. blockCall instead hangs before answering at all.
 func (s *dockerStand) slowPull(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -953,31 +943,13 @@ func TestRecreatePullsTheImageBeforeReplacingTheContainer(t *testing.T) {
 	}, stand.recorded())
 }
 
-// TestRecreateGivesThePullAClientOfItsOwn pins the half of the fix that no
-// timing assertion can see: the pull is issued on a SECOND Docker client, built
-// with a timeout of its own, rather than on the short-timeout control-plane client
-// the rest of the recreate uses. Reusing that one is precisely the bug — it
-// carries the factory's 60s http.Client.Timeout, which bounds the whole exchange
-// including the reading of the progress stream, so any download longer than a
-// minute dies mid-stream.
+// TestRecreateGivesThePullAClientOfItsOwn checks that the pull is issued on a
+// second Docker client rather than the short-timeout control-plane client.
 //
-// The stand counts it through /_ping. The SDK negotiates its API version once per
-// client and that costs exactly one ping, so the ping count IS the number of
-// clients the recreate built and used: one without a pull, two with one. Were the
-// pull handed the control-plane client again, the second ping would never be
-// issued and the count would fall back to one.
-//
-// What this cannot see is the VALUE the second client's timeout was built with. A
-// pull runs under two bounds cut from one budget, and the context deadline is
-// armed before the request is sent, so the context always expires first and the
-// client's timeout never gets to fire — unless the exchange outlasts the factory's
-// 60s default, which is exactly the case no test here is willing to sit through. A
-// pull client built with a nil timeout would therefore pass this test while
-// quietly reinstating the 60s ceiling for tcp and agent endpoints; the local-socket
-// test below is unaffected either way, since a local client has no timeout at all.
-// That value is pinned instead by
-// TestRecreateAsksForThePullClientWithThePullBudget, which watches the factory
-// rather than the wire.
+// The SDK pings once per client to negotiate its API version, so the /_ping count
+// is the number of clients used: one without a pull, two with one. The timeout
+// value the pull client asks for is checked by
+// TestRecreateAsksForThePullClientWithThePullBudget.
 func TestRecreateGivesThePullAClientOfItsOwn(t *testing.T) {
 	t.Parallel()
 
@@ -999,12 +971,8 @@ func TestRecreateGivesThePullAClientOfItsOwn(t *testing.T) {
 
 // createClientCall is one CreateClient the service made, as it was asked for.
 //
-// The timeout is kept as a copy of the value the argument pointed at rather than
-// as the pointer itself: pullImage passes the address of a local budget variable,
-// so a recorder holding on to the pointer would report whatever that local
-// happens to contain by the time the assertion reads it, not what the call asked
-// for. A nil pointer here means the same as on the wire to the factory — "use
-// your default".
+// The timeout is a copy of the pointed-at value, because pullImage passes the
+// address of a local variable. A nil pointer means "use your default".
 type createClientCall struct {
 	nodeName string
 	timeout  *time.Duration
@@ -1032,26 +1000,11 @@ func (f *recordingFactory) CreateClient(endpoint *portainer.Endpoint, nodeName s
 	return f.ClientFactory.CreateClient(endpoint, nodeName, timeout)
 }
 
-// TestRecreateAsksForThePullClientWithThePullBudget pins the argument that
-// carries the fix: the timeout the pull's own client is BUILT with. The test
-// above pins that a second client exists at all; this one pins what it was asked
-// for, and only the two together cover the fix. Revert this one argument to nil
-// and the second client is still built, still used, still cut by its own context
-// in every test here — while every tcp and agent endpoint quietly goes back to the
-// factory's 60s ceiling and the outage returns.
-//
-// It has to be watched at the factory because there is nowhere else to watch it.
-// The budget disappears into an unexported http.Client.Timeout inside the SDK
-// client, and it never fires under test: the pull's context is armed first and so
-// always expires first, which leaves an exchange outlasting a whole minute as the
-// only one that could tell a 60s client from an hour-long one.
-//
-// Both calls are asserted, because the control-plane client asking for NO timeout
-// is a decision rather than an omission: it keeps the factory's 60s default, so an
-// engine that stops answering cannot pin a caller that brought no deadline of its
-// own. The recreate here runs with the default budget and a caller carrying no
-// deadline, which makes defaultPullTimeout the exact value the pull must ask for —
-// an assertion that fails both on a revert to nil and on a wrong value.
+// TestRecreateAsksForThePullClientWithThePullBudget checks, at the factory, the
+// timeout each client is built with: the control-plane client asks for none (the
+// factory's 60s default) and the pull client asks for defaultPullTimeout. The
+// timeout cannot be observed on the wire because the pull's context always
+// expires first.
 func TestRecreateAsksForThePullClientWithThePullBudget(t *testing.T) {
 	t.Parallel()
 
@@ -1083,18 +1036,9 @@ func TestRecreateAsksForThePullClientWithThePullBudget(t *testing.T) {
 		"the same node the rest of the recreate talks to")
 }
 
-// TestRecreateLeavesTheOriginalUntouchedWhenThePullOutlivesItsBudget is the
-// non-destructive half of the pull, and the property an operator actually depends
-// on when an image turns out to be bigger than the budget allows: the update did
-// not happen, and that is the whole of it. The pull runs before the first step
-// that takes the workload down, so a budget that fires here must leave the
-// original running under its own name with nothing to roll back — never a
-// container left in pieces because the download was too slow.
-//
-// The stall is served part way through the progress stream rather than before the
-// answer, which is how the bug bites in production: the budget has to cover the
-// reading of the body, not just the wait for an answer, and an image whose
-// download outlasts it is cut off mid-stream.
+// TestRecreateLeavesTheOriginalUntouchedWhenThePullOutlivesItsBudget checks that
+// a pull cut off mid-stream by its budget leaves the original running under its
+// own name with nothing to roll back: the pull runs before any destructive step.
 func TestRecreateLeavesTheOriginalUntouchedWhenThePullOutlivesItsBudget(t *testing.T) {
 	t.Parallel()
 
@@ -1126,18 +1070,10 @@ func TestRecreateLeavesTheOriginalUntouchedWhenThePullOutlivesItsBudget(t *testi
 	require.Equal(t, standName, stand.nameOf(standOldID), "under its own name")
 }
 
-// TestRecreateCutsAPullOnALocalEndpointByItsOwnContext pins the OTHER half of the
-// fix: the pull runs on a context with a deadline of its own, and not on the
-// caller's context as it stood.
-//
-// A unix-socket endpoint is what makes that half visible. createLocalClient
-// ignores the timeout argument entirely, so the pull client for a local endpoint
-// carries no http.Client.Timeout at all and the context is the only bound the pull
-// has — the same is true of npipe:// on Windows, and of every Portainer managing
-// the engine it runs beside. The caller here brings no deadline, exactly like the
-// recreate HTTP handler, which passes context.TODO(). Take the pull's own context
-// away and there is nothing left to cut the download: the stall would simply run
-// to completion and the recreate would succeed.
+// TestRecreateCutsAPullOnALocalEndpointByItsOwnContext checks that the pull runs
+// on a context with its own deadline. On a unix-socket endpoint createLocalClient
+// ignores the timeout, so that context is the only bound; the caller here brings
+// no deadline, like the recreate HTTP handler.
 func TestRecreateCutsAPullOnALocalEndpointByItsOwnContext(t *testing.T) {
 	t.Parallel()
 
@@ -1183,14 +1119,9 @@ func TestRecreatePullTargetsTheSameNodeAsTheRecreate(t *testing.T) {
 	require.Equal(t, standNodeName, stand.target("create"), "the same node the new container is built on")
 }
 
-// TestPullBudgetFallsBackToTheDefaultBudget guards the zero value the way
-// TestRestoreContextFallsBackToTheDefaultBudget does for the restore: a
-// ContainerService built without NewContainerService — the way an embedder builds
-// one — carries no pull budget, and a zero timeout is an already-expired context.
-// Read straight, it would fail every forced pull before the request left the
-// process, which is not a slow pull but a recreate that can never pull at all.
-// The accessor is only half of it, so the fallback is carried through to a real
-// forced-pull recreate as well.
+// TestPullBudgetFallsBackToTheDefaultBudget checks that a ContainerService built
+// without NewContainerService uses the default pull budget instead of a zero
+// (already-expired) one, both in the accessor and in a real forced-pull recreate.
 func TestPullBudgetFallsBackToTheDefaultBudget(t *testing.T) {
 	t.Parallel()
 
@@ -1248,17 +1179,9 @@ func TestPullBudgetReservesAShareOfTheCallersDeadline(t *testing.T) {
 		"an expired caller yields an expired pull, never an unbounded one")
 }
 
-// TestPullImageRefusesAnAlreadySpentBudget covers the one branch where BOTH bounds
-// pullImage cuts from its budget would otherwise be missing. A caller whose
-// deadline has passed leaves a non-positive budget, and net/http reads a
-// non-positive http.Client.Timeout as NO timeout — so handing that value to the
-// factory builds exactly the unbounded client the timeout argument exists to
-// prevent, on a context that is already dead. No client is built at all instead.
-//
-// The error matters as much as the missing client: ctx.Err() can still be nil for
-// the instant after a deadline passes, and a nil coming back from here would be
-// read as a pull that succeeded — a forced recreate would go on to take the
-// workload down having pulled nothing.
+// TestPullImageRefusesAnAlreadySpentBudget checks that a non-positive budget
+// builds no client (net/http reads a non-positive Timeout as none) and returns a
+// non-nil error even when ctx.Err() is still nil.
 func TestPullImageRefusesAnAlreadySpentBudget(t *testing.T) {
 	t.Parallel()
 
@@ -1598,12 +1521,10 @@ func TestRecreateIgnoresAnAlreadyRemovedNewContainer(t *testing.T) {
 	require.Equal(t, standName, stand.nameOf(standOldID), "the freed name did go back to the original")
 }
 
-// TestRecreateReportsRestoreErrorWhenTheLeftoverNewContainerBlocksTheOriginal is
-// the regression guard on the other side of the verdict: dropping the removal
-// failure out of the verdict must not drop it out of the REPORT. Here the new
-// container survives, keeps the original name so the rename back is refused, and
-// the original does not come up — the workload is down, and the operator needs to
-// read why in one place.
+// TestRecreateReportsRestoreErrorWhenTheLeftoverNewContainerBlocksTheOriginal
+// checks that a removal failure still appears in the report even though it does
+// not decide the verdict: the new container survives, keeps the original name so
+// the rename back is refused, and the original does not come up.
 func TestRecreateReportsRestoreErrorWhenTheLeftoverNewContainerBlocksTheOriginal(t *testing.T) {
 	t.Parallel()
 
@@ -1636,14 +1557,9 @@ func TestRecreateReportsRestoreErrorWhenTheLeftoverNewContainerBlocksTheOriginal
 	require.False(t, stand.isRunning(standOldID))
 }
 
-// TestRecreateReportsAnIncompleteRestoreWhileTheOriginalRuns is the honesty of
-// the verdict at its edge: the original is serving again, so nothing is "down",
-// but it did not come back the way it was. A container still carrying "-old" is
-// not reachable under its own name by a stack peer, and the next auto-update
-// pass would find and recreate THAT container instead; a container that came
-// back without a network is running blind. Both must reach the caller as a
-// *RestoreError that says the workload is up, not as a plain failed recreate
-// that says everything is fine.
+// TestRecreateReportsAnIncompleteRestoreWhileTheOriginalRuns checks that an
+// original running again but still named "-old" or missing a network is reported
+// as a *RestoreError with OriginalRunning true, not as a plain failed recreate.
 func TestRecreateReportsAnIncompleteRestoreWhileTheOriginalRuns(t *testing.T) {
 	t.Parallel()
 
@@ -1717,14 +1633,9 @@ func TestRecreateReportsAnIncompleteRestoreWhileTheOriginalRuns(t *testing.T) {
 	}
 }
 
-// TestRecreateKeepsBudgetForTheOriginalWhenAnEarlyStepHangs guards the split of
-// the restore budget. Everything in a restore shares one deadline, but the
-// teardown of the new container and the inspect that plans the rollback both run
-// BEFORE the calls that put the original back: either one wedged on a stuck runc
-// or an unresponsive engine would otherwise spend the whole window and leave the
-// rename back, the reconnects and the start — the calls that decide whether the
-// workload is down — without a single attempt, turning a recoverable failure into
-// an outage.
+// TestRecreateKeepsBudgetForTheOriginalWhenAnEarlyStepHangs checks the split of
+// the restore budget: a hanging teardown or planning inspect must leave time for
+// the rename back, the reconnects and the start of the original.
 func TestRecreateKeepsBudgetForTheOriginalWhenAnEarlyStepHangs(t *testing.T) {
 	t.Parallel()
 
@@ -2048,14 +1959,10 @@ func TestRecreateDoesNotBlameAStopThatFoundNothingToStop(t *testing.T) {
 	requireNoCall(t, stand.recorded(), "start:"+standOldID)
 }
 
-// TestRecreateBlamesAStopWhoseAnswerWasLostForAReapedOriginal is the other edge of
-// the same line, and the one that decides how narrow the "nothing to stop" proof
-// has to be: a --rm container whose stop FAILED — the answer lost on a reset
-// connection — while the engine carried it out anyway and reaped the container for
-// it. That is the #36 class exactly, and the container is gone because of this
-// recreate. Only "no such container" proves otherwise, so anything looser than a
-// 404 here silently turns every lost stop answer on a --rm container into "not our
-// doing" and drops a real outage on the floor.
+// TestRecreateBlamesAStopWhoseAnswerWasLostForAReapedOriginal covers a --rm
+// container whose stop failed (answer lost on a reset connection) while the
+// engine carried it out and reaped the container. Only a "no such container" 404
+// proves the recreate did not take it down, so this must be reported as an outage.
 func TestRecreateBlamesAStopWhoseAnswerWasLostForAReapedOriginal(t *testing.T) {
 	t.Parallel()
 

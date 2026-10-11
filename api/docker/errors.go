@@ -12,28 +12,19 @@ var (
 )
 
 // RestoreError reports that a failed recreate could not fully put the original
-// container back the way it was. It is deliberately distinct from a plain
-// recreate failure: the latter ends with the workload serving exactly as before
-// and needs nobody, this one always needs a human.
+// container back the way it was. Unlike a plain recreate failure, which leaves
+// the workload serving as before, it always needs a human.
 //
-// OriginalRunning splits it into the two outcomes an operator has to act on
-// differently, and it is the field to branch on — the wording of Error() is not
-// machine-readable:
+// Branch on OriginalRunning, not on the wording of Error():
 //
-//   - false: nothing is running, as far as anyone can tell. The original was torn
-//     down and could not be started again, which is an outage. StateUnknown is
-//     the sub-case where the original's state could not be read at all: false
-//     there is a conservative assumption rather than an observation.
-//   - true: the original is serving again, but not as it was — it may still carry
-//     the "-old" name (so a stack peer resolving it by name does not find it, and
-//     the next auto-update pass would recreate the wrong container) or be missing
-//     a network. Degraded, and it stays degraded until someone fixes it.
+//   - false: the original is down, an outage. With StateUnknown its state could
+//     not be read at all, and false is an assumption.
+//   - true: the original is serving but may still carry the "-old" name or be
+//     missing a network, which does not fix itself.
 //
-// Recreate builds one whenever the original was not observed back exactly as it
-// was, and NOT for a recreate that merely left something untidy without touching
-// the original (a new container that could not be removed while everything else
-// came back), nor for a restore whose calls were refused while the container
-// nevertheless ended up as it started.
+// Recreate builds one only when the original was not observed back exactly as it
+// was; leftovers that did not touch the original (an unremovable new container)
+// do not count.
 type RestoreError struct {
 	// ContainerID is the original container that could not be restored.
 	ContainerID string

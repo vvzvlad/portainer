@@ -278,16 +278,12 @@ const plantedValue = "Zt9mLr5Vb2nHd8Xk7pQw3"
 
 // resolverAt returns a real secretresolver client - not a stub - talking to handler.
 //
-// The table below is as much a pin on the client's error strings as on this package's,
-// and a stub would pin neither: the whole point is that the two halves cannot drift
-// apart without the test noticing.
+// The table below pins the client's error strings as well as this package's, so the two
+// cannot drift apart.
 //
-// The endpoint carries no credential, and cannot: secretresolver.New refuses one, because
-// the endpoint is PORTAINER_SECRET_RESOLVER and compose interpolates that into every
-// project. What it can still carry into these messages is its host and port - an ephemeral
-// httptest one here, which is why the cases built on this helper assert on the diagnostic
-// they must keep rather than on the address. The two cases that do assert on a host and port
-// name a fixed one and are configured through the environment, not through this helper.
+// The httptest address is ephemeral, so cases built on this helper assert on the
+// diagnostic rather than the address; the two cases that assert on a host and port are
+// configured through the environment.
 func resolverAt(t *testing.T, timeout time.Duration, handler http.HandlerFunc) secretFetcher {
 	t.Helper()
 
@@ -310,15 +306,9 @@ func resolverFor(t *testing.T, endpoint string, timeout time.Duration) secretFet
 // assertNoValueLeak fails when text carries value in any form in which a value can
 // really turn up in foreign text.
 //
-// A raw case-sensitive substring search is weaker than the claim it stands for: it would
-// miss a value that arrived lowercased, %q- or JSON-escaped, or as a fragment that does
-// not start at byte 0. The forms therefore come from redactionForms - the production
-// code's own enumeration of exactly those transformations - so the assertion cannot fall
-// behind what the neighbouring code already knows about the threat.
-//
-// On top of the forms, every window of the value of minRedactableLength bytes is checked
-// case-insensitively, which catches a fragment split some way nothing has thought of yet.
-// The shortest windows are enough: any leak of at least that many bytes contains one.
+// The forms come from redactionForms (lowercased, %q- or JSON-escaped, split fragments).
+// On top of them, every minRedactableLength-byte window of the value is checked
+// case-insensitively: any leak of at least that many bytes contains one.
 func assertNoValueLeak(t *testing.T, text, value string) {
 	t.Helper()
 
@@ -341,16 +331,10 @@ func assertNoValueLeak(t *testing.T, text, value string) {
 // Test_resolveStackSecrets_errorPathsCarryNoSecretValue drives every error that can
 // leave resolveStackSecrets and asserts that none of them carries a resolved value.
 //
-// This is the pin for the classification recorded in docs/secret-resolver.md §3.12:
-// these errors deliberately do not go through the withholding mechanism - at the point
-// they are raised nothing has been resolved yet, so redactSecretValues would have
-// nothing to redact against - and they are safe only because every component of every
-// message is built by Portainer from data that is already public in the stack config:
-// the stack name, a variable name, a reference, an env var name, an HTTP status. The
-// single exception is the resolver's own error field, which is contractually free of
-// secret values and bounded in size by the client.
-//
-// So if a new error path ever starts carrying a value, this test fails.
+// See docs/secret-resolver.md §3.12: these errors are raised before anything is resolved,
+// so they skip withholding, and are safe because every part of the message is public stack
+// config (stack name, variable name, reference, env var name, HTTP status) or the
+// resolver's own error field, which is free of secret values and size-bounded.
 func Test_resolveStackSecrets_errorPathsCarryNoSecretValue(t *testing.T) {
 	// One case needs a misconfigured client, which is reachable only through the
 	// environment, and t.Setenv forbids t.Parallel.
@@ -433,10 +417,9 @@ func Test_resolveStackSecrets_errorPathsCarryNoSecretValue(t *testing.T) {
 				case <-time.After(2 * time.Second):
 				}
 			}),
-			// The client no longer wraps a transport error - net/http quotes
-			// resolver-written header text in those - so the message carries its own
-			// classification of the failure rather than "context deadline exceeded". The
-			// sentinel is still reachable with errors.Is; see
+			// The client does not wrap a transport error (net/http quotes
+			// resolver-written header text in those), so the message carries its own
+			// classification; the sentinel is still reachable with errors.Is. See
 			// TestFetchClassifiesATransportFailure in pkg/secretresolver.
 			contains: "no answer within",
 		},
@@ -649,12 +632,8 @@ func Test_Up_withholdsTheDeployerErrorWhenSecretsWereResolved(t *testing.T) {
 		// This is the case that tells withholding apart from redaction, which every other
 		// subtest here would pass either way.
 		//
-		// redactionForms derives its forms from the whole value and from the fragments
-		// left by splitting it on ":", "/" and ",". A value split on "-" produces none of
-		// them, so an error carrying one such fragment - and nothing else of the value -
-		// goes through redactSecretValues untouched. Only withholding the text protects
-		// it, and this subtest fails the moment the deployer's error is let through and
-		// merely redacted.
+		// redactionForms splits the value on ":", "/" and ",", not "-", so a "-"-split
+		// fragment passes redactSecretValues untouched; only withholding protects it.
 		fragment := "Zt9mLr5"
 		require.Contains(t, distinctValue, fragment)
 
@@ -1067,13 +1046,9 @@ func Test_SwarmStackManager_Deploy_unescapesAValueThatOnlyLooksLikeAReference(t 
 	assert.Equal(t, []string{"APP_URI=" + escapedLiteralValue}, deployer.options.Env)
 }
 
-// Test_escapedValuesAreAnnounced pins the one place the marker changes a stack silently.
-//
-// Every other consequence of it is loud: a reference with no resolver fails the deploy, a
-// reference on the swarm or unpacker path is refused by name. But an existing stack whose
-// value happens to begin with "secret::" deploys successfully here with a value one colon
-// shorter than vanilla Portainer gives it, and without this line nothing would tell the
-// operator that the value the container received is not the value the stack stores.
+// Test_escapedValuesAreAnnounced checks that unescaping a value beginning with "secret::"
+// is logged: the container receives a value one colon shorter than the stack stores, and
+// this log line is the only signal of that.
 //
 // It captures the global logger, so it does not run in parallel.
 func Test_escapedValuesAreAnnounced(t *testing.T) {
@@ -1280,17 +1255,9 @@ func hostileName(prefix, filler string) string {
 
 // worstCaseQuotedNameBytes is the most one bounded name can occupy once %q has printed it.
 //
-// Measured from the production helper rather than written down, so that it tracks maxNameBytes
-// and the truncation marker without this file knowing either number. A name of nothing but
-// invalid UTF-8 is the worst input TruncateName can be handed, and strconv.Quote is what fmt's
-// %q calls for a string. It comes to 1029 bytes today - 4 per bounded byte, plus the marker and
-// the two quotes - against 261 for a bounded name of 'A'.
-//
-// One assumption remains, and it is what the mebibyte buys: the probe has to be LONGER than
-// maxNameBytes. Below that, TruncateName hands it straight back, no marker is appended, and the
-// figure stops tracking the bound - a 1 KiB probe froze at 4098 for every maxNameBytes of 1024
-// or more, and the tests below go red at 2048. 1<<20 is the same mebibyte hostileName already
-// uses and exceeds any plausible value of maxNameBytes; at today's 256 it measures identically.
+// Measured from the production helper so it tracks maxNameBytes and the truncation marker. A
+// name of invalid UTF-8 is the worst input (4 printed bytes per byte under %q). The probe must
+// be longer than maxNameBytes, or TruncateName returns it unchanged; 1<<20 is far above it.
 var worstCaseQuotedNameBytes = len(strconv.Quote(secretresolver.TruncateName(strings.Repeat("\xff", 1<<20))))
 
 // maxFixedMessageBytes is the allowance for everything in one of these messages that is not a
@@ -1337,23 +1304,10 @@ func assertBoundedAndEscaped(t *testing.T, err error, wantNamed ...string) {
 	}
 }
 
-// Test_secretErrors_boundAndEscapeHostileNames pins both halves of the fix at every site in
-// this package that names a stack or a variable in an error raised on the deploy path.
-//
-// The channel: stackutils.UpdateStackStatusFromDeploymentResult writes these messages verbatim
-// into Stack.DeploymentStatus[].Message, which Portainer persists and StackInspect serves back
-// to operators and to agents. Neither name is validated on the way in - a stack's Env comes
-// straight out of the request body, and a stack name reaches the database unnormalised through
-// POST /stacks/{id}/migrate - so both the length and the bytes are the caller's.
-//
-// Measured on a copy with these inputs before the fix, a mebibyte in the variable name and an
-// ordinary stack name: SwarmStackManager.Deploy 1048700 bytes with the NUL, the ESC and the
-// newline intact, and "no value resolved" 1048649 bytes - escaped by the %q it already had,
-// and a mebibyte all the same, which is the half %q does not close. A mebibyte in both names
-// put the swarm refusal over 2 MiB.
-//
-// Reverting either half of the fix at any one site fails this test at that site: dropping the
-// bound fails the size assertion, dropping %q fails the control-byte assertion. See
+// Test_secretErrors_boundAndEscapeHostileNames checks that every site in this package that
+// names a stack or a variable in a deploy error both bounds the name (size assertion) and
+// quotes it with %q (control-byte assertion). These messages are persisted verbatim in
+// Stack.DeploymentStatus[].Message, and neither name is validated on the way in. See
 // secretresolver.TruncateName.
 //
 // Every site is run once per byte class in hostileFillers, because the bound applies to the

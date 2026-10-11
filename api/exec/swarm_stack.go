@@ -42,11 +42,8 @@ func (manager *SwarmStackManager) Deploy(
 	// refuse instead - the same rule ComposeStackManager.resolveStackSecrets applies
 	// when no resolver is configured.
 	//
-	// Checked before the proxy is fetched: a deploy that is refused outright has no
-	// reason to open an endpoint proxy and close it again.
-	//
-	// Both names bounded and quoted, as at every site that names one in a persisted deploy
-	// error; see secretresolver.TruncateName.
+	// Checked before the proxy is fetched. Both names are bounded and quoted, as at every
+	// site that names one in a persisted deploy error; see secretresolver.TruncateName.
 	for _, ev := range stack.Env {
 		if secretresolver.IsReference(ev.Value) {
 			return fmt.Errorf("stack %q: variable %q uses a secret reference, but secret references are not supported for swarm stacks",
@@ -56,14 +53,9 @@ func (manager *SwarmStackManager) Deploy(
 
 	filePaths := stackutils.GetStackFilePaths(stack, true)
 
-	// A reference written inline in the body is refused for the same reason, and here it is
-	// the only thing that can catch it: the compose path rewrites such a body before it is
-	// deployed, and nothing on this path does.
-	//
-	// An escaped marker in a body is not a reference and keeps passing through verbatim,
-	// unlike an escaped variable, which is unescaped below. Swarm takes the body as it
-	// stands, so the escape would have to be resolved by rewriting the file, which is what
-	// this path deliberately does not do.
+	// A reference written inline in the body is refused too, since this path does not
+	// rewrite bodies. An escaped marker in a body passes through verbatim, unlike an
+	// escaped variable, which is unescaped below.
 	for _, filePath := range filePaths {
 		_, refs, err := readStackComposeFile(stack, filePath)
 		if err != nil {

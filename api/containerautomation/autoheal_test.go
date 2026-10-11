@@ -142,28 +142,10 @@ func TestRetryStateSurvivesStartingTick(t *testing.T) {
 	}
 }
 
-// TestHealContainersSkipsContainersHeldByAnUpdate locks in the auto-heal side of
-// the interlock with auto-update. While an update pass holds a container
-// (recreate -> health gate -> rollback), auto-heal must not restart it: a restart
-// mid-gate resets Docker health to "starting", so the gate keeps waiting instead
-// of rolling back and a failed update can be accepted as a good one.
-//
-// Both keys are covered. A hold by id is the ordinary case; a hold by NAME is the
-// one the recreate window produces, where the running container is brand new, its
-// id has never been seen by anybody, and the name is the only thing tying it to
-// the update in progress.
-//
-// A hold also has to be pinned across ticks, not merely honoured on the first
-// one: it spans the whole recreate plus the gate window, i.e. many heal ticks,
-// and auto-heal must suppress every one of them. Folding the lookup and the
-// once-per-hold log claim into one condition would honour only the first tick
-// and restart the container mid-gate on every tick after it — the exact
-// failure this interlock exists to prevent.
-//
-// The skip is also free: it happens before the retry accounting, so a held tick
-// does not consume the container's restart budget and healing resumes with a full
-// budget once the hold is released. Holds are endpoint-scoped, so the same
-// container on another environment is unaffected.
+// TestHealContainersSkipsContainersHeldByAnUpdate checks that auto-heal does not
+// restart a container held by an update pass, by id or by name, on every tick the
+// hold lasts (not only the first), without consuming the restart budget, and only
+// on the endpoint that holds it.
 func TestHealContainersSkipsContainersHeldByAnUpdate(t *testing.T) {
 	const (
 		containerID    = "c1"

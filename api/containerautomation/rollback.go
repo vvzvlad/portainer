@@ -239,12 +239,8 @@ func isTagReference(ref string) bool {
 // keeps polling and only declares the update failed after more than
 // maxConsecutiveInspectErrors consecutive failures, resetting on any success.
 //
-// Scheduling note (known limitation): this poll runs inside the sequential update
-// tick, so N unhealthy standalone containers with rollback enabled can each hold
-// the tick for up to their rollback window, delaying other containers/endpoints
-// in the same tick. The overlap guard in update() still prevents ticks from
-// piling up; this is accepted rather than re-architected (no per-container
-// goroutine) to keep the update path simple and ordered.
+// The poll runs inside the sequential update tick, so each gated container can
+// delay the rest of the tick by up to its rollback window.
 func (s *Service) healthGate(cli dockerClient, containerID string, timeout, startPeriod time.Duration) gateResult {
 	if timeout <= 0 {
 		timeout = defaultRollbackTimeout

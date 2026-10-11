@@ -2,10 +2,8 @@
 
 // This file runs the client against a REAL secret_resolver process instead of against a
 // handwritten server, and it is behind a build tag so that `go test ./...` never needs one.
-// Everything else in this package's tests states what the client does with a server this
-// repository wrote; nothing until now stated that the other implementation of the protocol
-// agrees. The two are developed in separate repositories, so "both sides pass their own
-// tests" is exactly the condition under which a wire mismatch ships unnoticed.
+// The resolver lives in a separate repository, so this is what catches a wire mismatch
+// between the two implementations of the protocol.
 //
 // ci/secretresolver-integration/run.sh is what brings the other side up (a resolver on a unix
 // socket, backed by a fake `rbw`) and sets the endpoint this file reads. Without it the test

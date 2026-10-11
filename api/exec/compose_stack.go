@@ -41,15 +41,9 @@ type ComposeStackManager struct {
 	// state of any deployment whose stacks still carry literal env values.
 	secretResolver secretFetcher
 
-	// statEnvFile is os.Stat when nil, which it is everywhere but in the test that proves
-	// warnAboutStaleEnvFile performs no filesystem call at all for a stack that uses no
-	// secret references. That property - no extra I/O on the unpatched path - is otherwise
-	// held only by the order of the two len() checks, which a refactor can reorder without
-	// anything noticing.
-	//
-	// A field and not a package-level variable: a global seam is shared state between
-	// tests, so it silently forbids t.Parallel on this test and on every neighbouring one
-	// that happens to deploy a stack.
+	// statEnvFile is os.Stat when nil. A test sets it to prove warnAboutStaleEnvFile
+	// performs no filesystem call for a stack without secret references. It is a field,
+	// not a package variable, so tests that deploy stacks can still run in parallel.
 	statEnvFile func(name string) (os.FileInfo, error)
 }
 
@@ -60,21 +54,13 @@ func NewComposeStackManager(deployer libstack.Deployer, proxyManager *proxy.Mana
 		proxyManager: proxyManager,
 	}
 
-	// The resolver is configured from the environment rather than taken as an
-	// argument: this constructor is called from the composition root, and a changed
-	// signature is a conflict that every future rebase of this fork has to resolve.
+	// The resolver comes from the environment rather than an argument, so the
+	// constructor signature stays the same as upstream's (fewer rebase conflicts).
 	//
-	// FromEnv returns a typed nil *Client when no resolver is configured. Assigning
-	// that straight into the interface field would yield a non-nil interface holding
-	// a nil pointer, so the "no resolver configured" check in resolveStackSecrets
-	// would silently pass and the deploy would go on to call Fetch.
-	//
-	// Client.Fetch guards its own nil receiver and fails closed, so this is not the
-	// only thing standing between a reference and a container - do not delete that
-	// guard on the strength of this one, or the other way round. What this assignment
-	// buys is the accurate diagnosis: "no secret resolver is configured, set
-	// PORTAINER_SECRET_RESOLVER" rather than a resolver failure on a resolver that
-	// was never there.
+	// FromEnv returns a typed nil *Client when no resolver is configured; assigning it
+	// directly would make a non-nil interface and skip the "no secret resolver is
+	// configured" diagnosis in resolveStackSecrets. Client.Fetch also fails closed on a
+	// nil receiver.
 	if resolver := secretresolver.FromEnv(); resolver != nil {
 		manager.secretResolver = resolver
 	}
@@ -94,9 +80,8 @@ func (manager *ComposeStackManager) Up(ctx context.Context, stack *portainer.Sta
 	// refuses a reference in the same order, in the Env field and in a body alike.
 	//
 	// DeployRemoteComposeStack, the compose-unpacker path, refuses one in the Env field
-	// only: scanning a body would mean reading the stack's files on a path that never
-	// reads them, and that path is unreachable in CE anyway - every entry point into it
-	// is gated by stackutils.IsRelativePathStack, which is a hardcoded false here.
+	// only; that path never reads the stack's files and is unreachable in CE
+	// (stackutils.IsRelativePathStack is hardcoded false).
 	secrets, err := manager.resolveStackSecrets(ctx, stack)
 	if err != nil {
 		return err
@@ -267,13 +252,11 @@ type stackSecrets struct {
 	// projectDir is the directory of the stack's FIRST ORIGINAL compose file, and it is
 	// passed to the deployer on every deploy, rewritten or not.
 	//
-	// There is no docker compose process on this path: compose-go runs in-process and
-	// resolves every relative path in a body - a build context, a bind mount source, an
-	// env_file, an include - against filepath.Dir(configFilepaths[0]) unless
-	// libstack.Options.ProjectDir says otherwise. A rewritten copy lives in a temporary
-	// directory, so without this every relative path in that body would silently start
-	// meaning a path under /tmp. Setting it is an exact no-op when nothing was rewritten,
-	// because it is then the very directory compose-go would have derived itself.
+	// compose-go resolves relative paths in a body (build context, bind mounts,
+	// env_file, include) against filepath.Dir(configFilepaths[0]) unless
+	// libstack.Options.ProjectDir is set. A rewritten copy lives in a temporary
+	// directory, so this keeps relative paths pointing at the original directory; with
+	// nothing rewritten it is the directory compose-go would derive anyway.
 	projectDir string
 
 	// cleanup removes the temporary directory holding the rewritten copies. Non-nil on
@@ -289,9 +272,9 @@ type stackSecrets struct {
 // Values marked as references are fetched from the resolver in a single batch and
 // returned as "NAME=value" entries for libstack.Options.Env, which compose applies
 // with the highest precedence of all its environment sources and which is never
-// serialised anywhere. That is the whole point of the design: a resolved value must
-// not reach stack.env, the project directory, or a Portainer backup. The remaining
-// literal pairs are returned untouched for the env file.
+// serialised anywhere: a resolved value must not reach stack.env, the project
+// directory, or a Portainer backup. The remaining literal pairs are returned
+// untouched for the env file.
 //
 // compose interpolates ${VAR} and nothing else, so a reference written inline in a body
 // cannot be reached through Options.Env alone: the body itself has to be rewritten, its
@@ -473,19 +456,11 @@ func readStackComposeFile(stack *portainer.Stack, filePath string) ([]byte, []st
 // paths to deploy.
 //
 // Only a file that actually changed gets a copy; every other one is deployed from where it
-// has always been, so a stack that uses no references in its bodies deploys exactly the
-// files it always did. The copies carry placeholders and never a value, but they are still
-// not the operator's files and have no business outliving the deploy, hence the returned
-// cleanup.
+// is. The copies carry placeholders, never a value, and are removed by the returned cleanup.
 //
-// The temporary path does reach one persisted place: compose stamps the file list into the
-// com.docker.compose.project.config_files label of every container it creates, so a stack
-// deployed this way carries a label naming a directory that cleanup has already removed.
-// That is cosmetic and, in particular, causes no container churn: the label lives in
-// ServiceConfig.CustomLabels, which is `yaml:"-" json:"-"`, and compose hashes a service by
-// json.Marshal of that struct - so the changing path is not part of the hash that decides
-// whether a container is recreated. Only "docker compose ls" reads the label back, and only
-// to print it.
+// The temporary path ends up in the com.docker.compose.project.config_files label. That
+// causes no container churn: the label lives in ServiceConfig.CustomLabels (`json:"-"`),
+// which is not part of compose's service hash.
 func rewriteStackFiles(stack *portainer.Stack, filePaths []string, contents [][]byte, names [][]string) ([]string, func(), error) {
 	// A no-op until a temporary directory exists, so that the error paths below can call it
 	// unconditionally. What is RETURNED follows stackSecrets.cleanup: non-nil on every
@@ -604,16 +579,11 @@ const (
 // interpolation, service validation and the schema. Whatever that error says is
 // stored by stackutils.UpdateStackStatusFromDeploymentResult as the stack's
 // deployment status message and served back by StackInspect, so letting it through
-// would put a live credential permanently into Portainer's database and API -
-// precisely the channel this feature exists to close. A mistyped reference is the
-// likeliest trigger.
+// would persist a live credential in Portainer's database and API.
 //
-// Redacting that text instead was tried and cannot be made safe. The value reaches
-// the message escaped by strconv.Quote on some paths, and as a ":"- or "/"-split,
-// lowercased fragment on others, so searching for the value does not necessarily
-// find it. The error text is untrusted data with respect to secret content, and
-// untrusted text cannot be reliably sanitised by blacklist. It is therefore withheld
-// in full, with a redacted copy sent to the server log as a defence in depth.
+// Redaction cannot be made safe: the value may appear %q-escaped or as a split,
+// lowercased fragment. The text is therefore withheld in full, and a redacted copy
+// goes to the server log.
 type withheldError struct {
 	err       error
 	operation string
@@ -621,13 +591,9 @@ type withheldError struct {
 }
 
 // Error returns a fixed description built from the stack name and the operation.
-// Nothing derived from the deployer's text appears in it.
-//
-// "Fixed" was true of the operation, which is a literal at every call site, and not of the
-// stack name, which arrives in the request body and had no bound: a mebibyte of it came back
-// as a 1048781-byte message, persisted. Bounded here rather than at the two field
-// assignments, so that the bound sits at the format verb like every other one on this path;
-// see secretresolver.TruncateName.
+// Nothing derived from the deployer's text appears in it. The stack name comes from the
+// request body unbounded, so it is truncated at the format verb; see
+// secretresolver.TruncateName.
 func (e *withheldError) Error() string {
 	return fmt.Sprintf("%s %q: the underlying error is withheld because this stack resolves secret references and compose quotes offending values verbatim, see the Portainer server log for the redacted text", e.operation, secretresolver.TruncateName(e.stackName))
 }
@@ -828,21 +794,13 @@ func (manager *ComposeStackManager) prepareEnvFile(stack *portainer.Stack, liter
 // warnAboutStaleEnvFile reports an env file left behind by a stack whose variables
 // have all migrated to secret references.
 //
-// createEnvFile writes nothing when there is no literal pair left, which is exactly
-// the state a fully migrated stack reaches - so the stack.env written by the last
-// pre-migration deploy stays in the project directory with the pre-migration values
-// in it, and the project directory is in filesToBackup, so it keeps riding out in
-// every POST /backup.
+// createEnvFile writes nothing when no literal pair is left, so the stack.env from the
+// last pre-migration deploy stays in the project directory with the old values, and it
+// is included in every POST /backup.
 //
-// Nothing here touches that file, neither unlinking nor truncating it. The operator is
-// told where the file is instead.
-//
-// The message does not tell the operator to delete the file, and deliberately so: the
-// firing condition cannot tell Portainer's own stack.env from the one a git-deployed
-// stack brings in its clone, which may be referenced by an env_file: directive and comes
-// back on the next pull anyway. Nothing removes the file either, so a webhook-deployed
-// stack prints this on every deploy; suppressing the repeat would take state this check
-// deliberately does not keep.
+// The file is not touched, and the message does not say to delete it: this check cannot
+// tell Portainer's stack.env from one a git-deployed stack brings in its clone. The
+// warning repeats on every deploy while the file exists.
 func (manager *ComposeStackManager) warnAboutStaleEnvFile(stack *portainer.Stack, literals []portainer.Pair) {
 	if len(stack.Env) == 0 || len(literals) > 0 {
 		return

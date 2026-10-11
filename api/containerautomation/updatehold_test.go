@@ -160,15 +160,9 @@ func heldCount(s *Service) int {
 	return len(s.updateHolds)
 }
 
-// TestClaimFirstSkipLogIsOncePerHold pins the once-per-hold Info mechanic
-// directly, because nothing else does: a hold outlives many heal ticks, so
-// reporting every suppressed tick at Info would flood the log with one line per
-// tick for the whole recreate plus gate window, and the flood would still leave
-// every other test in this package green.
-//
-// The token belongs to the HOLD, not to the container: it is per key, and a fresh
-// hold on the same key starts unclaimed, so the next update over that container is
-// announced again rather than silenced by the previous one.
+// TestClaimFirstSkipLogIsOncePerHold checks that only the first suppressed tick
+// of a hold is claimed for Info, and that a fresh hold on the same key starts
+// unclaimed.
 func TestClaimFirstSkipLogIsOncePerHold(t *testing.T) {
 	const (
 		endpointID  = portainer.EndpointID(1)
