@@ -177,18 +177,11 @@ func (d *stackDeployer) StopRemoteSwarmStack(ctx context.Context, stack *portain
 // * wait for deployment to end
 // * gather deployment logs and bubble them up
 func (d *stackDeployer) remoteStack(ctx context.Context, stack *portainer.Stack, endpoint *portainer.Endpoint, operation StackRemoteOperation, opts unpackerCmdBuilderOptions) error {
-	// buildUnpackerCmdForStack refuses a secret reference, but it is called at the end of
-	// this function: by then the git config has been read, a docker client created and
-	// the unpacker image pulled, for a deploy that was never going to proceed. Refuse
-	// first instead - every entry point of this file goes through here, so one check
-	// covers them all.
+	// Refuse a secret reference before reading the git config, creating a docker client
+	// and pulling the unpacker image; every entry point of this file goes through here.
 	//
-	// Which is why the operation is looked up rather than indexed: funcmap[operation] on an
-	// unknown key yields the zero unpackerCmd, whose usesEnv is false, so the check would
-	// silently not run and the operation would only be refused further down, after the
-	// docker client and the image pull. Unreachable today - all eight operations are in the
-	// map - but "one check covers them all" is only true if an unknown operation cannot
-	// walk past it.
+	// The operation is looked up rather than indexed: funcmap[operation] on an unknown key
+	// yields the zero unpackerCmd, whose usesEnv is false, and would skip the check.
 	unpacker, err := unpackerCmdFor(operation)
 	if err != nil {
 		return err

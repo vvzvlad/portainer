@@ -114,14 +114,9 @@ func listenTCP(t *testing.T) (net.Listener, string) {
 
 // serveRaw answers every request on listener with response, byte for byte.
 //
-// A raw listener and not an http.Server, for two things an http.Server cannot do. It always
-// writes the canonical reason phrase for the code it is given, so a planted phrase can only
-// come from a listener that writes the status line itself - and, more sharply, it caps what
-// it will read: a followed redirect makes the next request's URI as long as the Location it
-// came from, and Go's own server rejects a request header over http.DefaultMaxHeaderBytes,
-// one mebibyte. At the sizes tested here that turns a leak into a polite 431 and a short
-// error, for a reason that has nothing to do with this package. Every size-leak test in this
-// file therefore goes through here; a probe built on httptest can be falsely green.
+// A raw listener, not an http.Server: an http.Server always writes the canonical reason
+// phrase, and it rejects request headers over one mebibyte with a 431, which would hide a
+// leak through a followed redirect. Every size-leak test in this file goes through here.
 func serveRaw(t *testing.T, listener net.Listener, response string) {
 	t.Helper()
 
@@ -179,12 +174,9 @@ func answerWithoutReading(t *testing.T, listener net.Listener, response string) 
 // serveOversizedBody answers with a 200 whose body is size bytes long, counting how many of
 // them it actually managed to write and closing done when it stops.
 //
-// The counter is the point. maxResponseBytes is enforced twice - by the io.LimitReader that
-// decides how much is READ, and by the length check that turns the result into a diagnosable
-// error - and only the second of those is visible in the returned message. A test that asserts
-// on the message therefore passes with the limit reader deleted. What the
-// reader does is stop the client short, and the only way to see that from outside is to ask
-// the server how far it got.
+// maxResponseBytes is enforced by an io.LimitReader and by a length check, and only the
+// latter shows in the returned message; the counter is how a test sees the reader stop the
+// client short.
 func serveOversizedBody(t *testing.T, listener net.Listener, size int) (*atomic.Int64, <-chan struct{}) {
 	t.Helper()
 
@@ -738,11 +730,8 @@ func TestFetch(t *testing.T) {
 	t.Run("refuses a credentialed endpoint instead of reaching it", func(t *testing.T) {
 		t.Parallel()
 
-		// A resolver that is down, unreachable or wedged is the commonest failure this
-		// feature has, and its error is persisted as the stack's deployment status message
-		// on every retry - so a credential in the endpoint used to need keeping out of that
-		// text. It is refused instead, and refused by New, which is earlier than any of it:
-		// no dial, no round trip, no error text to guard.
+		// A credential in the endpoint is refused by New, before any dial or round trip
+		// whose error text would be persisted as the deployment status message.
 		const (
 			user  = "Rk7nQw2Us3"
 			token = "Zt9mLr5Vb2nHd8"
@@ -906,20 +895,9 @@ func TestFetchRefusesRedirects(t *testing.T) {
 // transportLeakShapes are the five response shapes that make net/http report a failure by
 // quoting the header text the resolver wrote, each with marker planted inside that header.
 //
-// They are what a transport error has to be classified rather than wrapped for. Measured on
-// this package with the classification reverted, every one of them carried the marker into
-// the returned error whole:
-//
-//	bad Content-Length, 1 MiB      1048724 bytes
-//	bad Content-Length, 8 MiB      8388756 bytes
-//	duplicate Content-Length          4297 bytes
-//	Transfer-Encoding, 1 MiB       1048736 bytes
-//	malformed status line, 1 MiB   1048729 bytes
-//
-// The only ceiling underneath was net/http's MaxResponseHeaderBytes, 10 MiB. That error is
-// wrapped by api/exec into the stack's deployment status message, which Portainer persists
-// and StackInspect serves - the same channel the redirect refusal closed, reached here
-// without any redirect at all.
+// Wrapped rather than classified, each would carry the marker into the returned error whole,
+// bounded only by net/http's MaxResponseHeaderBytes (10 MiB), and api/exec persists that
+// error as the stack's deployment status message.
 func transportLeakShapes(marker string) []struct {
 	name     string
 	response string
@@ -1152,15 +1130,9 @@ func TestFetchClassifiesATransportFailure(t *testing.T) {
 	})
 }
 
-// TestFetchBoundsTheEndpointItNames pins the last unbounded term any error or log line of
-// this package carried.
-//
-// The endpoint is the operator's own configuration rather than resolver text, which is why it
-// is named at all - "the secret resolver could not be reached" does not say which resolver.
-// It is bounded because of where it goes, not
-// because of who wrote it: the transport error is returned by Fetch, wrapped by api/exec into
-// the stack's deployment status message, persisted, and served by StackInspect on every retry.
-// Measured with a mebibyte in PORTAINER_SECRET_RESOLVER: 1048698 bytes.
+// TestFetchBoundsTheEndpointItNames checks that the configured endpoint, named in transport
+// errors and log lines, is bounded: the transport error is persisted as the stack's
+// deployment status message.
 func TestFetchBoundsTheEndpointItNames(t *testing.T) {
 	// The global logger is swapped, so this test does not run in parallel.
 	buf := captureLog(t)
@@ -1278,21 +1250,14 @@ func TestFetchLogsARefusedRedirectTarget(t *testing.T) {
 			maxOutput: 1024,
 		},
 		{
-			// The shape that used to produce no diagnostic at all. http.Client.do parses
-			// the Location at the top of its redirect loop, before CheckRedirect, so this
-			// one never reaches Fetch as a response - and logRefusedRedirect, called from
-			// Fetch, never fired. It is reported from the transport now.
+			// http.Client.do parses the Location before CheckRedirect, so this one never
+			// reaches Fetch as a response and is reported from the transport. net/http's own
+			// error quotes the whole Location; only the catch-all classification keeps it out
+			// of the returned error.
 			//
-			// It also pins the margin refuseRedirects documents: net/http's own error for
-			// this case quotes the whole Location, and only the catch-all classification
-			// keeps it out of the error Portainer persists - which the per-case assertion
-			// on err.Error() below checks for every one of these.
-			//
-			// The ceiling is the higher one because there are two lines here, not one: the
-			// warning, plus the transport failure whose detail is net/http's own message
-			// quoting the Location - the channel maxTransportDetailBytes bounds, doing
-			// exactly what it is documented to do. So the marker is present in the log, in
-			// that field, bounded; what must not be there is the mebibyte.
+			// The ceiling is higher because two lines are logged: the warning, and the
+			// transport failure whose detail quotes the Location, bounded by
+			// maxTransportDetailBytes.
 			name:      "a hostile location that does not parse",
 			location:  "http://resolver.example:notaport/" + hostile,
 			requires:  []string{"308", "(unparsable location)"},
@@ -1567,11 +1532,8 @@ func TestNew(t *testing.T) {
 	t.Run("withholds the endpoint and keeps only the bounded inner reason", func(t *testing.T) {
 		t.Parallel()
 
-		// The pin for the errors.As -> errors.AsType rewrite on that branch. Both forms
-		// walk the same chain, match the same first *url.Error and assign the same field,
-		// so the resulting text has to be byte for byte identical - and this branch is the
-		// one where a *url.Error must never be printed whole, because it prints the URL it
-		// was handed with no masking of any kind.
+		// On this branch a *url.Error must never be printed whole: it prints the URL it
+		// was handed with no masking.
 		//
 		// The expectation is built from url.Parse's own error rather than hardcoded, so
 		// what is pinned is the transformation - keep urlErr.Err, sanitise and bound it,
@@ -1645,7 +1607,7 @@ func TestNew(t *testing.T) {
 			contains string
 		}{
 			{
-				// Parses, has no host, and used to be printed whole.
+				// Parses and has no host.
 				name:     "an http endpoint with no host",
 				endpoint: "http:///" + strings.Repeat("p", size),
 				contains: "no host",
@@ -1758,8 +1720,8 @@ func TestDefaultTimeoutMatchesTheDocumentedChain(t *testing.T) {
 	assert.Greater(t, DefaultTimeout, resolverRequestBudget)
 }
 
-// hostileResolverError is the payload the adversarial sweep persisted whole, inside
-// the 512-byte bound and therefore untouched by a control that only measures length.
+// hostileResolverError fits inside the 512-byte bound, so a length check alone does not
+// touch it.
 //
 // It is not a size attack. Every piece of it is aimed at a reader: two newlines and a forged
 // JSON record so that the message reads as several log lines of which the last is Portainer's
@@ -2141,9 +2103,8 @@ func TestFromEnv(t *testing.T) {
 	})
 
 	t.Run("logs the endpoint it was given and warns about plain HTTP", func(t *testing.T) {
-		// Stands alone because the test below - the credential one - can no longer reach
-		// these lines: a refused endpoint returns before either is written, so without this
-		// the plain-HTTP warning would have no cover at all.
+		// Separate from the credential test below, where the refused endpoint returns
+		// before the plain-HTTP warning is written.
 		t.Setenv(EndpointEnvVar, "http://resolver.example:9100")
 
 		buf := captureLog(t)
@@ -2164,8 +2125,8 @@ func TestFromEnv(t *testing.T) {
 		// it rather than the resolver being called unauthenticated and the stack deploying.
 		//
 		// Both halves are named separately: net/http strips a password from its own
-		// url.Error and leaves a username whole, so a token in the username position - the
-		// form that used to be documented - is the one nothing else would catch.
+		// url.Error and leaves a username whole, so a token in the username position is
+		// the one nothing else would catch.
 		const (
 			user  = "Rk7nQw2Us3"
 			token = "Zt9mLr5Vb2nHd8"

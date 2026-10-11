@@ -553,12 +553,7 @@ func Test_DeployRemoteComposeStack_refusesSecretReferencesBeforePulling(t *testi
 // whether remoteStack reached the git-config block, and answers with an error rather than by
 // crashing if it did.
 //
-// It replaces a nil dataStore, and the replacement is the whole point. A nil one did pin the
-// ordering - moving the gate below the git-config block made the test fail - but it failed by
-// dereferencing nil, and a panic does not fail one test, it takes the package's whole test
-// binary down. A regression in this one gate would therefore have hidden every other result
-// in api/stacks/deployments under CI, which is the opposite of what a pin is for. The counter
-// below is what goes red instead, with a message naming what happened.
+// A nil dataStore would panic instead and take down the whole package's test binary.
 //
 // Workflow().Read is the first thing GitSourceAndArtifactForStack does after its workflowID
 // check, so recording at the accessor and refusing at the read covers the block: nothing else
@@ -593,15 +588,9 @@ var errGitConfigWasRead = errors.New("the git config was read")
 
 // secretReferenceStack is a stack holding one literal variable and one reference.
 //
-// workflowID is a parameter because it decides what remoteStack does before it ever reaches
-// the docker client: a non-zero one sends it into the git-config block, which calls
-// workflows.GitSourceAndArtifactForStack and therefore trips gitConfigProbe. That is what
-// pins the refusal ahead of THAT block rather than merely somewhere in the function - with a
-// zero WorkflowID the block is skipped, so a reviewer could move the gate below it and the
-// test would stay green. The gated operations therefore use 1.
-//
-// The operations that are meant to walk past the gate use 0: they have to get as far as the
-// docker client for their own assertion to mean anything.
+// A non-zero workflowID sends remoteStack into the git-config block, which trips
+// gitConfigProbe; the gated operations use 1 to pin the refusal ahead of that block. The
+// operations meant to walk past the gate use 0 so they reach the docker client.
 func secretReferenceStack(workflowID portainer.WorkflowID) *portainer.Stack {
 	return &portainer.Stack{
 		Name:       "arcextension",
@@ -619,11 +608,9 @@ func secretReferenceStack(workflowID portainer.WorkflowID) *portainer.Stack {
 // reached: reading the git config, creating a docker client and pulling the unpacker
 // image, all for a deploy that was never going to proceed.
 //
-// Both halves of that ordering are load bearing and both are enforced. The git config comes
-// first and is reached only for a stack with a WorkflowID, so the refused stack carries one
-// and gitConfigProbe turns an ungated call into a counted, asserted failure. The docker
-// client comes next, and the endpoint can never yield one, so a call that gets that far
-// fails with an unrelated error instead and these assertions go red.
+// The refused stack carries a WorkflowID so gitConfigProbe counts an ungated git-config
+// read, and the endpoint can never yield a docker client, so a call that gets that far
+// fails with an unrelated error.
 func Test_remoteStack_refusesSecretReferencesBeforeTouchingTheEnvironment(t *testing.T) {
 	t.Parallel()
 
@@ -725,12 +712,9 @@ func Test_remoteStack_refusesSecretReferencesBeforeTouchingTheEnvironment(t *tes
 // Test_remoteStack_refusesAnUnknownOperation pins the explicit lookup that the gate above
 // depends on.
 //
-// funcmap[operation] on an unknown key yields the zero unpackerCmd, whose usesEnv is false -
-// so with an indexing expression the secret-reference check silently does not run, and the
-// operation is only refused at the very end of remoteStack, after the git config has been
-// read, a docker client created and the unpacker image pulled. Unreachable through the eight
-// exported entry points, all of which pass a constant, and pinned anyway so that "one check
-// covers them all" holds by construction rather than by inventory.
+// funcmap[operation] on an unknown key yields the zero unpackerCmd, whose usesEnv is false,
+// so indexing would silently skip the secret-reference check. Unreachable through the eight
+// exported entry points, which all pass a constant.
 func Test_remoteStack_refusesAnUnknownOperation(t *testing.T) {
 	t.Parallel()
 
@@ -1012,10 +996,8 @@ func Test_ComposeStackDeploymentConfig_Deploy_refusesAReferenceWithoutAnEndpoint
 // four characters each, a backslash and U+2028 as two per input byte, and an ordinary printable
 // as one. See secretresolver.TruncateName.
 //
-// "Non-printable multi-byte rune" is not a class with one cost, and U+2028 does not speak for
-// it: a C1 control prints as \u00NN, three per input byte, and an astral non-printable as
-// \UNNNNNNNN, two and a half. U+2028 is here because it is the one that ties the backslash at
-// two, not because it represents the others.
+// U+2028 is not representative of all non-printable multi-byte runes (a C1 control costs
+// three per input byte, an astral one two and a half); it ties the backslash at two.
 type hostileFiller struct {
 	// name goes into the subtest name.
 	name string
@@ -1026,11 +1008,8 @@ type hostileFiller struct {
 
 // hostileFillers are the classes the ceiling below has to hold against, worst first.
 //
-// The fixture is parameterised over them because 'A', which this test used to use on its own,
-// is the cheapest of them: %q leaves it alone. A ceiling asserted only against 'A' therefore
-// passes for a reason unrelated to what it claims - the non-administrator gate measures 690
-// bytes filled with 'A' against 2136 filled with invalid UTF-8 - which is the exact failure
-// mode this feature exists to catch.
+// An ordinary printable such as 'A' is the cheapest class (%q leaves it alone), so a ceiling
+// asserted only against it would pass far below the worst case.
 var hostileFillers = []hostileFiller{
 	{name: "an invalid UTF-8 byte", text: "\xff"},
 	{name: "NUL", text: "\x00"},
@@ -1052,17 +1031,9 @@ func hostileName(prefix, filler string) string {
 
 // worstCaseQuotedNameBytes is the most one bounded name can occupy once %q has printed it.
 //
-// Measured from the production helper rather than written down, so that it tracks maxNameBytes
-// and the truncation marker without this file knowing either number. A name of nothing but
-// invalid UTF-8 is the worst input TruncateName can be handed, and strconv.Quote is what fmt's
-// %q calls for a string. It comes to 1029 bytes today - 4 per bounded byte, plus the marker and
-// the two quotes - against 261 for a bounded name of 'A'.
-//
-// One assumption remains, and it is what the mebibyte buys: the probe has to be LONGER than
-// maxNameBytes. Below that, TruncateName hands it straight back, no marker is appended, and the
-// figure stops tracking the bound - a 1 KiB probe froze at 4098 for every maxNameBytes of 1024
-// or more, and the tests below go red at 2048. 1<<20 is the same mebibyte hostileName already
-// uses and exceeds any plausible value of maxNameBytes; at today's 256 it measures identically.
+// Measured from the production helper so it tracks maxNameBytes and the truncation marker. A
+// name of invalid UTF-8 is the worst input (4 printed bytes per byte under %q). The probe must
+// be longer than maxNameBytes, or TruncateName returns it unchanged; 1<<20 is far above it.
 var worstCaseQuotedNameBytes = len(strconv.Quote(secretresolver.TruncateName(strings.Repeat("\xff", 1<<20))))
 
 // maxFixedMessageBytes is the allowance for everything in one of these messages that is not a
@@ -1108,22 +1079,10 @@ func assertBoundedAndEscaped(t *testing.T, err error, wantNamed ...string) {
 	}
 }
 
-// Test_secretRefusals_boundAndEscapeHostileNames pins both halves of the fix at every site in
-// this package that names a stack or a variable in a refusal.
-//
-// The channel: stackutils.UpdateStackStatusFromDeploymentResult writes these messages verbatim
-// into Stack.DeploymentStatus[].Message, which Portainer persists and StackInspect serves back
-// to operators and to agents. Neither name is validated on the way in - a stack's Env comes
-// straight out of the request body and updateComposeStackPayload.Validate looks only at the
-// compose file - so both the length and the bytes are the caller's.
-//
-// Measured on a copy with these inputs before the fix, a mebibyte in the variable name and an
-// ordinary stack name: refuseSecretReferencesForNonAdmin 1048755 bytes, getEnv 1048710,
-// checkNoSecretReferences 1048732, each with the NUL, the ESC and the newline intact. A
-// mebibyte in both names put the first and the third over 2 MiB.
-//
-// Reverting either half of the fix at any one site fails this test at that site: dropping the
-// bound fails the size assertion, dropping %q fails the control-byte assertion. See
+// Test_secretRefusals_boundAndEscapeHostileNames checks that every site in this package that
+// names a stack or a variable in a refusal both bounds the name (size assertion) and quotes it
+// with %q (control-byte assertion). These messages are persisted verbatim in
+// Stack.DeploymentStatus[].Message, and neither name is validated on the way in. See
 // secretresolver.TruncateName.
 //
 // Every site is run once per byte class in hostileFillers, because the bound applies to the
@@ -1134,10 +1093,6 @@ func assertBoundedAndEscaped(t *testing.T, err error, wantNamed ...string) {
 //	U+2028               gate 1168   unpacker 1145
 //	backslash            gate 1172   unpacker 1149
 //	ordinary printable   gate  690   unpacker  667
-//
-// The last row is what this fixture used to assert on its own, and 690 bytes clears a 2048
-// ceiling three times over without ever approaching it - while the first row does not clear it
-// at all.
 func Test_secretRefusals_boundAndEscapeHostileNames(t *testing.T) {
 	t.Parallel()
 

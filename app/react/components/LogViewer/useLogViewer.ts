@@ -45,11 +45,7 @@ export interface UseLogViewerOptions {
   autoRefresh: boolean;
   /**
    * User's "Timestamp" toggle — display the RFC3339 prefix on each line.
-   * NOTE (known follow-up): toggling this currently restarts the stream (it is
-   * an effect dependency), matching the legacy AngularJS controller which also
-   * re-requested on a `displayTimestamps` change. Re-formatting the existing
-   * buffer in place instead (the prefix is already parsed by the processor)
-   * would avoid the refetch but is a larger change; deferred for parity.
+   * Toggling this restarts the stream (it is an effect dependency).
    */
   withTimestamps: boolean;
   /** Historical-backfill tail request ("Lines" input). */
@@ -72,11 +68,10 @@ function toUnixSeconds(date: Date | null): number | undefined {
 }
 
 /**
- * Drives the log data for the viewer. This is a faithful port of the legacy
- * `containerLogsController.js` streaming logic (byte-level demux via
+ * Drives the log data for the viewer: byte-level demux via
  * `createLogStreamProcessor`, `timestamps=1` always requested internally so a
  * reconnect can resume from the exact log timestamp, reconnect dedup on the
- * boundary line, abort on unmount) with two additions:
+ * boundary line, abort on unmount. In addition:
  *
  *  - `autoRefresh` off fetches a single bounded snapshot (`follow=0`) for the
  *    selected range/lines instead of following, and does not reconnect;

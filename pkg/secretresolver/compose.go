@@ -23,12 +23,9 @@ import (
 // carries a placeholder, exactly as a hand-written ${VAR} body would.
 //
 // The rewrite is a byte splice over the original text rather than a marshal of the parsed
-// document. A compose file carries comments, key order, indentation and quoting style that
-// a round trip through a YAML marshaller silently rewrites, and a deploy that reformats the
-// operator's file is a deploy that cannot be diffed against what the operator wrote.
-// Everything outside a reference scalar is therefore byte-identical, and anything the splice
-// cannot place exactly - a block scalar, a multi-line, tagged or anchored one - is an error
-// naming line and column rather than a reference quietly left as it stands.
+// document, so comments, key order, indentation and quoting stay byte-identical outside a
+// reference scalar. Anything the splice cannot place exactly - a block scalar, a multi-line,
+// tagged or anchored one - is an error naming line and column.
 
 // ComposePlaceholderPrefix begins the name of every compose variable a rewritten body
 // interpolates in place of a reference. The caller appends an index to it, one per
@@ -170,12 +167,9 @@ func scanComposeBody(content []byte) ([]composeHit, error) {
 	// is about to define - reading another reference's resolved value, or shadowing the
 	// placeholder of its own. Refused rather than resolved either way round.
 	//
-	// Checked before the marker below and not after it, because the placeholders are numbered
-	// across the WHOLE stack and injected through one libstack.Options.Env shared by every
-	// file of the project: a file that carries no reference of its own still interpolates
-	// against that same environment, so "${__PORTAINER_SECRET_0}" written into such a file
-	// would read the resolved value of whichever reference happened to be numbered 0 in a
-	// neighbouring file. Returning early on the marker would leave exactly that file unchecked.
+	// Checked before the marker below: placeholders are numbered across the whole stack and
+	// share one libstack.Options.Env, so a file with no reference of its own could still read
+	// a neighbouring file's resolved value.
 	if bytes.Contains(content, []byte(ComposePlaceholderPrefix)) {
 		return nil, fmt.Errorf("compose file contains %s, which is reserved for the placeholders an inline secret reference is rewritten to", ComposePlaceholderPrefix)
 	}
@@ -286,10 +280,8 @@ func classifyComposeScalar(value string) (prefix, ref string, ok bool) {
 // reports whether there was one, in both shapes a value can be written in: the whole scalar,
 // and the value of a "NAME=" list-form entry.
 //
-// Both shapes and not just the first, because classifyComposeScalar accepts both for a
-// reference: without this, "FOO: secret::x" would deploy the literal "secret:x" while
-// "- FOO=secret::x" - the same variable, written as a sequence entry rather than a mapping -
-// would deploy "secret::x", and the escape would mean two different things two lines apart.
+// Both shapes, because classifyComposeScalar accepts both for a reference, so "FOO: secret::x"
+// and "- FOO=secret::x" must unescape the same way.
 func composeUnescapeScalar(value string) (string, bool) {
 	if unescaped := Unescape(value); unescaped != value {
 		return unescaped, true
@@ -356,13 +348,10 @@ func composeByteOffset(content []byte, lineStarts []int, line, column int) (int,
 // extent cannot be established for exactly is an error naming line and column - never a
 // reference silently left in the deployed file as its own text.
 //
-// The messages say the scalar BEGINS WITH the marker rather than that it is a reference, and
-// the difference is not pedantry: a block scalar carrying an embedded config file whose first
-// line happens to be "secret: something" arrives here too, and telling its author that their
-// config file is a malformed secret reference would send them looking in the wrong place.
-// Both ways out are named for the same reason - a reference and a literal written with the
-// escape are equally impossible to write as a block scalar, so an author who reads only half
-// the message would try the escape and fail again.
+// The messages say the scalar begins with the marker rather than that it is a reference: a
+// block scalar holding a config file whose first line is "secret: something" arrives here too.
+// Both ways out are named, since neither a reference nor an escaped literal can be a block
+// scalar.
 func composeTokenEnd(content []byte, start int, node *yaml.Node) (int, error) {
 	switch node.Style {
 	case 0, yaml.TaggedStyle:

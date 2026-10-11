@@ -19,27 +19,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUpdateEndpointRecreatesComposeStackMemberIndividually is the regression
-// guard for the reported bug: a member of a PORTAINER-MANAGED compose stack that
-// is in scope and outdated must be recreated INDIVIDUALLY via the standalone
-// recreate path (like Watchtower), never redeployed as a whole stack.
+// TestUpdateEndpointRecreatesComposeStackMemberIndividually checks that an
+// outdated member of a Portainer-managed compose stack is recreated individually
+// via updateStandalone, never redeployed as a whole stack.
 //
-// The test store is seeded with a real Portainer Docker Compose stack whose name
-// matches the container's com.docker.compose.project label and endpoint, so the
-// container is a genuine managed stack member — exactly the case that used to
-// trigger a whole-stack redeploy under the old routing. Under the fix it flows
-// straight to updateStandalone, which calls containerService.Recreate for that
-// single container.
-//
-// It drives the real updateEndpoint against a mock Docker daemon (the production
-// ClientFactory reaches loopback because SSRF filtering is inactive when the
-// global dialer is unconfigured, as in a plain unit test). The individual recreate
-// is deliberately failed at the image pull (the mock daemon rejects
-// POST /images/create), which keeps the test fully offline and avoids faking the
-// entire successful recreate sequence. That is sufficient to lock in the routing:
-// updateStandalone emits EventUpdateFailed ONLY after it has invoked Recreate for
-// this container — so the single per-container event proves the managed stack
-// member reached the individual recreate path rather than a whole-stack redeploy.
+// It drives the real updateEndpoint against a mock Docker daemon that rejects the
+// image pull, keeping the test offline. updateStandalone emits EventUpdateFailed
+// only after it has invoked Recreate, so that single per-container event proves
+// the individual recreate path was taken.
 func TestUpdateEndpointRecreatesComposeStackMemberIndividually(t *testing.T) {
 	const (
 		containerID = "web-1"
@@ -103,8 +90,7 @@ func TestUpdateEndpointRecreatesComposeStackMemberIndividually(t *testing.T) {
 
 	// Seed a real Portainer-managed Docker Compose stack whose name matches the
 	// container's compose project label on this endpoint, so the container is a
-	// genuine managed stack member (the case that used to trigger a whole-stack
-	// redeploy), not an externally-managed compose container.
+	// genuine managed stack member, not an externally-managed compose container.
 	require.NoError(t, store.Stack().Create(&portainer.Stack{
 		ID: 1, Name: "regression-stack", Type: portainer.DockerComposeStack, EndpointID: 1,
 	}))
@@ -128,10 +114,8 @@ func TestUpdateEndpointRecreatesComposeStackMemberIndividually(t *testing.T) {
 	s.updateEndpoint(endpoint, ScopeAll, updateOptions{})
 
 	// Exactly one per-container event, and it is the standalone recreate outcome for
-	// this managed stack member. Under the old routing this member would have gone to
-	// the whole-stack redeploy path (a different flow), so the single per-container
-	// recreate event is the real discriminator; StackID staying zero is a secondary
-	// confirmation that no stack-scoped redeploy was taken.
+	// this managed stack member; StackID staying zero confirms that no stack-scoped
+	// redeploy was taken.
 	require.Len(t, rec.events, 1, "the managed stack member is recreated individually, emitting one per-container event")
 	require.Equal(t, EventUpdateFailed, rec.events[0].Kind)
 	require.Equal(t, containerID, rec.events[0].ContainerName)
@@ -144,14 +128,10 @@ func TestUpdateEndpointRecreatesComposeStackMemberIndividually(t *testing.T) {
 		"a recreated stack member carries its compose project name in StackName")
 }
 
-// TestUpdateStandaloneReportsAContainerLeftDown locks in the honesty of the
-// auto-update notification across the three outcomes a failed recreate has. An
-// ordinary failure ends with the original running exactly as before, so the old
-// wording stands; a *docker.RestoreError means the restore did not fully land,
-// and its OriginalRunning decides whether the operator is told about an outage
-// (the reported #36 case, where a service stayed Exited while the notification
-// only said the update had failed) or about a container that came back without
-// its name or its networks and will not fix itself.
+// TestUpdateStandaloneReportsAContainerLeftDown checks the auto-update
+// notification for the outcomes of a failed recreate: an ordinary failure (the
+// original runs as before), and a *docker.RestoreError whose OriginalRunning
+// decides between an outage and a container running without its name or networks.
 func TestUpdateStandaloneReportsAContainerLeftDown(t *testing.T) {
 	recreateErr := errors.New("start container error: boom")
 

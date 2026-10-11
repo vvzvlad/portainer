@@ -102,22 +102,13 @@ func (config *ComposeStackDeploymentConfig) Deploy(ctx context.Context) error {
 // "." or "~"), while the value it resolves to at deploy time can be "/:/host" and become a
 // real bind mount the policy would have refused.
 //
-// Closing the divergence properly would mean resolving secrets for validation as well,
-// which puts the vault on the path of every stack save rather than every deploy. Refusing
-// the deploy closes the half that matters and only for the users the policy applies to:
-// an administrator is not gated, because no policy is being evaded there. Fail closed -
-// the refusal does not depend on an endpoint being present, since a missing endpoint
-// means no policy check ran at all. See docs/secret-resolver.md §3.11, which also records
-// what stays diverged: ValidateComposeURLs (the SSRF policy) applies to every user, so an
-// admin gate cannot fix that half.
+// Administrators are not gated, since the policy does not apply to them. The refusal does
+// not depend on an endpoint being present (fail closed). See docs/secret-resolver.md §3.11,
+// which also records that ValidateComposeURLs (the SSRF policy) stays diverged for every
+// user.
 //
-// Both names are bounded and quoted on the way into the message, and this is the site where
-// that matters most: this refusal fires precisely FOR a user who is not an administrator -
-// the lowest-privileged actor in the feature's threat model, and the one the gate exists to
-// contain - while the resolver's own text, from an adjacent component we run, has been
-// sanitised since round 10. A mebibyte of NUL and ESC in a variable name put 1048755 bytes
-// into Stack.DeploymentStatus[].Message here, control bytes intact, for exactly that user.
-// See secretresolver.TruncateName for the class and for why %q alone is not the fix.
+// Both names are bounded and quoted in the message, since this refusal fires for the
+// lowest-privileged user; see secretresolver.TruncateName.
 func refuseSecretReferencesForNonAdmin(stack *portainer.Stack, fileService portainer.FileService) error {
 	for _, pair := range stack.Env {
 		if secretresolver.IsReference(pair.Value) {

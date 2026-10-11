@@ -286,15 +286,12 @@ describe('timestamps (always requested, optionally displayed)', () => {
     expect(lines.map((l) => l.line)).toEqual(['fresh']);
   });
 
-  // F10: a SECOND reconnect at the same nanosecond timestamp must not re-emit
+  // A second reconnect at the same nanosecond timestamp must not re-emit
   // duplicates. Lines A and B share ts T; the connection drops after only A was
   // shown. Reconnect #1 (boundary set [A]) redelivers A,B -> drops A, keeps B,
   // and — because the processor seeds its boundary state from the resume
-  // params — its boundary set becomes [A, B] (A is NOT forgotten). If a second
-  // reconnect happens at the same T before any newer-ts line arrives, it carries
-  // [A, B] forward and drops BOTH redelivered lines (no duplicate). Without the
-  // seeding, reconnect #1's boundary set would be just [B], and reconnect #2
-  // would fail to recognise A as a duplicate and re-emit both A and B.
+  // params — its boundary set becomes [A, B]. A second reconnect at the same T
+  // carries [A, B] forward and drops both redelivered lines.
   it('does not duplicate lines on a second reconnect at the same nanosecond timestamp', () => {
     const tsShared = '2024-01-01T00:00:00.000000005Z';
 

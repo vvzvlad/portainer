@@ -171,7 +171,7 @@ func (n webhookNotifier) deliver(webhookURL, message string) {
 
 // formatMessage builds the human-readable message for an event. It resolves the
 // environment name from the endpoint and the stack name from the stack via the
-// datastore, mirroring the maintainer's example:
+// datastore:
 //
 //	Environment | docker-01
 //	Stack [cache-demo]

@@ -206,14 +206,11 @@ export function StackEditorTabInner({
       // genuinely older version sets it. See resolveRollbackTarget.
       const rollbackTarget = resolveRollbackTarget(newVersion, versions);
       if (rollbackTarget === undefined) {
-        // Returning to the current version: restore the current file content so
-        // the editor matches the selector. Otherwise the previously-viewed older
-        // version's content would remain in the buffer (useVersionedStackFile
-        // does not fetch when rollbackTo is undefined) and get deployed as a new
-        // version. initialValues.stackFileContent is the current stack file
-        // loaded at page init. This flows through the CodeEditor `value` prop as
-        // an external change, so it does not re-trigger handleContentChange and
-        // rollbackTo stays undefined.
+        // Returning to the current version: restore the current file content,
+        // since useVersionedStackFile does not fetch when rollbackTo is undefined
+        // and the older version's content would otherwise be deployed. This flows
+        // through the CodeEditor `value` prop as an external change, so it does
+        // not re-trigger handleContentChange and rollbackTo stays undefined.
         setFieldValue('stackFileContent', initialValues.stackFileContent);
       }
       setFieldValue('rollbackTo', rollbackTarget);

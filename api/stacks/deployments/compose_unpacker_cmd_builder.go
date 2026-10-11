@@ -95,11 +95,8 @@ func (d *stackDeployer) buildUnpackerCmdForStack(stack *portainer.Stack, operati
 	registriesStrings := generateRegistriesStrings(opts.registries, d.dataStore)
 
 	// The environment is built - and a secret reference refused - only for the
-	// operations that actually pass it on. Refusing it for all of them would leave a
-	// stack that has migrated to references impossible to undeploy or stop through this
-	// path: the user migrates the stack, finds the deploy unsupported here, and can then
-	// no longer even clean it up. Removal needs no values, so it must not be gated on
-	// resolving them.
+	// operations that pass it on, so a stack using references can still be undeployed
+	// or stopped through this path.
 	var envStrings []string
 
 	if cmd.usesEnv {

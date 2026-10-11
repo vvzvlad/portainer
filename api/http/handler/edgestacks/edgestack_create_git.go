@@ -177,19 +177,10 @@ func (handler *Handler) storeManifestFromGitRepository(ctx context.Context, tx d
 		return "", "", "", err
 	}
 
-	// The three entry points that take a body inline - create from string, create from file,
-	// update - run stackutils.ValidateEdgeStackComposeContent over it. This one never sees a
-	// body until the clone lands, so the same refusal is applied here, after the clone and
-	// before the file is handed on as the stack's manifest. Without it a reference written
-	// into a compose file in a git repository would be shipped verbatim to an agent that has
-	// no resolver, which is the one outcome the refusal exists to prevent.
-	//
-	// Only the secret-reference half of that validator, not its SSRF body check: this path has
-	// never run the latter, and turning it on here would refuse git-deployed edge stacks that
-	// deploy today for a reason that has nothing to do with this feature.
-	//
-	// Before the deployment-type switch, so a Kubernetes manifest is scanned too, as it is by
-	// the inline validator.
+	// Refuse secret references in the cloned file, as the inline entry points do via
+	// stackutils.ValidateEdgeStackComposeContent: an edge agent has no resolver. Only the
+	// secret-reference check is applied here, not that validator's SSRF body check. It runs
+	// before the deployment-type switch so Kubernetes manifests are scanned too.
 	content, err := handler.FileService.GetFileContent(projectPath, repositoryConfig.ConfigFilePath)
 	if err != nil {
 		return "", "", "", fmt.Errorf("unable to read the stack file of the cloned repository: %w", err)

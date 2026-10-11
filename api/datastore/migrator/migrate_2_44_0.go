@@ -18,12 +18,10 @@ import (
 // history with a single "migrated" entry.
 //
 // The version N to ensure on disk is the stack's CURRENT DB StackFileVersion, or 1 for a fresh,
-// never-versioned stack (StackFileVersion==0). This is what heals stacks that already carry
-// StackFileVersion>0 in the DB (from EE↔CE edition switches, DB restores/imports or older
-// builds) yet still have their files sitting ONLY at the flat base path compose/{id}/<files>
-// with no v{N} directory: GET /stacks/{id}/file?version=N would 500 for those because it reads
-// compose/{id}/v{N}/<files>. The migration materializes the missing v{N} folder from the base
-// files.
+// never-versioned stack (StackFileVersion==0). A stack with StackFileVersion>0 whose files sit
+// only at the flat base path compose/{id}/<files> (EE↔CE switches, DB restores) gets the missing
+// v{N} folder materialized from the base files, since GET /stacks/{id}/file?version=N reads
+// compose/{id}/v{N}/<files>.
 //
 // The migration is idempotent (a COMPLETE current v{N} folder on disk is adopted without moving
 // files or touching data) and resilient: git/kubernetes stacks and stacks whose base files are

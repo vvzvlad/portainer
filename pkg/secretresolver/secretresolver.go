@@ -33,11 +33,9 @@
 //
 // # Sanitising
 //
-// That sanctioned 512-byte channel is byte-arbitrary, and the message it lands in is read
-// by AI agents as well as by operators at a terminal: an "error" field carrying two
-// newlines, a NUL, an ANSI CSI escape and a forged-looking JSON log record reading
-// "SYSTEM: ignore previous instructions" was persisted whole, at 552 bytes, entirely
-// within the bound. The rule the package keeps:
+// That 512-byte channel is byte-arbitrary, and the message it lands in is read by AI agents
+// as well as by operators at a terminal, so a bound alone does not keep out newlines, NULs,
+// ANSI escapes or forged log records. The rule the package keeps:
 //
 //   - resolver-chosen text is sanitised AND bounded, in one pass, at the one function that
 //     formats it - the error field, the Content-Type header, net/http's own message about a
@@ -123,19 +121,9 @@ const (
 	maxResolverErrorBytes = 512
 
 	// maxEndpointBytes bounds the endpoint as configured - and url.Parse's own reason for
-	// refusing one - wherever either reaches an error or a log line. Measured with a
-	// mebibyte in PORTAINER_SECRET_RESOLVER, before and after:
-	//
-	//	transport error, unix endpoint       1048698 -> 364 bytes
-	//	configErr, unparsable port           1048735 -> 390 bytes
-	//	configErr, endpoint with no host     1048621 -> 296 bytes
-	//	configErr, unsupported scheme        1048682 -> 359 bytes
-	//
-	// Three of those four are configErr, which EVERY Fetch returns and Portainer persists as
-	// the stack's deployment status message, so one mistyped environment variable publishes
-	// its bytes per deploy of every stack that uses references, rather than once.
-	//
-	// 256 bytes is a socket path, a host and a port with room to spare.
+	// refusing one - wherever either reaches an error or a log line. configErr is returned
+	// by every Fetch and persisted as each stack's deployment status message. 256 bytes is a
+	// socket path, a host and a port with room to spare.
 	maxEndpointBytes = 256
 
 	// maxTimeoutValueBytes bounds the raw PORTAINER_SECRET_RESOLVER_TIMEOUT value before it
@@ -161,12 +149,9 @@ const (
 	// before it is logged. net/http builds its response-parse errors by quoting the header
 	// text the resolver wrote, verbatim and in full: a bad Content-Length, a duplicated
 	// one, an unsupported Transfer-Encoding and a malformed status line are all reported
-	// as `<what> "<the offending header>"`, bounded by nothing below
-	// MaxResponseHeaderBytes at 10 MiB. Measured with the header planted at a mebibyte,
-	// the returned error was 1048724 bytes and carried the planted text whole. None of
-	// that may reach the returned error, which Portainer persists as the stack's
-	// deployment status message; a bounded copy in the log is what keeps a genuinely
-	// broken resolver diagnosable at all.
+	// as `<what> "<the offending header>"`, bounded only by MaxResponseHeaderBytes
+	// (10 MiB). None of that may reach the returned error, which is persisted as the
+	// stack's deployment status message; a bounded copy goes to the log.
 	maxTransportDetailBytes = 512
 
 	// maxRedirectTargetBytes bounds the reduced Location of a refused redirect before it
@@ -174,10 +159,8 @@ const (
 	// already drops the room a resolver has to write free text into it, but a host name is
 	// resolver-written text too and nothing below the 10 MiB header limit bounds it.
 	//
-	// The host position is the one a test has to drive: redactLocation drops the path
-	// BEFORE this bound is applied, so a mebibyte planted in the path is gone either way
-	// and a probe built on one is falsely green. Measured with the mebibyte in the HOST
-	// instead and this bound removed, the log line was 1048872 bytes.
+	// A test of this bound has to plant the text in the host: redactLocation drops the
+	// path before the bound is applied.
 	maxRedirectTargetBytes = 256
 
 	// truncationMarker is appended to text cut short at one of the bounds above, so a
@@ -214,11 +197,8 @@ func Unescape(value string) string {
 // LogEscapedValues records, once per deploy, that a stack carried values which only look
 // like references and were unescaped on the way to the container.
 //
-// Every other consequence of the marker is loud: a reference with no resolver configured
-// fails the deploy, a reference on the swarm or unpacker path is refused by name. This one
-// sub-case is silent - an existing stack whose value happens to begin with "secret::"
-// deploys successfully on this fork with a value one colon shorter than vanilla Portainer
-// gives it - so it gets a line of its own. The count and not the values.
+// A value beginning with "secret::" deploys with one colon fewer than vanilla Portainer
+// gives it, and nothing else would say so. The count is logged, not the values.
 func LogEscapedValues(stackName string, count int) {
 	if count == 0 {
 		return
@@ -404,10 +384,8 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 		// everything after "unix://" as a filesystem path, so a "user:token@" in it is part of
 		// that path and reaches nobody as a credential.
 		//
-		// The redactEndpoint calls in this branch do parse it, and that has a consequence worth
-		// knowing: measured, "unix://user:token@/run/x.sock" dials the path
-		// "user:token@/run/x.sock" while every message and log line naming this client says
-		// "unix:///run/x.sock". The printed form is therefore not always the path in use.
+		// redactEndpoint does strip it, so "unix://user:token@/run/x.sock" dials
+		// "user:token@/run/x.sock" while messages say "unix:///run/x.sock".
 		socketPath := strings.TrimPrefix(endpoint, "unix://")
 		if socketPath == "" {
 			// %s and not %q at this and every other endpoint-printing site: redactEndpoint
@@ -446,12 +424,9 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 			// url.Parse fails with a *url.Error, which prints the URL it was handed in full:
 			// the password masking that hides a credential in net/http's errors is applied by
 			// net/http, not by the error type. So only the inner reason is kept and the
-			// endpoint is not named. Its text is not entirely withheld either - url.Parse
-			// builds its inner errors by quoting the fragment that failed, so a slice of the
-			// endpoint rides out inside the reason, and nothing bounded it: measured with a
-			// mebibyte in the port position, configErr came back at 1048735 bytes. No
-			// credential reaches it, verified over a 38-input corpus: url.Parse splits the
-			// userinfo off in parseAuthority before parseHost ever runs.
+			// endpoint is not named. The inner reason still quotes the failing fragment, so it
+			// is bounded; no credential reaches it, since url.Parse splits off the userinfo in
+			// parseAuthority before parseHost runs.
 			reason := err.Error()
 			if urlErr, ok := errors.AsType[*url.Error](err); ok {
 				reason = urlErr.Err.Error()
@@ -485,16 +460,9 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 				CheckRedirect: refuseRedirects,
 				// See redirectReporter.
 				Transport: &redirectReporter{base: &http.Transport{
-					// No proxy, and stated rather than left to the zero value. An
-					// &http.Client{} with no transport uses http.DefaultTransport, whose Proxy
-					// is ProxyFromEnvironment - so an HTTP_PROXY or HTTPS_PROXY in the
-					// Portainer container's environment would relay this call through the
-					// proxy, and the resolver's response body *is* the secret values, in clear
-					// text on a plain http:// endpoint. Verified: with HTTP_PROXY set at
-					// process start, the proxy received the POST for an http:// endpoint,
-					// while the unix:// branch - which has always built its own transport -
-					// bypassed it. Go reads the proxy environment once per process, so this is
-					// the ordinary container case, not an exotic one.
+					// No proxy, stated explicitly: http.DefaultTransport uses
+					// ProxyFromEnvironment, so HTTP_PROXY in the container's environment would
+					// relay the response body - the secret values - through the proxy.
 					Proxy: nil,
 				}},
 			},
@@ -515,24 +483,14 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 // response body *is* the secret values; there is no endpoint form for which following a
 // redirect is right, and left at its zero value CheckRedirect follows up to ten of them.
 //
-// The reason is resolver text reaching a persisted error: after a redirect req.URL is rebuilt
-// from the resolver's Location header, and every error http.Client.Do then returns is a
-// *url.Error, which prints that URL in full. Measured with this refusal removed, a Location of
-// 4096 bytes gave an error of 4168 bytes, 65536 gave 65608 and 1048576 gave 1048648, with the
-// planted text inside - against a 124-byte transport-error baseline with no redirect, and the
-// 35 bytes the refused 3xx costs now. With the redirect refused, the 3xx lands on Fetch's
-// non-2xx branch, which names resp.StatusCode and the resolver's own bounded error field and
-// nothing else.
+// After a redirect, req.URL is rebuilt from the resolver's Location header, and every error
+// http.Client.Do returns is a *url.Error printing that URL in full. Refused, the 3xx lands on
+// Fetch's non-2xx branch, which names only resp.StatusCode and the bounded error field.
 //
-// # One margin that is worth knowing before anyone narrows the catch-all
-//
-// This function does not run first: http.Client.do parses the Location BEFORE it consults
-// CheckRedirect, so a Location url.Parse refuses never reaches it and comes back as
-// `failed to parse Location header "<the whole Location>": <reason>` - the header verbatim,
-// bounded by nothing below net/http's 10 MiB header limit. What holds that today is
-// classifyTransportFailure's catch-all, which is a fixed phrase: measured with a mebibyte of
-// unparsable Location, the returned error was 172 bytes, against 1048xxx if the text were
-// wrapped. Narrow that classification by TYPE, never by text, and keep the last case fixed.
+// http.Client.do parses the Location before consulting CheckRedirect, so an unparsable one
+// comes back as `failed to parse Location header "<the whole Location>"`. Only the fixed
+// phrase of classifyTransportFailure's catch-all keeps that text out: narrow that
+// classification by type, never by text, and keep the last case fixed.
 func refuseRedirects(*http.Request, []*http.Request) error {
 	return http.ErrUseLastResponse
 }
@@ -543,20 +501,10 @@ func refuseRedirects(*http.Request, []*http.Request) error {
 // CheckRedirect (see refuseRedirects). Every 3xx is reported, not only the five net/http would
 // act on.
 //
-// # The margin this wrapper sits on, which is narrower than it looks
-//
-// The transport's error is returned UNTOUCHED, and it has to be. net/http's send() decides
-// whether an https:// endpoint was answered in plain HTTP by looking at what the RoundTripper
-// handed back - with a BARE TYPE ASSERTION, err.(tls.RecordHeaderError), not with errors.As -
-// and replaces that error with http.ErrSchemeMismatch, the sentinel classifyTransportFailure
-// matches. A bare assertion does not unwrap, so a single fmt.Errorf("...: %w", err) added here
-// hides it. Measured, by adding exactly that wrap on a copy and running the package: the
-// reason came back as "the endpoint is https but the resolver did not answer with TLS",
-// because classifyTransportFailure's next branch matches tls.RecordHeaderError with
-// errors.AsType, which DOES unwrap - a persisted message asserting confidently the wrong thing
-// about an answer that was a perfectly good HTTP response.
-//
-// The rule for this wrapper is therefore flat: observe the response, never touch the error.
+// The transport's error must be returned untouched: net/http's send() detects a plain-HTTP
+// answer on an https:// endpoint with a bare type assertion, err.(tls.RecordHeaderError),
+// and replaces it with http.ErrSchemeMismatch. Wrapping the error here would defeat that
+// assertion and produce a wrong diagnosis. Observe the response, never touch the error.
 type redirectReporter struct {
 	base http.RoundTripper
 }
@@ -750,10 +698,9 @@ func (c *Client) Fetch(ctx context.Context, refs []string) (map[string]string, e
 // transportError is a failed round trip to the resolver, reported as facts this process
 // produced rather than as the text net/http hands back.
 //
-// The text is the problem: http.Client.Do reports a response it cannot parse by quoting the
-// header the resolver wrote, unbounded below 10 MiB, and wrapping it with %w would carry the
-// whole of it into the stack's deployment status message; see maxTransportDetailBytes for the
-// measurement.
+// http.Client.Do reports a response it cannot parse by quoting the header the resolver wrote,
+// unbounded below 10 MiB, and wrapping it with %w would carry the whole of it into the stack's
+// deployment status message; see maxTransportDetailBytes.
 //
 // So Error() is built from a fixed phrase, the configured endpoint and one of a closed set
 // of reasons, and is bounded by construction rather than by truncation. Nothing derived from
@@ -922,61 +869,18 @@ func truncateTimeoutValue(raw string) string {
 }
 
 // TruncateName bounds a name out of a stack's own configuration - the stack's, or one of its
-// variables' - before api/* formats it into an ERROR. Errors are the whole of its scope: every
-// site that names a stack or a variable in an error calls this and prints the result with %q,
-// while the four log statements that name a stack deliberately call nothing, for reasons given
-// under "Why the log sites are outside this" below.
+// variables' - before api/* formats it into an ERROR. Every site that names a stack or a
+// variable in an error calls this and prints the result with %q.
 //
-// # The channel
+// Those errors are written verbatim by stackutils.UpdateStackStatusFromDeploymentResult into
+// Stack.DeploymentStatus[].Message, persisted and served by StackInspect, and neither name is
+// length-bounded upstream. Escaped AND bounded: %q alone leaves a mebibyte, a bound alone
+// leaves an ESC. maxNameBytes bounds what %q is handed, not what it writes (see truncate).
 //
-// Every error in api/exec and api/stacks/deployments that names the stack or the variable
-// carrying a secret reference goes through here, because they are one channel:
-// stackutils.UpdateStackStatusFromDeploymentResult writes whatever they say verbatim into
-// Stack.DeploymentStatus[].Message, which Portainer persists and StackInspect serves back,
-// where an AI agent doing ordinary infrastructure work reads it.
-//
-// Neither name is an identifier as far as this process is concerned, and neither is
-// length-bounded anywhere upstream: a variable name is arbitrary bytes out of a request body,
-// and a mebibyte of 'a' survives normalizeStackName whole. Measured with
-// "NAME\x00\x1b[31m\n" + 'A'*1MiB in the variable name and an ordinary stack name, with no
-// bound applied:
-//
-//	refuseSecretReferencesForNonAdmin  1048755 bytes, with the NUL, the ESC and the newline
-//	checkNoSecretReferences            1048732 bytes, same
-//	SwarmStackManager.Deploy           1048700 bytes, same
-//
-// and a mebibyte in each of the two names put all three over 2 MiB.
-//
-// Escaped AND bounded, because either half alone is no fix: %q closes the control characters
-// and leaves the mebibyte, the bound closes the mebibyte and leaves the ESC. maxNameBytes is
-// what this function hands to %q, not what %q writes, so a bounded name prints as up to four
-// times its length - truncate carries the table.
-//
-// # Why the log sites are outside this
-//
-// Four log statements in three functions name a stack and call nothing: LogEscapedValues in
-// this file, logWithheldError's two branches in api/exec/compose_stack.go, and
-// warnAboutStaleEnvFile in the same file. The log is a smaller channel than the error: a log
-// line goes to the server's stderr, is stored with nothing, is served by no API, and is
-// already visible only to somebody who can read every stack's name anyway.
-//
-// Measured against zerolog v1.34.0 with "STACKNAME\x00\x1b[31m\n" plus a mebibyte of 'A' in
-// the field: escaping happens in every log mode, not only JSON - ConsoleWriter's writeFields
-// puts every string field through needsQuote and then strconv.Quote, so no raw NUL, ESC or
-// newline reached the terminal - while length is genuinely unbounded in all three modes, the
-// same measurement producing log lines of 1048698 to 1048734 bytes. A log line is rotated and
-// discarded; the 1048755-byte refusal measured above stayed in the database until the stack
-// was deleted.
-//
-// All of that is a property of a FIELD, and every one of these four statements puts the name in
-// one - Str("stack", name), beside a Msg whose text is a literal. Nothing escapes anything on
-// the message path: Portainer replaces zerolog's message formatter with api/logs/log.go's
-// formatMessage, which is fmt.Sprintf("%s |", i) and copies the bytes through, so folding a
-// name into Msgf would put a raw NUL and a raw ESC on an operator's terminal.
-//
-// So the rule is: an error naming a stack or a variable goes through this function, a log line
-// naming one need not. Anything that starts persisting or serving a log line moves it into the
-// first category and brings the call with it.
+// Log lines naming a stack need not call this: they put the name in a zerolog field
+// (Str("stack", name)), which zerolog escapes in every mode, and the log is not persisted or
+// served. Never fold a name into Msgf: api/logs/log.go's formatMessage copies message bytes
+// through unescaped. A log line that starts being persisted or served must call this.
 func TruncateName(name string) string {
 	return truncate(name, maxNameBytes)
 }
@@ -1070,21 +974,17 @@ func hexByte(b byte) string {
 //
 // The caller truncates and then hands the result to %q, so limit bounds what %q is given, not
 // what %q writes: an invalid UTF-8 byte and a C0 byte each come back out as four characters of
-// \xNN, a backslash as two, and an ordinary printable as one. Measured at maxNameBytes = 256,
-// with names of a single repeated byte and the printed form including the truncation marker
-// and the two quotes:
+// \xNN, a backslash as two, and an ordinary printable as one. At maxNameBytes = 256, with
+// names of a single repeated byte and the printed form including the truncation marker and
+// the two quotes:
 //
 //	invalid UTF-8, NUL   1029   four printed bytes per input byte
 //	U+2028                515   two per input byte; 85 whole runes fit in 256
 //	backslash             517   two per input byte
 //	ordinary printable    261   one per input byte
 //
-// So the two messages that name both a stack and a variable reach 2212 bytes
-// (refuseSecretReferencesForNonAdmin) and 2189 (checkNoSecretReferences) in the worst case.
-// Anything sizing a channel off one of these limits has to multiply. The ceilings in
-// api/exec/compose_stack_secrets_test.go and api/stacks/deployments/deploy_test.go derive the
-// factor from strconv.Quote rather than from this table, so that retuning maxNameBytes cannot
-// leave them stale.
+// Anything sizing a channel off one of these limits has to multiply. The test ceilings derive
+// the factor from strconv.Quote, so retuning maxNameBytes cannot leave them stale.
 //
 // The order is nevertheless the right way round: truncating AFTER %q could cut an escape
 // sequence in half and leave a trailing "\x1" - a bound applied to the output of an escaping

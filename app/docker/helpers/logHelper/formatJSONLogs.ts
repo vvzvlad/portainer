@@ -32,8 +32,8 @@ export function formatJSONLine(
   const parsed: unknown = JSON.parse(text);
   // Only treat the line as a structured JSON log when it actually parses to a
   // plain object. A line serialized as a bare JSON string (e.g. `"hello"`)
-  // parses to a string, whose `Object.keys` is `['0','1',...]` — which used to
-  // render as `0=h 1=e ...`. Fall back to the plain-text path in that case.
+  // parses to a string, whose `Object.keys` is `['0','1',...]` and would render
+  // as `0=h 1=e ...`. Fall back to the plain-text path in that case.
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     const plain = rawText;
     return [{ line: plain, spans: [{ text: plain }] }];
