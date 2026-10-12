@@ -179,8 +179,9 @@ func (handler *Handler) storeManifestFromGitRepository(ctx context.Context, tx d
 
 	// Refuse secret references in the cloned file, as the inline entry points do via
 	// stackutils.ValidateEdgeStackComposeContent: an edge agent has no resolver. Only the
-	// secret-reference check is applied here, not that validator's SSRF body check. It runs
-	// before the deployment-type switch so Kubernetes manifests are scanned too.
+	// secret-reference check is applied here, not that validator's SSRF body check: this path
+	// has never run it, and enabling it would refuse git-deployed edge stacks that deploy
+	// today. It runs before the deployment-type switch so Kubernetes manifests are scanned too.
 	content, err := handler.FileService.GetFileContent(projectPath, repositoryConfig.ConfigFilePath)
 	if err != nil {
 		return "", "", "", fmt.Errorf("unable to read the stack file of the cloned repository: %w", err)

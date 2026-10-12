@@ -45,7 +45,9 @@ export interface UseLogViewerOptions {
   autoRefresh: boolean;
   /**
    * User's "Timestamp" toggle — display the RFC3339 prefix on each line.
-   * Toggling this restarts the stream (it is an effect dependency).
+   * Toggling this restarts the stream (it is an effect dependency). Follow-up:
+   * re-format the existing buffer in place instead (the processor already parses
+   * the prefix); deferred for parity with the legacy controller.
    */
   withTimestamps: boolean;
   /** Historical-backfill tail request ("Lines" input). */
