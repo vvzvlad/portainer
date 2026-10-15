@@ -41,3 +41,10 @@ this file covers only what the fork adds.
   the review", "since the incident") goes into the commit message.
 - This file stays under ~150 lines: only what an agent would get wrong without it. No decision
   history, incident logs or retelling of the code.
+
+## FPF
+
+Read a pattern through the `fpf` MCP (`read_pattern <ID>`) before applying it.
+
+- Changing auto-update, auto-heal or the recreate/restore path (`api/containerautomation/`, `api/docker/container.go`) — SYSE.41 "Deploy a Verified Software Artifact with the Target Configuration and Handle Partial Failure": after a failed or timed-out recreate, read what actually runs (image, configuration, which container holds the name) before restoring or retrying; a passing healthcheck shows liveness, not a working service.
+- Touching any path a resolved secret can travel (`pkg/secretresolver`, deploy status messages, `stack.env`, backups) — SYSE.28 "Place Qualified Controls in a Supported Platform-Use Path": put the check after the last operation where a value can enter a stored or printed string, and exercise it with a violating case and with the resolver unavailable.
