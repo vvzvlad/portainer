@@ -220,6 +220,15 @@ func (c *DigestClient) computeImageStatus(ctx context.Context, cli *dockerclient
 
 	if len(imageInspect.RepoDigests) > 0 {
 		digs = append(digs, ParseRepoDigests(imageInspect.RepoDigests)...)
+	} else if imageInspect.Descriptor != nil {
+		// The containerd image store drops the repo digests of an image together with
+		// its last tag, so a container left behind when its tag moved to a newer image
+		// would have nothing to compare and stay Skipped for as long as it runs. From
+		// API 1.48 that store reports the image's own index or manifest digest (its
+		// id, the digest its repo digests are built from) as the descriptor; the
+		// classic store keeps repo digests on untagged images and reports no
+		// descriptor.
+		digs = append(digs, imageInspect.Descriptor.Digest)
 	}
 
 	if len(imageInspect.RepoTags) > 0 {

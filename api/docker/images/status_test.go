@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	dockerclient "github.com/docker/docker/client"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 	imagetypes "go.podman.io/image/v5/types"
 )
@@ -98,6 +99,77 @@ func TestContainerImageStatusForcedBypassesCache(t *testing.T) {
 	// stubbed to fail, does not return the cached sentinel.
 	forced, _ := c.ContainerImageStatusForced(context.Background(), containerID, &portainer.Endpoint{}, "")
 	require.NotEqual(t, Updated, forced)
+}
+
+// TestContainerImageStatusUntaggedContainerdImage covers a container left on an
+// image whose tag moved to a newer build. The containerd image store reports such
+// an image with neither repo tags nor repo digests, only its descriptor, and the
+// status must come from comparing that digest with the registry, not be Skipped.
+func TestContainerImageStatusUntaggedContainerdImage(t *testing.T) {
+	const containerID = "untagged-containerd-container"
+	running := digest.Digest("sha256:" + strings.Repeat("d", 64))
+
+	for _, tc := range []struct {
+		name   string
+		remote digest.Digest
+		want   Status
+	}{
+		{name: "registry still serves the running image", remote: running, want: Updated},
+		{name: "registry serves a newer image", remote: digest.Digest("sha256:" + strings.Repeat("e", 64)), want: Outdated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v2/":
+					w.WriteHeader(http.StatusOK)
+				case strings.Contains(r.URL.Path, "/manifests/"):
+					w.Header().Set("Docker-Content-Digest", tc.remote.String())
+					w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
+					w.WriteHeader(http.StatusOK)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer registry.Close()
+
+			imageRef := strings.TrimPrefix(registry.URL, "https://") + "/repo/app:latest"
+			defer remoteDigestCache.Delete(imageRef)
+
+			docker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/containers/"+containerID+"/json"):
+					_ = json.NewEncoder(w).Encode(container.InspectResponse{
+						ContainerJSONBase: &container.ContainerJSONBase{ID: containerID, Image: running.String()},
+						Config:            &container.Config{Image: imageRef},
+					})
+				case strings.HasSuffix(r.URL.Path, "/images/"+running.String()+"/json"):
+					_ = json.NewEncoder(w).Encode(image.InspectResponse{
+						ID:         running.String(),
+						Descriptor: &ocispec.Descriptor{MediaType: ocispec.MediaTypeImageIndex, Digest: running},
+					})
+				default:
+					http.Error(w, "not found", http.StatusNotFound)
+				}
+			}))
+			defer docker.Close()
+
+			cli, err := dockerclient.NewClientWithOpts(
+				dockerclient.WithHost(docker.URL),
+				dockerclient.WithHTTPClient(http.DefaultClient),
+			)
+			require.NoError(t, err)
+
+			c := &DigestClient{
+				clientFactory: fakeClientFactory{cli: cli},
+				sysCtx:        &imagetypes.SystemContext{DockerInsecureSkipTLSVerify: imagetypes.OptionalBoolTrue},
+			}
+			defer EvictImageStatus(running.String())
+
+			got, err := c.ContainerImageStatus(context.Background(), containerID, &portainer.Endpoint{}, "")
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
 }
 
 // TestCheckStatusForcedBypassesRemoteDigestCache proves the forced re-check also
